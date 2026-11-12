@@ -37,7 +37,7 @@ import {
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
 import type { Task } from '@craft-agent/shared/tasks'
-import { checkAgreedPlanAppend, readJournal, appendJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatPauseBrief, formatUnreportedBrief, formatNextLegBrief, formatDispatchTaskContext, nextLeg, stepParent, normalizeSpec, normalizeTrigger, undeliveredQuestions, allDecisions } from '@craft-agent/shared/tasks'
+import { checkAgreedPlanAppend, readJournal, appendJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatPauseBrief, formatUnreportedBrief, formatDispatchTaskContext, stepParent, normalizeSpec, normalizeTrigger, undeliveredQuestions, allDecisions } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -1479,6 +1479,15 @@ export interface ManagedSession {
   supervisorLane?: 'user' | 'task'
   taskId?: string
   /**
+   * Sections of this task the session is responsible for.
+   *
+   * The dispatcher reads it to decide whether an existing session can take the next section
+   * instead of spawning a new one: a session opened for 1.1 and a later default-agent section
+   * belong to the same executor, so the second can continue in it. Growing this is how the
+   * record answers 「这个会话负责到哪」.
+   */
+  taskScope?: { taskId: string; outlineId?: string; stepIds: string[] }
+  /**
    * A task the user lane just registered that this session (the working lane) was woken
    * to take over. While it is set and fresh, `task_create` is refused: the record already
    * exists, and creating a second one for the same request splits the trail — the scope,
@@ -2238,6 +2247,13 @@ export class SessionManager implements ISessionManager {
       }
       sessionRuntimeHooks.onSessionStarted()
     } else if (was && !processing) {
+      // Reset the source-startup claim BEFORE anything in this branch can start a
+      // new turn. The held-notice replay below (supervisorNotices.take → sendMessage)
+      // claims sourceTurnStarting synchronously; resetting it after setProcessing
+      // returned (as onProcessingStopped used to do) stomped that claim, letting a
+      // concurrent system message become a second owner — two chats, one aborted,
+      // and the survivor's output lost (T-2, 2026-11-12).
+      managed.sourceTurnStarting = false
       sessionRuntimeHooks.onSessionStopped()
       // A turn ending is the event the watchdog's rules are about: "the task is
       // running, its executor has stopped, nothing was filed". That is true the
@@ -5838,6 +5854,7 @@ export class SessionManager implements ISessionManager {
          */
         ...(managed.supervisorLane ? { supervisorLane: managed.supervisorLane } : {}),
         taskId: managed.taskId,
+        ...(managed.taskScope ? { taskScope: managed.taskScope } : {}),
         ...(managed.toolScope ? { toolScope: managed.toolScope } : {}),
         // Assembled here, once, for this session: the tool table is part of the
         // prompt, so it must not be recomputed while the conversation runs.
@@ -6296,13 +6313,27 @@ export class SessionManager implements ISessionManager {
           restructurePlan: async (identifier, request) => {
             const service = this.getTasks(managed.workspace.id)
             const task = service.get(identifier)
-            if (!task) return { ok: false, error: `task not found: ${identifier}` }
+            if (!task) {
+              const known = service.list().map((t) => t.id)
+              return {
+                ok: false,
+                error:
+                  `找不到任务 ${identifier}。` +
+                  (known.length
+                    ? `当前有这些任务：${known.join('、')}。先用 task_get 核对再操作。`
+                    : '当前工作区没有任务。'),
+              }
+            }
             // Same ownership rule as updatePlan: a session keeps its own task's plan current.
+            //
+            // Authority comes from the session's own binding (`managed.taskId`, written when the
+            // session was spawned for the task), never from the record file: `sessionIds` lives
+            // on disk, where an allow-all worker can edit itself in and start mutating a plan it
+            // was never assigned (observed live on T-2, session 261112-fine-horse).
             const owns =
-              task.currentSessionId === managed.id ||
-              task.sessionIds.includes(managed.id) ||
+              managed.taskId === task.id ||
               (managed.role === 'supervisor' && task.supervisorSessionId === managed.id)
-            if (!owns) return { ok: false, error: 'this session is not working on that task' }
+            if (!owns) return { ok: false, error: `本会话没有绑定任务 ${task.id}，不能改它的计划` }
             /**
              * Deliberately not gated by `checkAgreedPlanAppend`.
              *
@@ -6327,18 +6358,31 @@ export class SessionManager implements ISessionManager {
           updatePlan: async (identifier, patch) => {
             const service = this.getTasks(managed.workspace.id)
             const task = service.get(identifier)
-            if (!task) return { ok: false, error: `task not found: ${identifier}` }
+            if (!task) {
+              const known = service.list().map((t) => t.id)
+              return {
+                ok: false,
+                error:
+                  `找不到任务 ${identifier}。` +
+                  (known.length
+                    ? `当前有这些任务：${known.join('、')}。先用 task_get 核对再操作。`
+                    : '当前工作区没有任务。'),
+              }
+            }
             // A worker may only keep its own task's plan current; a supervisor
             // editing another task's checklist would be reporting work it did
             // not do. A supervisor may, however, draw the outline of a task it
             // supervises — that is the pre-dispatch half of its job, and the
             // relay flow needs it: the record exists before dispatch, so the
             // plan write cannot wait for a worker session to own the task.
+            //
+            // Ownership is the session's own task binding (`managed.taskId`), not the record's
+            // `sessionIds`: that list lives on disk where an allow-all worker can edit itself in
+            // (observed live on T-2).
             const owns =
-              task.currentSessionId === managed.id ||
-              task.sessionIds.includes(managed.id) ||
+              managed.taskId === task.id ||
               (managed.role === 'supervisor' && task.supervisorSessionId === managed.id)
-            if (!owns) return { ok: false, error: 'this session is not working on that task' }
+            if (!owns) return { ok: false, error: `本会话没有绑定任务 ${task.id}，不能改它的计划` }
 
             // A worker no longer names the owner. It cannot see the roster, so the
             // name it wrote was a guess — either itself or an id that matched
@@ -6361,6 +6405,21 @@ export class SessionManager implements ISessionManager {
             const result = service.updatePlan(identifier, {
               id: patch.id,
               ...(patch.status ? { status: patch.status as never } : {}),
+              /**
+               * Who executed the step is a fact the dispatcher needs later.
+               *
+               * 「这一节上次是谁做的」 decides whether the next dispatch has to wait for a
+               * hand-off (a different session taking over) or is a continuation. It used to be
+               * inferable only from the journal; recording it on the step makes the answer part
+               * of the record.
+               *
+               * Only a worker counts as the executor. A supervisor may also mark a step done
+               * (it owns the task's outline), but it never runs one — recording it would make the
+               * next dispatch demand a hand-off from the supervisor and stall the task.
+               */
+              ...(patch.status === 'done' && managed.role !== 'supervisor'
+                ? { executedBy: managed.id }
+                : {}),
               ...(patch.title ? { title: patch.title } : {}),
               /**
                * The owner travels with the step.
@@ -6405,7 +6464,6 @@ export class SessionManager implements ISessionManager {
             return result.ok
               ? {
                   ok: true,
-                  ...(result.handedOffTo ? { handedOffTo: result.handedOffTo } : {}),
                   // The plan travels back with the acknowledgement: the tool echoes it so a
                   // duplicate step is visible where it is created, not at delivery.
                   ...(result.plan ? { plan: result.plan } : {}),
@@ -7886,58 +7944,6 @@ ${request.prompt}`;
           ),
         )
       },
-      /**
-       * Start the agent that owns the next section of a task.
-       *
-       * Deliberately does not touch the supervisor's session: that conversation is
-       * the user's, and waking it for every hand-off would put bookkeeping in front
-       * of the user's next sentence. The decision is `nextLeg(plan)` — a lookup —
-       * so no model is involved either.
-       *
-       * The run gate still applies: a task that is out of budget, out of failures,
-       * or locked by a live run must not be started just because a section ended.
-       * When the gate refuses, this returns false and the caller falls back to
-       * telling the supervisor, which is the right place for "this needs a human".
-       */
-      startNextLeg: async (task, agent) => {
-        const leg = nextLeg(task.spec?.plan)
-        // A section that still needs expanding is not a leg to start: there is no step yet.
-        if (leg?.kind !== 'step') return false
-
-        const claim = this.getTasks(workspace.id).startRun(task.id, `pending:next-leg:${leg.step.id}`)
-        if (!claim.ok) {
-          sessionLog.info(`[tasks] next leg of ${task.id} not started: ${claim.reason}`)
-          return false
-        }
-
-        try {
-          const created = await this.createSession(workspace.id, {
-            name: `${task.id} ${leg.step.id} ${leg.step.title}`.slice(0, 60),
-            role: 'worker',
-            taskId: task.id,
-            permissionMode: 'allow-all',
-            ...(agent ? { agentId: agent } : {}),
-            ...(task.spec?.cwd ? { workingDirectory: task.spec.cwd } : {}),
-            ...(task.spec?.sources?.length ? { enabledSourceSlugs: task.spec.sources } : {}),
-            ...(task.spec?.model ? { model: task.spec.model } : {}),
-            ...(task.spec?.strategy ? { strategy: task.spec.strategy } : {}),
-          })
-          this.claimTaskRun(workspace.id, task.id, created.id)
-          // Fire and forget for the same reason dispatch does: a hand-off is
-          // routing, and waiting for the whole first turn would hold the worker
-          // that just reported.
-          void this.sendMessage(created.id, formatNextLegBrief(task, leg.step)).catch((error) => {
-            sessionLog.warn(`[tasks] could not brief the next leg of ${task.id}`, { error })
-          })
-          sessionLog.info(`[tasks] started ${task.id} ${leg.step.id} as ${agent ?? 'default'} in ${created.id}`)
-          return true
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          this.getTasks(workspace.id).endRun(task.id, { ok: false, error: message })
-          sessionLog.warn(`[tasks] failed to start the next leg of ${task.id}`, { error: message })
-          return false
-        }
-      },
       // Acceptance commands run here, not inside the worker: a task must not be
       // able to certify itself. cwd is resolved against the workspace root so a
       // spec can stay portable.
@@ -8258,19 +8264,58 @@ ${request.prompt}`;
       roster = []
     }
     try {
-      const task = this.getTasks(workspaceId).get(taskId) as { spec?: Task['spec'] } | null
-      return formatDispatchTaskContext({ spec: task?.spec }, { roster })
+      const task = this.getTasks(workspaceId).get(taskId)
+      const base = formatDispatchTaskContext({ spec: task?.spec } as { spec?: Task['spec'] }, { roster })
+      /**
+       * The previous worker's report travels with a freshly spawned worker.
+       *
+       * It used to travel only when the instruction went into an existing session; the spawn
+       * path built its context from `spec` alone. That is the path every owner change takes, so
+       * exactly the case that needs a hand-off — 「上一节由谁做的、做到哪、留下了什么」 — was
+       * the one that never received it, and the new owner started cold.
+       */
+      const handoff = task ? formatHandoffContext(task) : undefined
+      return handoff ? `${base}\n\n${handoff}` : base
     } catch {
       return formatDispatchTaskContext({ spec: undefined }, { roster })
     }
   }
 
-  private claimTaskRun(workspaceId: string, taskId: string | undefined, sessionId: string): void {
+  private claimTaskRun(
+    workspaceId: string,
+    taskId: string | undefined,
+    sessionId: string,
+    scope?: { stepId?: string; outlineId?: string },
+  ): void {
     if (!taskId) return
     try {
       const result = this.getTasks(workspaceId).startRun(taskId, sessionId)
       if (!result.ok) {
         sessionLog.info(`[tasks] ${taskId} dispatched but not marked running: ${result.reason}`)
+      } else if (scope?.stepId) {
+        /**
+         * A reused session's scope grows with the section it just took on.
+         *
+         * Without this the record kept saying 「负责 1.1」 after the same worker had also done 3.1, so
+         * the next dispatch could not tell how much of the task one session already carried — and
+         * the answer to 「这个会话负责到哪」 would drift from reality.
+         *
+         * Only after a successful claim: a refused claim means the session never took this step,
+         * and recording it would credit work that went to someone else.
+         */
+        const managed = this.sessions.get(sessionId)
+        if (managed) {
+          const existing = managed.taskScope
+          const stepIds = existing?.stepIds.includes(scope.stepId)
+            ? existing.stepIds
+            : [...(existing?.stepIds ?? []), scope.stepId]
+          managed.taskScope = {
+            taskId,
+            ...(existing?.outlineId ?? scope.outlineId ? { outlineId: existing?.outlineId ?? scope.outlineId } : {}),
+            stepIds,
+          }
+          this.persistSession(managed)
+        }
       }
     } catch (error) {
       sessionLog.warn('failed to mark a dispatched task as running', { taskId, sessionId, error })
@@ -8667,23 +8712,63 @@ ${request.prompt}`;
           // Read from the live managed session: `getSessions()` is a projection
           // that does not carry the task binding.
           ...(managed.taskId ? { taskId: managed.taskId } : {}),
+          ...(managed.taskScope ? { taskScope: managed.taskScope } : {}),
           isProcessing: managed.isProcessing,
         }
       },
       spawnWorker: async (params) => {
-        const created = await this.createSession(workspaceId, {
-          name: params.name ?? params.scope.slice(0, 24),
-          agentId: params.agentId,
-          role: 'worker',
-          taskId: params.taskId,
-          spawnDepth: params.spawnDepth,
-          // Same reason: a worker that cannot write cannot do the work.
-          permissionMode: 'allow-all',
-          // A rule may pin the worker to a directory; without it the worker would
-          // inherit whatever directory the supervisor happens to sit in.
-          ...(params.cwd ? { workingDirectory: params.cwd } : {}),
-        })
-        this.claimTaskRun(workspaceId, params.taskId, created.id)
+        /**
+         * Claim the run lock BEFORE the session exists.
+         *
+         * A task runs serially: at most one live run at a time. Creating the session first and
+         * claiming afterwards produced a ghost worker whenever the claim failed — the session
+         * existed, received its first instruction, and did the work with no run record, while the
+         * task belonged to another session (observed live on T-2: 261112-fine-horse worked 2.1
+         * with no lock). Claiming first means a refused dispatch creates nothing: the reason goes
+         * back to the dispatcher, and the board never disagrees with reality.
+         *
+         * `startRun` supports a `pending:` placeholder claim (mirrors `spawnTaskRun`); the bind
+         * below replaces it with the real session id and does not double-count the run.
+         */
+        if (params.taskId) {
+          const claim = this.getTasks(workspaceId).startRun(params.taskId, 'pending:dispatch')
+          if (!claim.ok) return { refused: true, reason: claim.reason }
+        }
+        let created: Awaited<ReturnType<typeof this.createSession>>
+        try {
+          created = await this.createSession(workspaceId, {
+            name: params.name ?? params.scope.slice(0, 24),
+            agentId: params.agentId,
+            role: 'worker',
+            taskId: params.taskId,
+            // The scope this session was opened for. Recorded (not just written into the name)
+            // so a later section can ask 「已有会话中谁是这个 agent 且范围合适」 and reuse it.
+            ...(params.taskId
+              ? { taskScope: { taskId: params.taskId, ...(params.outlineId ? { outlineId: params.outlineId } : {}), stepIds: params.stepId ? [params.stepId] : [] } }
+              : {}),
+            spawnDepth: params.spawnDepth,
+            // Same reason: a worker that cannot write cannot do the work.
+            permissionMode: 'allow-all',
+            // A rule may pin the worker to a directory; without it the worker would
+            // inherit whatever directory the supervisor happens to sit in.
+            ...(params.cwd ? { workingDirectory: params.cwd } : {}),
+          })
+          if (params.taskId) {
+            // Bind the pending placeholder to the real session. The lock is already ours, so
+            // this is the same claim completing, not a second run.
+            this.getTasks(workspaceId).attachSession(params.taskId, created.id)
+            this.getTasks(workspaceId).startRun(params.taskId, created.id)
+          }
+        } catch (error) {
+          // Never leave a placeholder lock behind a session that failed to start.
+          if (params.taskId) {
+            this.getTasks(workspaceId).endRun(params.taskId, {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          }
+          return { refused: true, reason: error instanceof Error ? error.message : String(error) }
+        }
         // Same reason as above: awaiting the worker's first turn made the
         // dispatch block look hung, and a block that never returns reads as a
         // failed dispatch — which is what invited the duplicate ones.
@@ -8702,7 +8787,7 @@ ${request.prompt}`;
         return { sessionId: created.id }
       },
       sendToSession: (sessionId, text) => this.sendSystemMessage(sessionId, text),
-      claimRun: (taskId, sessionId) => this.claimTaskRun(workspaceId, taskId, sessionId),
+      claimRun: (taskId, sessionId, scope) => this.claimTaskRun(workspaceId, taskId, sessionId, scope),
       logDispatch: (message) => sessionLog.info(`[dispatch] ${message}`),
       handoffContext: (taskId) => {
         const task = this.getTasks(workspaceId).get(taskId)
@@ -8722,6 +8807,20 @@ ${request.prompt}`;
         return {
           id: task.id,
           currentSessionId: task.currentSessionId,
+          /**
+           * Every session this task has run in.
+           *
+           * The dispatcher needs the pool, not only the last executor: reuse across a section
+           * boundary looks for 「这个 agent 在本任务里已有会话」, and `currentSessionId` alone
+           * forgets every session except the most recent one.
+           */
+          sessionIds: task.sessionIds ?? [],
+          /**
+           * The run lock travels with the lookup so `dispatch` can refuse a second run in
+           * the same turn instead of queueing a spawn that can only be refused at the
+           * turn's end. Without it the pre-check sees no lock on every task.
+           */
+          stats: { lockSessionId: task.stats?.lockSessionId },
           // The task's assigned profile has to survive this lookup: without it the
           // dispatch path below spawns with no `agentId` and silently runs the
           // work as the workspace default, while the cron/event path
@@ -12607,9 +12706,10 @@ ${request.prompt}`;
 
     sessionLog.info(`Processing stopped for session ${sessionId}: ${reason}`)
 
-    // 1. Cleanup state
+    // 1. Cleanup state. sourceTurnStarting is reset inside setProcessing (before the
+    // held-notice replay can claim it) — resetting it again here would stomp that
+    // claim and reopen the double-start race.
     this.setProcessing(managed, false)
-    managed.sourceTurnStarting = false
     managed.currentRunStartedAt = undefined
     managed.processingSourceSlugs = undefined
     managed.stopRequested = false  // Reset for next turn

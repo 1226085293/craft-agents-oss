@@ -202,6 +202,14 @@ export interface CreateSessionOptions {
   /** Task this session works on, when created by the supervisor. */
   taskId?: string
   /**
+   * Which slices of that task this session is responsible for.
+   *
+   * Recorded so the dispatcher can answer 「这个会话负责到哪」 without reading prose, and so a
+   * session can be reused for a later section of the same task instead of spawning a new one
+   * for every step.
+   */
+  taskScope?: { taskId: string; outlineId?: string; stepIds: string[] }
+  /**
    * Tools this session may use, from the task that spawned it.
    *
    * Resolved once at session creation and held for its lifetime — the tool table

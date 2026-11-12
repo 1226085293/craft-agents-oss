@@ -56,6 +56,14 @@ export interface PlanStep {
   agent?: string;
   /** Why it is blocked, or what proves it is done. */
   note?: string;
+  /**
+   * Session that executed this step last.
+   *
+   * 「这一节上一次是谁做的」 was only inferable from the journal, so a dispatcher that had to
+   * decide whether a hand-off was owed had to guess. With the executor on the step, 「换会话
+   * 就得先交接」 is a fact the record can answer.
+   */
+  executedBy?: string;
   /** When the status last changed — the drift check reads this. */
   updatedAt?: number;
   /**
@@ -306,6 +314,10 @@ export function normalizePlan(raw: unknown, now = Date.now()): PlanStep[] | unde
         : {}),
       ...(typeof value.note === 'string' && value.note.trim()
         ? { note: value.note.trim().slice(0, 300) }
+        : {}),
+      // Carried across a reload: losing it would make 「换会话需交接」 silently stop firing.
+      ...(typeof value.executedBy === 'string' && value.executedBy.trim()
+        ? { executedBy: value.executedBy.trim() }
         : {}),
       ...(typeof value.updatedAt === 'number' ? { updatedAt: value.updatedAt } : { updatedAt: now }),
       // Carried across a reload, or the "was this ever started?" question resets to "no"

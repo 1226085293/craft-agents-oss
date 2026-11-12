@@ -49,6 +49,7 @@ export async function handleReportResult(
 
   const payload = {
     outcome: args.outcome ?? 'handoff',
+    ...(args.stepId?.trim() ? { stepId: args.stepId.trim() } : {}),
     summary: clip(args.summary, MAX_SUMMARY) ?? '',
     keyFindings: args.keyFindings?.slice(0, 5),
     nextAction: args.nextAction,

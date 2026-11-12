@@ -194,6 +194,8 @@ export async function createSession(
     role?: 'supervisor' | 'worker';
     supervisorLane?: 'user' | 'task';
     taskId?: string;
+    /** Sections of that task this session is responsible for (reuse + hand-off gate read it). */
+    taskScope?: { taskId: string; outlineId?: string; stepIds: string[] };
     spawnDepth?: number;
   }
 ): Promise<SessionConfig> {
@@ -229,6 +231,7 @@ export async function createSession(
     role: options?.role,
     supervisorLane: options?.supervisorLane,
     taskId: options?.taskId,
+    ...(options?.taskScope ? { taskScope: options.taskScope } : {}),
     spawnDepth: options?.spawnDepth,
     projectId: options?.projectId,
     folderId: options?.folderId ?? undefined,

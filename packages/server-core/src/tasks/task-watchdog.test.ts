@@ -163,6 +163,27 @@ describe('watchdog findings', () => {
     expect(findings.map((f) => f.kind)).toEqual(['orphaned']);
   });
 
+  it('waits out a pending claim instead of calling it an orphan', () => {
+    // Claim-before-spawn: between `startRun('pending:dispatch')` and the bind, the lock is a
+    // placeholder and `sessionExists` can only say no. Reading that no as 「会话已消失」 paused
+    // a live run 23 ms after its claim (T-1, 2026-11-13) and released the lock the spawn was
+    // about to bind, which then counted as a second run.
+    const spawning = task({
+      currentSessionId: 'sess-gone',
+      stats: {
+        runs: 2,
+        activeMs: 0,
+        lastHeartbeatAt: NOW - 5_000,
+        runStartedAt: NOW - 5_000,
+        lockSessionId: 'pending:dispatch',
+      },
+    });
+    const findings = inspectTasks(
+      deps([spawning], { sessionExists: () => false, sessionWorking: () => false }),
+    );
+    expect(findings).toEqual([]);
+  });
+
   it('flags a stalled heartbeat', () => {
     const stalled = task({ stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 60 * 60_000 } });
     expect(inspectTasks(deps([stalled])).map((f) => f.kind)).toEqual(['stalled']);

@@ -62,7 +62,16 @@ export type QueuedActivation =
    * `delivered` hand-off was then refused as `paused → completed`. The spawn path never had this
    * gap because it claims the run as it creates the session.
    */
-  | { kind: 'send'; sessionId: string; message: string; taskId?: string }
+  | {
+      kind: 'send';
+      sessionId: string;
+      message: string;
+      taskId?: string;
+      /** The plan step this reuse is for, recorded on the session's scope. */
+      stepId?: string;
+      /** The outline row that step belongs to. */
+      outlineId?: string;
+    }
   | {
       kind: 'spawn';
       name?: string;
@@ -70,6 +79,10 @@ export type QueuedActivation =
       scope: string;
       instruction: string;
       taskId?: string;
+      /** The step this session is opened for, recorded as its scope. */
+      stepId?: string;
+      /** The outline row that step belongs to. */
+      outlineId?: string;
       spawnDepth: number;
     };
 

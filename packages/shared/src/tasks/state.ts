@@ -260,6 +260,7 @@ export function normalizeHandoff(raw: unknown, fromSessionId: string, now: numbe
             .slice(0, MAX_DECISION_OPTIONS),
         }
       : {}),
+    ...(str(v.stepId) ? { stepId: str(v.stepId)! } : {}),
     ...(str(v.revision) ? { revision: str(v.revision) } : {}),
     // Preserved, not recomputed: the flag records what was true when the hand-off
     // was recorded, and re-deriving it later would silently rewrite history.

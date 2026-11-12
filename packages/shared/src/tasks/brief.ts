@@ -134,6 +134,7 @@ export function formatExecutionRuleBlock(): string {
     '## 执行规则',
     '',
     '- 每做完一个小节，**立刻**用 `task_plan` 把它标成 done。计划是记录：没标状态的步骤，读的人只能认为它没做。这两个工具都在 **`tools_agent`** 分类下：分层模式下先展开 `tools_agent`，再 `call_tool` 调 `task_plan` / `report_result`，不要去 `misc`、`workspace` 里找。',
+    '- 交接时必须带 `stepId`（例如 `"1.2"`），写明这份报告覆盖的是哪一个小节。下一个小节要换会话执行时，系统只认「覆盖上一节的报告」——不带 stepId 的报告无法被对上，下一节会被拦下等你补交。',
     '- 分给你的部分做完了、计划里还剩没授权的步骤 → `report_result`，`outcome` 用 **handoff**。任务会交给后续会话继续，不会关闭；**不要**把剩下的步骤删掉，也不要替人决定它们是否还要做。',
     '- 整个计划都做完了 → 同样 `report_result`，`outcome` 用 **delivered**（这一版到此收尾）。别用 handoff，那会把一个已经完成的任务再挂到下一个会话头上。',
     '- 还没做完 → 继续做完，然后照样 `report_result` 交接。不要停在半路等人来问，也不要用沉默结束回合：没有交接记录的回合，对任务来说等于什么都没发生。',

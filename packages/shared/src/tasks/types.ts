@@ -270,7 +270,16 @@ export type TaskPauseReason =
    * finally asked something at 09:09:04. Nobody was running the task for those seven minutes, and
    * nothing in the record said so.
    */
-  | 'awaiting_dispatch';
+  | 'awaiting_dispatch'
+  /**
+   * Terminal acceptance hit `verify.maxIterations` without passing.
+   *
+   * The plan is finished, the work was re-verified the allowed number of rounds, and every round
+   * failed. Another judge round is not the answer — a person is. Distinct from `failures`, which
+   * the fuse derives from consecutive rejects: this cap trips on the acceptance count, whatever
+   * the fuse threshold is, so a maxIterations of 1 pauses here after a single failed round.
+   */
+  | 'verify_exhausted';
 
 /** What a worker reports when it finishes a turn. */
 export type HandoffOutcome = 'delivered' | 'handoff' | 'needs_decision';
@@ -296,6 +305,15 @@ export interface HandoffVerify {
 export interface Handoff {
   at: number;
   fromSessionId: string;
+  /**
+   * The plan step this report covers (`1.2`).
+   *
+   * Without it 「这份报告是不是上一节的」 could only be guessed from timestamps, and the gate
+   * that stops a section from starting without a hand-off had to accept any recent report.
+   * Optional: records written before the field existed still load, and the gate falls back to
+   * the timestamp for them.
+   */
+  stepId?: string;
   outcome: HandoffOutcome;
   /**
    * Did the acceptance gate take it?

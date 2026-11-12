@@ -45,7 +45,21 @@ function harness(
     processeing?: boolean;
     spawnDepth?: number;
     /** Tasks the runtime can resolve, so a `task` target can be dispatched. */
-    tasks?: Map<string, { id: string; currentSessionId?: string; assigneeAgentId?: string }>;
+    tasks?: Map<
+      string,
+      {
+        id: string;
+        currentSessionId?: string;
+        /** Sessions the task has run in; the reuse pool. */
+        sessionIds?: string[];
+        assigneeAgentId?: string;
+        /** The run lock, so a case can prove a held lock refuses the dispatch inline. */
+        stats?: { lockSessionId?: string };
+        spec?: { plan?: Array<{ id: string; status?: string; agent?: string; updatedAt?: number; executedBy?: string }> };
+      }
+    >;
+    /** When set, `spawnWorker` refuses with this reason (serial-mode run lock held). */
+    spawnRefusal?: string;
   } = {},
 ): Harness {
   const sent: Harness['sent'] = [];
@@ -73,6 +87,7 @@ function harness(
         ...(params.agentId ? { agentId: params.agentId } : {}),
         ...(params.taskId ? { taskId: params.taskId } : {}),
       });
+      if (opts.spawnRefusal) return { refused: true, reason: opts.spawnRefusal };
       const id = `sess_worker_${spawned.length}`;
       sessions.set(id, { id, role: 'worker', spawnDepth: params.spawnDepth, isProcessing: false });
       return { sessionId: id };
@@ -236,6 +251,192 @@ describe('dispatch honours the task assignee', () => {
     // would silently switch executors mid-task.
     expect(h.spawned).toHaveLength(0);
     expect(h.sent).toHaveLength(1);
+  });
+
+  it('reports a refused spawn to the supervisor as a refusal, not a failure', async () => {
+    const tasks = new Map([['T-4', { id: 'T-4' }]]);
+    const h = harness(workspace(), {
+      tasks,
+      spawnRefusal: '运行已经由 261112-wide-bay 持有，不能重复启动',
+    });
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-4' },
+      scope: '改前端',
+      instruction: '把按钮改成蓝色',
+      attachTaskId: 'T-4',
+      parallel: false,
+    });
+    await drain(h)
+    // Serial mode: the dispatch was refused at claim time, no session existed, and the
+    // supervisor hears the reason so it can re-arrange instead of retrying blindly.
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].text).toContain('派发被拒绝');
+    expect(h.sent[0].text).toContain('运行已经由 261112-wide-bay 持有');
+  });
+});
+
+describe('serial mode: one live run per task', () => {
+  it("spawns under the step's owner when the plan names one", async () => {
+    const tasks = new Map([
+      [
+        'T-5',
+        {
+          id: 'T-5',
+          assigneeAgentId: 'agent-be',
+          spec: { plan: [{ id: '2.1', status: 'todo', agent: 'agent-ui' }] },
+        },
+      ],
+    ]);
+    const h = harness(workspace(), { tasks });
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-5' },
+      stepId: '2.1',
+      scope: '改 UI',
+      instruction: '把按钮改圆',
+      attachTaskId: 'T-5',
+      parallel: false,
+    });
+    await drain(h)
+    // The plan's owner wins over the task-level assignee: it is the record of who does what.
+    expect(h.spawned[0]?.agentId).toBe('agent-ui');
+  });
+
+  it('refuses a step whose owner differs from the live session', async () => {
+    const tasks = new Map([
+      [
+        'T-6',
+        {
+          id: 'T-6',
+          currentSessionId: 'sess_worker_1',
+          // A run in flight is the lock; the session object alone means nothing (see the
+          // hand-off case below, where existence wrongly refused the next step).
+          stats: { lockSessionId: 'sess_worker_1' },
+          spec: { plan: [{ id: '2.1', status: 'todo', agent: 'agent-ui' }] },
+        },
+      ],
+    ]);
+    const h = harness(workspace(), { tasks });
+    h.sessions.set('sess_worker_1', {
+      id: 'sess_worker_1',
+      role: 'worker',
+      spawnDepth: 1,
+      isProcessing: false,
+      taskId: 'T-6',
+      agentId: 'agent-be',
+    });
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-6' },
+        stepId: '2.1',
+        scope: '改 UI',
+        instruction: '把按钮改圆',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/串行/);
+    // Refused synchronously: nothing was queued, spawned, or sent.
+    await drain(h)
+    expect(h.spawned).toHaveLength(0);
+    expect(h.sent).toHaveLength(0);
+  });
+
+  it('allows a same-owner follow-up into the live session', async () => {
+    const tasks = new Map([
+      [
+        'T-7',
+        {
+          id: 'T-7',
+          currentSessionId: 'sess_worker_1',
+          spec: { plan: [{ id: '2.1', status: 'todo', agent: 'agent-ui' }] },
+        },
+      ],
+    ]);
+    const h = harness(workspace(), { tasks });
+    h.sessions.set('sess_worker_1', {
+      id: 'sess_worker_1',
+      role: 'worker',
+      spawnDepth: 1,
+      isProcessing: false,
+      taskId: 'T-7',
+      agentId: 'agent-ui',
+    });
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-7' },
+      stepId: '2.1',
+      scope: '改 UI',
+      instruction: '再加个 hover',
+      parallel: false,
+    });
+    await drain(h)
+    // The live session runs the step already: a follow-up is a continuation, not a takeover.
+    expect(h.spawned).toHaveLength(0);
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it('refuses a second dispatch for the same task inside one turn, in the result', async () => {
+    // Live on T-1: one task queued four spawns across three turns. One ran; three were refused
+    // only when the queue drained — after the supervisor had already told the person 「已派发」
+    // four times. A conflict the record already knows belongs in the answer to the call.
+    const tasks = new Map([['T-9', { id: 'T-9' }]]);
+    const h = harness(workspace(), { tasks });
+    const first = await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-9' },
+      stepId: undefined,
+      scope: '改前端',
+      instruction: '先把数据文档写了',
+      parallel: false,
+    });
+    expect(first.queued).toBe(true);
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-9' },
+        scope: '改前端',
+        instruction: '顺便把界面文档也写了',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/排入派发队列/);
+    await drain(h);
+    // One decision, one spawn: the refused call queued nothing.
+    expect(h.spawned).toHaveLength(1);
+  });
+
+  it('refuses a dispatch while the run lock is held, instead of queueing a doomed spawn', async () => {
+    const tasks = new Map([
+      ['T-10', { id: 'T-10', currentSessionId: 'sess-gone', stats: { lockSessionId: 'sess_live' } }],
+    ]);
+    const h = harness(workspace(), { tasks });
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-10' },
+        scope: '改前端',
+        instruction: '再派一个',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/运行锁/);
+    await drain(h);
+    expect(h.spawned).toHaveLength(0);
+  });
+
+  it('refuses parallel dispatch on a task target', async () => {
+    const tasks = new Map([['T-8', { id: 'T-8' }]]);
+    const h = harness(workspace(), { tasks });
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-8' },
+        scope: '改 UI',
+        instruction: '并行把两节都做了',
+        parallel: true,
+      }),
+    ).rejects.toThrow(/串行/);
+    await drain(h)
+    expect(h.spawned).toHaveLength(0);
   });
 });
 
@@ -638,6 +839,367 @@ describe('a paused task does not take new work', () => {
     await drain(h)
     expect(h.sent.length + h.spawned.length).toBe(1);
   })
+
+  it('spawns for a different owner once the previous worker handed off', async () => {
+    // Live on T-1 at 05:11: 1.1's worker (builtin-default, 261113-zesty-glass) handed off, the task
+    // sat paused/awaiting_dispatch with no lock — and dispatching 2.1 (agent-ui) was refused with
+    // 「T-1 正在由 builtin-default 执行」 because the old session merely still existed. Every retry
+    // hit the same wall, so the task could never move again.
+    const h = harness(workspace(), {
+      tasks: tasks({
+        status: 'paused',
+        currentSessionId: 'sess_old',
+        stats: { lockSessionId: undefined },
+        spec: {
+          scope: '三条大纲',
+          plan: [
+            { id: '1.1', status: 'done', agent: 'builtin-default' },
+            { id: '2.1', status: 'todo', agent: 'agent-ui' },
+          ],
+          directive: { text: '继续 2.1', at: 400 },
+        },
+        handoffs: [{ outcome: 'handoff', at: 300 }],
+      }),
+    })
+    // The old worker is still in the session table, idle — existence is not liveness.
+    h.sessions.set('sess_old', {
+      id: 'sess_old',
+      role: 'worker',
+      spawnDepth: 1,
+      isProcessing: false,
+      agentId: 'builtin-default',
+    } as never)
+
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      stepId: '2.1',
+      scope: '界面小节',
+      instruction: '产出 docs/ui.md',
+      parallel: false,
+    })
+    await drain(h)
+    // A new session for the owner the plan names — not a message into the default agent's session.
+    expect(h.sent.filter((s) => s.sessionId === 'sess_old')).toHaveLength(0)
+    expect(h.spawned).toHaveLength(1)
+    expect(h.spawned[0]!.agentId).toBe('agent-ui')
+  })
+
+  it('refuses a report that belongs to another section', async () => {
+    // 2.1 is the section being handed over; the only accepted report names 1.1. Time-wise it is
+    // newer than everything, so a timestamp-only gate would wave it through — the section would
+    // start with a report about work it does not inherit.
+    const h = harness(workspace(), {
+      tasks: tasks({
+        status: 'paused',
+        sessionIds: ['sess_default', 'sess_ui'],
+        currentSessionId: 'sess_ui',
+        stats: { lockSessionId: undefined },
+        spec: {
+          plan: [
+            { id: '1.1', status: 'done', agent: 'builtin-default', updatedAt: 100, executedBy: 'sess_default' },
+            { id: '2.1', status: 'done', agent: 'agent-ui', updatedAt: 200, executedBy: 'sess_ui' },
+            { id: '3.1', status: 'todo', agent: 'builtin-default' },
+          ],
+          directive: { text: '继续 3.1', at: 1000 },
+        },
+        handoffs: [{ outcome: 'handoff', at: 999, passed: true, stepId: '1.1' }],
+      }),
+    })
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-1' },
+        stepId: '3.1',
+        scope: '收尾',
+        instruction: '核对两份文档',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/交接报告/)
+    await drain(h)
+    expect(h.spawned).toHaveLength(0)
+  })
+
+  it('accepts the hand-off that names the section being handed over', async () => {
+    const h = harness(workspace(), {
+      tasks: tasks({
+        status: 'paused',
+        sessionIds: ['sess_default', 'sess_ui'],
+        currentSessionId: 'sess_ui',
+        stats: { lockSessionId: undefined },
+        spec: {
+          plan: [
+            { id: '1.1', status: 'done', agent: 'builtin-default', updatedAt: 100, executedBy: 'sess_default' },
+            { id: '2.1', status: 'done', agent: 'agent-ui', updatedAt: 200, executedBy: 'sess_ui' },
+            { id: '3.1', status: 'todo', agent: 'builtin-default' },
+          ],
+          directive: { text: '继续 3.1', at: 400 },
+        },
+        handoffs: [
+          { outcome: 'handoff', at: 250, passed: true, stepId: '1.1' },
+          { outcome: 'handoff', at: 350, passed: true, stepId: '2.1' },
+        ],
+      }),
+    })
+    h.sessions.set('sess_default', {
+      id: 'sess_default', role: 'worker', spawnDepth: 1, isProcessing: false,
+      agentId: 'builtin-default', taskId: 'T-1',
+      taskScope: { taskId: 'T-1', outlineId: '1', stepIds: ['1.1'] },
+    } as never)
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      stepId: '3.1',
+      scope: '收尾',
+      instruction: '核对两份文档',
+      parallel: false,
+    })
+    await drain(h)
+    // 2.1's report is the one that covers the section being handed over → the reuse is allowed.
+    expect(h.spawned).toHaveLength(0)
+    expect(h.sent.filter((s) => s.sessionId === 'sess_default')).toHaveLength(1)
+  })
+
+  it('accepts an unlabelled report rather than deadlocking on a missing stepId', async () => {
+    // A worker that forgot `stepId` still produced a real hand-off. Refusing forever would leave
+    // the task stuck on a wording mistake; a report labelled for ANOTHER section is still refused.
+    const h = harness(workspace(), {
+      tasks: tasks({
+        status: 'paused',
+        sessionIds: ['sess_default'],
+        currentSessionId: 'sess_default',
+        stats: { lockSessionId: undefined },
+        spec: {
+          plan: [
+            { id: '1.1', status: 'done', agent: 'builtin-default', updatedAt: 100, executedBy: 'sess_default' },
+            { id: '1.2', status: 'todo', agent: 'builtin-default' },
+          ],
+          directive: { text: '继续 1.2', at: 200 },
+        },
+        handoffs: [{ outcome: 'handoff', at: 150, passed: true }],
+      }),
+    })
+    // Same session continues, but it has an executedBy on the *previous* step only; the gate reads
+    // the unlabelled report as covering it.
+    h.sessions.set('sess_default', {
+      id: 'sess_default', role: 'worker', spawnDepth: 1, isProcessing: false,
+      agentId: 'builtin-default', taskId: 'T-1',
+      taskScope: { taskId: 'T-1', outlineId: '1', stepIds: ['1.1'] },
+    } as never)
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      stepId: '1.2',
+      scope: '补数据',
+      instruction: '继续写 docs/data.md',
+      parallel: false,
+    })
+    await drain(h)
+    expect(h.spawned).toHaveLength(0)
+    expect(h.sent.filter((s) => s.sessionId === 'sess_default')).toHaveLength(1)
+  })
+
+  it('refuses a fresh session when the previous section was never reported', async () => {
+    // The rule as stated by the person: before a section runs, compare the session that ran the
+    // PREVIOUS section with the one that will run this one. Here 2.1 ran in sess_ui, 3.1 has never
+    // run, and there is no accepted report — so handing 3.1 to another session starts it cold.
+    const h = harness(workspace(), {
+      tasks: tasks({
+        status: 'paused',
+        sessionIds: ['sess_default', 'sess_ui'],
+        currentSessionId: 'sess_ui',
+        stats: { lockSessionId: undefined },
+        spec: {
+          plan: [
+            { id: '1.1', status: 'done', agent: 'builtin-default', updatedAt: 100, executedBy: 'sess_default' },
+            { id: '2.1', status: 'done', agent: 'agent-ui', updatedAt: 200, executedBy: 'sess_ui' },
+            { id: '3.1', status: 'todo', agent: 'builtin-default' },
+          ],
+          directive: { text: '继续 3.1', at: 300 },
+        },
+        handoffs: [],
+      }),
+    })
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-1' },
+        stepId: '3.1',
+        scope: '收尾',
+        instruction: '核对两份文档',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/交接报告/)
+    await drain(h)
+    expect(h.spawned).toHaveLength(0)
+  })
+
+  it('reuses an idle session of the same agent for a later section', async () => {
+    // T-1 (live, 05:36): 1.1 and 3.1 both belonged to the default agent and still ran in two
+    // sessions, because reuse only ever looked at `currentSessionId` — a pointer that had moved
+    // to the agent-ui session in between. The pool is every session the task ran in.
+    const h = harness(workspace(), {
+      tasks: tasks({
+        status: 'paused',
+        sessionIds: ['sess_default', 'sess_ui'],
+        currentSessionId: 'sess_ui',
+        stats: { lockSessionId: undefined },
+        spec: {
+          plan: [
+            { id: '1.1', status: 'done', agent: 'builtin-default', updatedAt: 100, executedBy: 'sess_default' },
+            { id: '2.1', status: 'done', agent: 'agent-ui', updatedAt: 200, executedBy: 'sess_ui' },
+            { id: '3.1', status: 'todo', agent: 'builtin-default' },
+          ],
+          directive: { text: '继续 3.1', at: 300 },
+        },
+        handoffs: [{ outcome: 'handoff', at: 250, passed: true }],
+      }),
+    })
+    h.sessions.set('sess_default', {
+      id: 'sess_default', role: 'worker', spawnDepth: 1, isProcessing: false,
+      agentId: 'builtin-default', taskId: 'T-1',
+      taskScope: { taskId: 'T-1', outlineId: '1', stepIds: ['1.1'] },
+    } as never)
+    h.sessions.set('sess_ui', {
+      id: 'sess_ui', role: 'worker', spawnDepth: 1, isProcessing: false,
+      agentId: 'agent-ui', taskId: 'T-1',
+      taskScope: { taskId: 'T-1', outlineId: '2', stepIds: ['2.1'] },
+    } as never)
+
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      stepId: '3.1',
+      scope: '收尾',
+      instruction: '核对两份文档',
+      parallel: false,
+    })
+    await drain(h)
+    // Reused the default agent's idle session instead of opening a third one for the task.
+    expect(h.spawned).toHaveLength(0)
+    expect(h.sent.filter((s) => s.sessionId === 'sess_default')).toHaveLength(1)
+  })
+
+  it('refuses a different session for the same agent until a report exists', async () => {
+    // Same profile, different session: the new session holds none of the previous transcript, so
+    // it owes the same hand-off a profile change does.
+    const h = harness(workspace(), {
+      tasks: tasks({
+        status: 'paused',
+        sessionIds: ['sess_old_default'],
+        currentSessionId: 'sess_old_default',
+        stats: { lockSessionId: undefined },
+        spec: {
+          plan: [{ id: '1.2', status: 'todo', agent: 'builtin-default', executedBy: 'sess_gone' }],
+          directive: { text: '继续 1.2', at: 300 },
+        },
+        handoffs: [],
+      }),
+    })
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-1' },
+        stepId: '1.2',
+        scope: '补数据',
+        instruction: '继续写 docs/data.md',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/交接报告/)
+    await drain(h)
+    expect(h.spawned).toHaveLength(0)
+  })
+
+  it('refuses a step whose predecessor in the plan is unfinished', async () => {
+    // Q1: outline 1 = 1.1 (builtin-default) + 1.2 (agent-ui). Dispatching 1.2 while 1.1 is still
+    // open would start a second owner on a section nobody finished; the plan order is the rule.
+    const h = harness(workspace(), {
+      tasks: tasks({
+        status: 'paused',
+        stats: { lockSessionId: undefined },
+        spec: {
+          plan: [
+            { id: '1.1', status: 'doing', agent: 'builtin-default' },
+            { id: '1.2', status: 'todo', agent: 'agent-ui' },
+          ],
+          directive: { text: '按计划推进', at: 400 },
+        },
+        handoffs: [{ outcome: 'handoff', at: 300, passed: true }],
+      }),
+    })
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-1' },
+        stepId: '1.2',
+        scope: '界面',
+        instruction: '写 docs/ui.md',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/1\.1.*还没完成|还没完成/)
+    await drain(h)
+    expect(h.spawned).toHaveLength(0)
+  })
+
+  it('refuses an owner change when the previous section was never reported', async () => {
+    // A section marked done with no accepted hand-off behind it has nothing to hand over: the next
+    // owner would start cold while the record claims the work changed hands.
+    const h = harness(workspace(), {
+      tasks: tasks({
+        status: 'paused',
+        stats: { lockSessionId: undefined },
+        spec: {
+          plan: [
+            { id: '1.2', status: 'done', agent: 'builtin-default', updatedAt: 500 },
+            { id: '2.1', status: 'todo', agent: 'agent-ui' },
+          ],
+          directive: { text: '继续 2.1', at: 600 },
+        },
+        // A rejected attempt is not a report (`passed: false`).
+        handoffs: [{ outcome: 'handoff', at: 550, passed: false }],
+      }),
+    })
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-1' },
+        stepId: '2.1',
+        scope: '界面',
+        instruction: '写 docs/ui.md',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/交接报告/)
+    await drain(h)
+    expect(h.spawned).toHaveLength(0)
+  })
+
+  it('lets the same owner continue without demanding a report', async () => {
+    // Consecutive steps of one profile are a continuation, not a hand-off: the run lock orders them.
+    const h = harness(workspace(), {
+      tasks: tasks({
+        status: 'paused',
+        stats: { lockSessionId: undefined },
+        spec: {
+          plan: [
+            { id: '1.1', status: 'done', agent: 'builtin-default', updatedAt: 500 },
+            { id: '1.2', status: 'todo', agent: 'builtin-default' },
+          ],
+          directive: { text: '继续 1.2', at: 600 },
+        },
+        handoffs: [],
+      }),
+    })
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      stepId: '1.2',
+      scope: '数据补充',
+      instruction: '继续写 docs/data.md',
+      parallel: false,
+    })
+    await drain(h)
+    expect(h.spawned).toHaveLength(1)
+  })
   /**
    * The order the design intends: answer → directive → dispatch → work.
    *
@@ -738,7 +1300,10 @@ describe('a dispatch does not start work inside the turn that asked for it', () 
 
   it('reports a queue position, so the receipt can be honest about ordering', async () => {
     const h = harness(workspace(), {
-      tasks: new Map([['T-1', { id: 'T-1', assigneeAgentId: 'builtin-default' } as never]]),
+      tasks: new Map([
+        ['T-1', { id: 'T-1', assigneeAgentId: 'builtin-default' } as never],
+        ['T-2', { id: 'T-2', assigneeAgentId: 'builtin-default' } as never],
+      ]),
     })
     const first = await h.runtime.dispatch({
       fromSessionId: 'sess_sup',
@@ -748,13 +1313,15 @@ describe('a dispatch does not start work inside the turn that asked for it', () 
       attachTaskId: 'T-1',
       parallel: false,
     })
+    // A second task, not a second spawn for the first one: one task runs one step at a time,
+    // so two spawns for T-1 would be a refusal (see the serial-mode cases above).
     const second = await h.runtime.dispatch({
       fromSessionId: 'sess_sup',
       target: { kind: 'new' },
       scope: '乙',
       instruction: '第二件事',
-      attachTaskId: 'T-1',
-      parallel: true,
+      attachTaskId: 'T-2',
+      parallel: false,
     })
     expect(first.position).toBe(1)
     expect(second.position).toBe(2)
@@ -805,19 +1372,22 @@ describe('each supervisor lane owns its own turn', () => {
       tasks: new Map([
         ['T-1', { id: 'T-1', assigneeAgentId: 'builtin-default' } as never],
         ['T-2', { id: 'T-2', assigneeAgentId: 'builtin-default' } as never],
+        ['T-3', { id: 'T-3', assigneeAgentId: 'builtin-default' } as never],
+        ['T-4', { id: 'T-4', assigneeAgentId: 'builtin-default' } as never],
+        ['T-5', { id: 'T-5', assigneeAgentId: 'builtin-default' } as never],
       ]),
     })
     h.sessions.set('sess_task_lane', { id: 'sess_task_lane', role: 'supervisor', isProcessing: true } as never)
     h.sessions.set('sess_user_lane', { id: 'sess_user_lane', role: 'supervisor', isProcessing: true } as never)
 
-    // Three from the task lane: its own ceiling.
+    // Three from the task lane, one task each — the ceiling is per turn, not per task.
     for (let i = 0; i < 3; i += 1) {
       await h.runtime.dispatch({
         fromSessionId: 'sess_task_lane',
         target: { kind: 'new' },
         scope: `任务 ${i}`,
         instruction: `做 ${i}`,
-        attachTaskId: 'T-1',
+        attachTaskId: `T-${i + 1}`,
         parallel: true,
       })
     }
@@ -828,7 +1398,7 @@ describe('each supervisor lane owns its own turn', () => {
         target: { kind: 'new' },
         scope: '第四个',
         instruction: '再来一个',
-        attachTaskId: 'T-1',
+        attachTaskId: 'T-4',
         parallel: true,
       }),
     ).rejects.toThrow()
@@ -838,7 +1408,7 @@ describe('each supervisor lane owns its own turn', () => {
       target: { kind: 'new' },
       scope: '建任务',
       instruction: '建一条任务',
-      attachTaskId: 'T-2',
+      attachTaskId: 'T-5',
       parallel: true,
     })
     expect(h.runtime.dispatchesThisTurn('sess_user_lane')).toBe(1)
@@ -846,7 +1416,11 @@ describe('each supervisor lane owns its own turn', () => {
 
   it('resets the cap when a turn begins, and keeps the ping-pong guard across it', async () => {
     const h = harness(workspace(), {
-      tasks: new Map([['T-1', { id: 'T-1', assigneeAgentId: 'builtin-default' } as never]]),
+      tasks: new Map([
+        ['T-1', { id: 'T-1', assigneeAgentId: 'builtin-default' } as never],
+        ['T-2', { id: 'T-2', assigneeAgentId: 'builtin-default' } as never],
+        ['T-3', { id: 'T-3', assigneeAgentId: 'builtin-default' } as never],
+      ]),
     })
     const one = {
       fromSessionId: 'sess_sup',
@@ -856,8 +1430,10 @@ describe('each supervisor lane owns its own turn', () => {
       attachTaskId: 'T-1',
       parallel: false,
     }
+    // Two dispatches, two tasks: the counting is what this case is about, and one task cannot
+    // carry two spawns (serial mode refuses the second in the result).
     await h.runtime.dispatch(one)
-    await h.runtime.dispatch(one)
+    await h.runtime.dispatch({ ...one, attachTaskId: 'T-2' })
     // No `onSupervisorIdle` here on purpose: this is the case `beginTurn` exists for — a turn
     // that ended without going through the idle path (a reload, a crashed turn, a resumed
     // session). Counting must not carry over, or the cap becomes a lifetime quota.
@@ -868,7 +1444,7 @@ describe('each supervisor lane owns its own turn', () => {
 
     // The guard is a different matter: repetition is still remembered, and this is the third
     // time in a row, so it is refused rather than counted into the new turn.
-    await expect(h.runtime.dispatch(one)).rejects.toThrow(/again|重复|3/)
+    await expect(h.runtime.dispatch({ ...one, attachTaskId: 'T-3' })).rejects.toThrow(/again|重复|3/)
   })
 })
 

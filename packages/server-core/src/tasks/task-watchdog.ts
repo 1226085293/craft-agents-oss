@@ -413,6 +413,22 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
     if (task.status !== 'running') continue;
 
     /**
+     * A `pending:` lock is a spawn in flight, not a session that disappeared.
+     *
+     * `startRun` claims with a placeholder before the session exists (claim-before-spawn), so
+     * for a moment the lock reads `pending:dispatch`. `sessionExists` cannot answer yes to
+     * that, and the orphaned rule below read the no as 「the process is gone」: live on T-1 the
+     * task went running → paused(process_lost) twenty-three milliseconds after the claim,
+     * which released the lock the spawn was about to bind — the bind then counted as a second
+     * run and the supervisor spent a turn explaining a process loss that never happened.
+     *
+     * Nothing about a session that does not exist yet can be inspected, so every rule below
+     * waits. A crash in this window is not lost: `recoverAfterRestart` still treats a leftover
+     * `pending:` lock as a dead run and pauses it resumably.
+     */
+    if (task.stats?.lockSessionId?.startsWith('pending:')) continue;
+
+    /**
      * A task holding an unanswered question is not "running", whatever the field says.
      *
      * A supervisor can legitimately ask while the task is `running` — the slice is done and the

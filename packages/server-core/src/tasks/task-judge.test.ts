@@ -1,10 +1,11 @@
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { buildJudgePrompt, parseJudgeVerdict } from './task-judge.ts';
 import { TaskService } from './task-service.ts';
 import type { Handoff, Task } from '@craft-agent/shared/tasks';
+import { readJournal } from '@craft-agent/shared/tasks';
 
 let root: string;
 beforeEach(() => {
@@ -231,5 +232,178 @@ describe('model acceptance layer', () => {
     );
     expect(result.passed).toBe(false);
     expect(result.reasons.join(' ')).toContain('judge unavailable');
+  });
+});
+
+describe('terminal-only acceptance (C2′ + C4)', () => {
+  const service = (
+    judge: (t: Task, h: Handoff) => Promise<{ pass: boolean; reasons: string[] }>,
+    wake?: (sessionId: string, message: string, subject: string) => void,
+  ) =>
+    new TaskService({
+      workspaceRoot: root,
+      sessionExists: () => false,
+      wakeSupervisor: wake ?? (() => undefined),
+      judgeHandoff: judge,
+    });
+
+  // A planned task with one step done and one open: any hand-off is an
+  // intermediate one, so the terminal acceptance layer must not run.
+  const plannedTask = (svc: TaskService, maxIterations = 3) => {
+    const task = svc.create({
+      name: '分段任务',
+      instruction: '做事',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_p',
+      spec: {
+        acceptance: [{ id: 'a1', check: '报告必须有结论' }],
+        plan: [
+          { id: '1', title: '写草稿', status: 'done', agent: 'a' },
+          { id: '2', title: '定稿', status: 'todo', agent: 'a' },
+        ],
+      },
+    });
+    svc.setStatus(task.id, 'running');
+    svc.startRun(task.id, 'sess_w');
+    // The service reads the record from disk; the cap is not part of the create
+    // input, so it is patched the same way a migration or config edit would.
+    if (maxIterations !== 3) {
+      const path = join(root, 'tasks', `${task.id}.json`);
+      const raw = JSON.parse(readFileSync(path, 'utf-8')) as Task;
+      raw.verify.maxIterations = maxIterations;
+      writeFileSync(path, JSON.stringify(raw), 'utf-8');
+    }
+    return task;
+  };
+
+  const finishPlan = (id: string) => {
+    const path = join(root, 'tasks', `${id}.json`);
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as Task;
+    raw.spec!.plan = (raw.spec!.plan ?? []).map((step) => ({ ...step, status: 'done' as const }));
+    writeFileSync(path, JSON.stringify(raw), 'utf-8');
+  };
+
+  it('does not run the judge on an intermediate hand-off and leaves the verdict untouched', async () => {
+    let judgeCalls = 0;
+    const svc = service(async () => {
+      judgeCalls += 1;
+      return { pass: false, reasons: ['没写完'] };
+    });
+    const artifact = join(root, 'out.md');
+    writeFileSync(artifact, 'ok', 'utf-8');
+    const task = plannedTask(svc);
+
+    const result = await svc.reportHandoff(
+      task.id,
+      { outcome: 'handoff', summary: '草稿写好了', artifacts: [{ path: artifact }], verify: { ran: ['x'], passed: true } },
+      'sess_w',
+    );
+
+    expect(judgeCalls).toBe(0);
+    expect(result.passed).toBe(true);
+    const current = svc.get(task.id)!;
+    expect(current.verify.lastVerdict).toBeUndefined();
+    expect(current.verifyRounds).toBe(0);
+    expect(current.status).not.toBe('completed');
+  });
+
+  it('runs the judge once the plan is complete and writes the verdict', async () => {
+    let judgeCalls = 0;
+    const svc = service(async () => {
+      judgeCalls += 1;
+      return { pass: true, reasons: [] };
+    });
+    const artifact = join(root, 'out.md');
+    writeFileSync(artifact, 'ok', 'utf-8');
+    const task = plannedTask(svc);
+    finishPlan(task.id);
+
+    const result = await svc.reportHandoff(
+      task.id,
+      { outcome: 'delivered', summary: '全部完成', artifacts: [{ path: artifact }], verify: { ran: ['x'], passed: true } },
+      'sess_w',
+    );
+
+    expect(judgeCalls).toBe(1);
+    expect(result.passed).toBe(true);
+    const current = svc.get(task.id)!;
+    expect(current.verify.lastVerdict).toBe('pass');
+    expect(current.verifyRounds).toBe(1);
+    expect(current.status).toBe('completed');
+  });
+
+  it('pauses and escalates once terminal acceptance exceeds maxIterations', async () => {
+    let judgeCalls = 0;
+    const wakes: Array<{ message: string; subject: string }> = [];
+    const svc = service(
+      async () => {
+        judgeCalls += 1;
+        return { pass: false, reasons: ['还是缺结论'] };
+      },
+      (_sessionId, message, subject) => wakes.push({ message, subject }),
+    );
+    const artifact = join(root, 'out.md');
+    writeFileSync(artifact, 'ok', 'utf-8');
+    const task = plannedTask(svc, 1);
+    finishPlan(task.id);
+
+    // Round 1: the judge rejects, the round is recorded.
+    const first = await svc.reportHandoff(
+      task.id,
+      { outcome: 'delivered', summary: '做完了', artifacts: [{ path: artifact }], verify: { ran: ['x'], passed: true } },
+      'sess_w',
+    );
+    expect(first.passed).toBe(false);
+    expect(judgeCalls).toBe(1);
+    expect(svc.get(task.id)!.verifyRounds).toBe(1);
+    expect(svc.get(task.id)!.status).not.toBe('completed');
+
+    // Round 2: the cap is spent — no judge, refused, paused, journaled, escalated.
+    const second = await svc.reportHandoff(
+      task.id,
+      { outcome: 'delivered', summary: '又交了', artifacts: [{ path: artifact }], verify: { ran: ['x'], passed: true } },
+      'sess_w',
+    );
+    expect(second.passed).toBe(false);
+    expect(second.reasons.join('；')).toContain('验收已跑满 1 轮');
+    expect(judgeCalls).toBe(1);
+    const current = svc.get(task.id)!;
+    expect(current.status).toBe('paused');
+    expect(current.pauseReason).toBe('verify_exhausted');
+    expect(readJournal(root, task.id).some((entry) => entry.type === 'verify_limit_reached')).toBe(true);
+    expect(wakes.some((w) => w.message.includes('终态验收已跑满'))).toBe(true);
+  });
+
+  it('setAcceptance resets the rounds so a new requirement gets a fresh cap', async () => {
+    let judgeCalls = 0;
+    const svc = service(async () => {
+      judgeCalls += 1;
+      return { pass: false, reasons: ['旧标准下没过'] };
+    });
+    const artifact = join(root, 'out.md');
+    writeFileSync(artifact, 'ok', 'utf-8');
+    const task = plannedTask(svc, 1);
+    finishPlan(task.id);
+
+    await svc.reportHandoff(
+      task.id,
+      { outcome: 'delivered', summary: '第一次交', artifacts: [{ path: artifact }], verify: { ran: ['x'], passed: true } },
+      'sess_w',
+    );
+    expect(svc.get(task.id)!.verifyRounds).toBe(1);
+
+    // The person rewords the acceptance: rounds against the old wording must
+    // not count towards the cap on the new one, or the task could never close.
+    svc.setAcceptance(task.id, [{ id: 'a1', check: '新标准' }]);
+    expect(svc.get(task.id)!.verifyRounds).toBe(0);
+
+    const retried = await svc.reportHandoff(
+      task.id,
+      { outcome: 'delivered', summary: '按新标准交', artifacts: [{ path: artifact }], verify: { ran: ['x'], passed: true } },
+      'sess_w',
+    );
+    expect(judgeCalls).toBe(2);
+    expect(retried.passed).toBe(false); // 判据本身不过，但轮数重新计算
+    expect(svc.get(task.id)!.verifyRounds).toBe(1);
   });
 });

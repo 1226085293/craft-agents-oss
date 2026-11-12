@@ -488,3 +488,55 @@ describe('the trigger is editable from the page', () => {
     expect(html).not.toContain('aria-expanded')
   })
 })
+
+describe('acceptance verdict follows the plan (C2′)', () => {
+  const planTask = (
+    plan: Array<{ id: string; title: string; status: 'todo' | 'doing' | 'done' | 'blocked'; agent?: string; note?: string }>,
+    lastVerdict?: 'pass' | 'fail',
+  ): TaskDetailView => ({
+    ...detail,
+    spec: { plan },
+    verify: { ...detail.verify, lastVerdict },
+  })
+
+  it('shows 待终态判定 while the plan has open steps, whatever an old verdict said', () => {
+    const html = renderDetail(planTask([
+      { id: '1', title: '写草稿', status: 'done' },
+      { id: '2', title: '定稿', status: 'todo' },
+    ], 'pass'))
+
+    expect(html).toContain('待终态判定')
+    expect(html).toContain('任务完成后统一验收')
+    // 切片级命令验证仍会显示「验证未通过」（交接时间线），但验收 label 本身不出现通过/未通过。
+    expect(html).not.toContain('>通过</')
+    expect(html).not.toContain('>未通过</')
+  })
+
+  it('shows 通过 once the plan is complete and the verdict passed', () => {
+    const html = renderDetail(planTask([
+      { id: '1', title: '写草稿', status: 'done' },
+      { id: '2', title: '定稿', status: 'done' },
+    ], 'pass'))
+
+    expect(html).toContain('>通过</')
+    expect(html).toContain('迭代上限 3')
+    expect(html).not.toContain('待终态判定')
+  })
+
+  it('shows 未通过 once the plan is complete and the verdict failed', () => {
+    const html = renderDetail(planTask([
+      { id: '1', title: '写草稿', status: 'done' },
+      { id: '2', title: '定稿', status: 'done' },
+    ], 'fail'))
+
+    expect(html).toContain('>未通过</')
+    expect(html).not.toContain('待终态判定')
+  })
+
+  it('keeps the plain labels for a task without a plan', () => {
+    const html = renderDetail({ ...detail, verify: { ...detail.verify, lastVerdict: 'fail' } })
+
+    expect(html).toContain('>未通过</')
+    expect(html).not.toContain('待终态判定')
+  })
+})

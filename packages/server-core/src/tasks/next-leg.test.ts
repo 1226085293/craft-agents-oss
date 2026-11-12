@@ -11,33 +11,20 @@ interface Harness {
   service: TaskService
   root: string
   woken: string[]
-  started: Array<{ taskId: string; agent?: string }>
-  startResult: boolean
 }
 
-function harness(overrides: { startResult?: boolean; startNextLeg?: boolean } = {}): Harness {
+function harness(): Harness {
   const root = mkdtempSync(join(tmpdir(), 'craft-nextleg-'))
   const woken: string[] = []
-  const started: Array<{ taskId: string; agent?: string }> = []
   const h: Harness = {
     service: undefined as unknown as TaskService,
     root,
     woken,
-    started,
-    startResult: overrides.startResult ?? true,
   }
   h.service = new TaskService({
     workspaceRoot: root,
     sessionExists: () => false,
     wakeSupervisor: (_sessionId, text) => woken.push(text),
-    ...(overrides.startNextLeg === false
-      ? {}
-      : {
-          startNextLeg: async (task: Task, agent?: string) => {
-            started.push({ taskId: task.id, ...(agent ? { agent } : {}) })
-            return h.startResult
-          },
-        }),
   })
   return h
 }
@@ -77,15 +64,13 @@ const handoff = {
 }
 
 /**
- * A section that belongs to another agent starts that agent — and does not queue a
- * message in front of the user.
- *
- * The supervisor's conversation is the user's own. Waking it for every hand-off
- * would make the human wait behind bookkeeping, and the wait would grow with the
- * number of running tasks.
+ * A hand-off with an open plan wakes the supervisor with the next step attached —
+ * the system no longer starts the next owner's session itself. Both auto-start sites
+ * fired from inside the worker's own run (one while the lock was still held), so they
+ * could only ever start work nobody decided to allow.
  */
-describe('starting the next section', () => {
-  it('starts the agent that owns the next step', async () => {
+describe('after a hand-off, the supervisor decides', () => {
+  it('wakes the supervisor with the next open step and asks it to decide', async () => {
     const h = harness()
     seed(
       h,
@@ -98,21 +83,19 @@ describe('starting the next section', () => {
       'agent-api',
     )
     await h.service.reportHandoff('T-1', handoff, 'sess-1')
-    expect(h.started).toEqual([{ taskId: 'T-1', agent: 'agent-qa' }])
-    /**
-     * The supervisor is told even though it has nothing to route.
-     *
-     * Skipping the notice was justified as 「nothing to route」, and it left the person who
-     * had asked to be told at this boundary hearing nothing at all. Observed live: 1.1
-     * passed, 1.2 opened automatically against the user's instruction, and the supervisor
-     * only found out when it happened to look at the task.
-     */
+    // No session was started by the hand-off; the supervisor is the one who dispatches.
     expect(h.woken.length).toBeGreaterThan(0)
-    expect(h.woken.join(String.fromCharCode(10))).toContain('已自动开始下一节')
+    const text = h.woken.join(String.fromCharCode(10))
+    expect(text).toContain('交接通过')
+    expect(text).toContain('2.1')
+    expect(text).toContain('agent-qa')
+    expect(text).toContain('请决定')
     rmSync(h.root, { recursive: true, force: true })
   })
 
-  it('leaves the task with the same agent alone', async () => {
+  it('carries the next step even when the same agent owns it', async () => {
+    // A same-owner continuation is also the supervisor's decision: the system neither
+    // auto-starts a session nor claims one already exists.
     const h = harness()
     seed(
       h,
@@ -124,15 +107,18 @@ describe('starting the next section', () => {
       'agent-api',
     )
     await h.service.reportHandoff('T-1', handoff, 'sess-1')
-    // Same owner: continuing is the same session's business, so nothing is started
-    // and the supervisor is told.
-    expect(h.started).toHaveLength(0)
     expect(h.woken.length).toBeGreaterThan(0)
+    const text = h.woken.join(String.fromCharCode(10))
+    expect(text).toContain('1.2')
+    expect(text).toContain('agent-api')
+    expect(text).toContain('请决定')
     rmSync(h.root, { recursive: true, force: true })
   })
 
-  it('falls back to the supervisor when the run gate refuses', async () => {
-    const h = harness({ startResult: false })
+  it('never claims a session was started', async () => {
+    // Regression guard: the nudge used to say 「已自动开始下一节」 while no such session
+    // could exist — the worker's own run still held the lock.
+    const h = harness()
     seed(
       h,
       [
@@ -144,9 +130,8 @@ describe('starting the next section', () => {
       'agent-api',
     )
     await h.service.reportHandoff('T-1', handoff, 'sess-1')
-    expect(h.started).toHaveLength(1)
-    // Refused by the gate — this is exactly when a human should hear about it.
-    expect(h.woken.length).toBeGreaterThan(0)
+    const text = h.woken.join(String.fromCharCode(10))
+    expect(text).not.toContain('已自动开始')
     rmSync(h.root, { recursive: true, force: true })
   })
 })
@@ -173,8 +158,7 @@ describe('two rules answered "may work continue"', () => {
       '只做 1.1，做完就停',
     )
     await h.service.reportHandoff('T-1', handoff, 'sess-1')
-    // A different owner IS a boundary — but the directive says stop, and it wins.
-    expect(h.started).toHaveLength(0)
+    // The directive says stop, and it wins: the task pauses and nothing is started.
     expect(h.service.get('T-1')?.pauseReason).toBe('awaiting_release')
     rmSync(h.root, { recursive: true, force: true })
   })

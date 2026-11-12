@@ -28,6 +28,7 @@ import {
 
 import { useAtomValue } from 'jotai'
 import { cn } from '@/lib/utils'
+import { planProgress } from '@craft-agent/shared/tasks/plan'
 import { sessionMetaMapAtom } from '@/atoms/sessions'
 import { agentLabelMap } from './agent-label'
 import { pauseReasonLabel } from './TaskBoardPanel'
@@ -537,12 +538,18 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
   const sessionMeta = detail.currentSessionId ? sessionMetas.get(detail.currentSessionId) : undefined
   const awaitingRecovery =
     detail.status === 'running' && Boolean(detail.currentSessionId) && sessionMeta?.isProcessing === false
-  const verificationLabel = detail.verify.lastVerdict === 'pass'
-    ? '通过'
-    : detail.verify.lastVerdict === 'fail'
-      ? '未通过'
-      : '待判定'
-
+  // Terminal-only acceptance (C2′): while the plan has open steps the verdict is
+  // not decided yet — the judge runs only once the plan is complete. A task without
+  // a plan has no intermediate states, so it keeps the plain labels.
+  const planProgressView = planProgress(detail.spec?.plan)
+  const planOpen = planProgressView.total > 0 && !planProgressView.complete
+  const verificationLabel = planOpen
+    ? '待终态判定'
+    : detail.verify.lastVerdict === 'pass'
+      ? '通过'
+      : detail.verify.lastVerdict === 'fail'
+        ? '未通过'
+        : '待判定'
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-7 px-6 py-7 md:px-10 md:py-9">
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -964,8 +971,8 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
           <MetricCard
             label="验收"
             value={verificationLabel}
-            hint={`迭代上限 ${detail.verify.maxIterations}`}
-            tone={detail.verify.lastVerdict === 'pass' ? 'success' : detail.verify.lastVerdict === 'fail' ? 'danger' : 'default'}
+            hint={planOpen ? '任务完成后统一验收' : `迭代上限 ${detail.verify.maxIterations}`}
+            tone={planOpen ? 'default' : detail.verify.lastVerdict === 'pass' ? 'success' : detail.verify.lastVerdict === 'fail' ? 'danger' : 'default'}
           />
         ) : null}
       </section>
@@ -987,9 +994,9 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
             <h2 id="task-verification-heading" className="td-heading text-foreground">验收判据</h2>
             <span className={cn(
               'rounded-full border px-2 py-0.5 text-xs font-medium',
-              detail.verify.lastVerdict === 'pass' && 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
-              detail.verify.lastVerdict === 'fail' && 'border-destructive/30 bg-destructive/10 text-destructive',
-              !detail.verify.lastVerdict && 'border-border/60 bg-foreground/5 text-muted-foreground',
+              !planOpen && detail.verify.lastVerdict === 'pass' && 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
+              !planOpen && detail.verify.lastVerdict === 'fail' && 'border-destructive/30 bg-destructive/10 text-destructive',
+              (planOpen || !detail.verify.lastVerdict) && 'border-border/60 bg-foreground/5 text-muted-foreground',
             )}>{verificationLabel}</span>
           </div>
           {/*

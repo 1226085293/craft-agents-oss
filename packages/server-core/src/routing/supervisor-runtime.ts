@@ -32,6 +32,20 @@ import { DispatchQueue } from './dispatch-queue.ts';
 
 const log = createLogger('supervisor');
 
+/**
+ * The outline row a step belongs to (`1.2` → `1`).
+ *
+ * Reuse prefers a session opened for the same outline: it already holds the context of that
+ * section, which is exactly the continuity a hand-off would otherwise have to rebuild.
+ */
+function stepOutlineId(stepId: string): string | undefined {
+  const index = stepId.lastIndexOf('.');
+  if (index <= 0) return undefined;
+  // The prefix is the section even when the outline row was renamed away — the id is the anchor,
+  // not the title, so the plan does not have to be consulted here at all.
+  return stepId.slice(0, index);
+}
+
 export interface SupervisorSessionInfo {
   id: string;
   role: 'supervisor' | 'worker';
@@ -45,6 +59,13 @@ export interface SupervisorSessionInfo {
    * that used to be allowed simply because nothing checked.
    */
   taskId?: string;
+  /**
+   * Sections of that task this session is responsible for.
+   *
+   * Read when choosing an executor: a session opened for 1.1 can take a later section when the
+   * agent matches, instead of the task growing one session per step.
+   */
+  taskScope?: { taskId: string; outlineId?: string; stepIds: string[] };
   /** True while the session is mid-turn. */
   isProcessing: boolean;
 }
@@ -54,19 +75,23 @@ export interface SupervisorRuntimeDeps {
   /** Find or lazily create the workspace's on-duty supervisor. */
   ensureSupervisorSession: () => Promise<SupervisorSessionInfo | null>;
   getSession: (sessionId: string) => SupervisorSessionInfo | null;
-  /** Create a worker session and start it with `instruction`. */
+  /** Create a worker session and start it with `instruction`. Refused when the task's run lock is held (serial mode: one live run per task). */
   spawnWorker: (params: {
     name?: string;
     agentId?: string;
     scope: string;
     instruction: string;
     taskId?: string;
+    /** The plan step this worker is opened for; recorded as the session's scope. */
+    stepId?: string;
+    /** The outline row that step belongs to. */
+    outlineId?: string;
     spawnDepth: number;
     /** Working directory the worker must run in (from a routing rule). */
     cwd?: string;
     /** Skills the worker must follow (from a routing rule). */
     skills?: string[];
-  }) => Promise<{ sessionId: string }>;
+  }) => Promise<{ sessionId: string } | { refused: true; reason: string }>;
   /** Send a message into an existing session (wakes it if idle). */
   sendToSession: (sessionId: string, text: string) => Promise<void>;
   /**
@@ -77,7 +102,7 @@ export interface SupervisorRuntimeDeps {
    * followed was refused as `paused → completed`. The refusals are the task service's to make —
    * `claimTaskRun` only reports them.
    */
-  claimRun?: (taskId: string, sessionId: string) => void;
+  claimRun?: (taskId: string, sessionId: string, scope?: { stepId?: string; outlineId?: string }) => void;
   /** Diagnostics for routing decisions that change who runs the work. */
   logDispatch?: (message: string) => void;
   /**
@@ -97,6 +122,15 @@ export interface SupervisorRuntimeDeps {
   getTask?: (taskId: string) => {
     id: string;
     currentSessionId?: string;
+    /** Every session that ever ran this task — the pool a later section can reuse from. */
+    sessionIds?: string[];
+    /**
+     * The run lock, read to answer 「can this dispatch start」 before it is queued.
+     *
+     * `pending:…` means a spawn is already in flight; anything else is the session that
+     * holds the task's single run. Absent means the task is not running.
+     */
+    stats?: { lockSessionId?: string };
     /** Profile the task is assigned to; absent means the workspace default. */
     assigneeAgentId?: string;
     /**
@@ -106,11 +140,11 @@ export interface SupervisorRuntimeDeps {
      */
     spec?: {
       scope?: string;
-      plan?: Array<{ id: string; status?: string }>;
+      plan?: Array<{ id: string; status?: string; agent?: string; updatedAt?: number; executedBy?: string }>;
       /** Read by `resumeDecisionFor`: the instruction the person's reply was turned into. */
       directive?: { text: string; at: number };
     };
-    handoffs?: Array<{ outcome?: string; at?: number }>;
+    handoffs?: Array<{ outcome?: string; at?: number; passed?: boolean; stepId?: string }>;
     /**
      * Read by `resumeDecisionFor` — the same verdict the run gate reads.
      *
@@ -269,7 +303,7 @@ export class SupervisorRuntime {
                 ...(decision.rule.to.cwd ? { cwd: decision.rule.to.cwd } : {}),
                 ...(decision.rule.to.skills?.length ? { skills: decision.rule.to.skills } : {}),
               });
-              return created.sessionId;
+              return 'refused' in created ? null : created.sessionId;
             } catch (error) {
               log.warn(`[supervisor] rule "${key}" failed to start a worker`, {
                 error: error instanceof Error ? error.message : String(error),
@@ -586,6 +620,19 @@ export class SupervisorRuntime {
       const task = this.deps.getTask?.(params.target.taskId);
       if (!task) throw new Error(`Task not found: ${params.target.taskId}`);
       targetKey = `task:${task.id}`;
+      /**
+       * Serial mode refuses parallel dispatch outright.
+       *
+       * A task runs one step at a time; `parallel: true` asked for concurrent workers on one
+       * record. It used to be half-supported — the second dispatch spawned a session that
+       * found no run lock and worked anyway — which is worse than refusing, because the
+       * supervisor told the user 「已派第 2 位」 while reality disagreed.
+       */
+      if (params.parallel) {
+        throw new DispatchRefused(
+          `${task.id} 是串行任务：一次只跑一个步骤，不支持 parallel 派发。等当前工作交接后再派下一步。`,
+        );
+      }
       this.assertTaskAcceptsWork(task, params);
       // A task with a live session is already dispatched. Spawning a second
       // worker for it produced two sessions doing the same work, both writing
@@ -597,7 +644,99 @@ export class SupervisorRuntime {
       if (task.currentSessionId && !live) {
         this.deps.logDispatch?.(`${task.id}: previous session ${task.currentSessionId} is gone; starting a new run`);
       }
-      workerAgentId = task.assigneeAgentId;
+      /**
+       * A run is in flight only while the task's lock is held.
+       *
+       * Session existence is not the same fact: after a hand-off the worker stays in the session
+       * table with nothing running, and the task sits `paused / awaiting_dispatch`. Reading that
+       * presence as 「still executing」 refused the next step forever — live on T-1 at 05:11, 2.1
+       * (agent-ui) was refused because 261113-zesty-glass (builtin-default) merely still existed,
+       * the task was paused with no lock, and every retry hit the same wall.
+       */
+      const heldLock = task.stats?.lockSessionId;
+      const runInFlight = Boolean(heldLock && !heldLock.startsWith('pending:'));
+      if (!existingSessionId) this.assertDispatchCanStart(task.id, params.fromSessionId);
+      /**
+       * The step's owner decides who runs it.
+       *
+       * `agent` is written when a section gains its first step, and dispatch ignored it — the
+       * task-level assignee was always used (observed live on T-2: step 2.1 named agent-ui but
+       * ran on the workspace default). The plan is the record of who does what, so it wins over
+       * the task fallback.
+       */
+      const namedStep = params.stepId
+        ? (task.spec?.plan ?? []).find((step) => step.id === params.stepId)
+        : undefined;
+      if (namedStep?.agent) {
+        /**
+         * Serial gate: a step owned by one profile cannot start while another profile's
+         * session is mid-run on the same task. The live session keeps its run; the dispatcher
+         * hears why and re-arranges after the hand-off. Same-owner follow-ups stay allowed —
+         * they are continuations of recorded work.
+         *
+         * `runInFlight` is the lock, not the session table: a worker that already handed off
+         * still exists, and demanding a hand-off from it again is a deadlock (T-1, 05:11).
+         */
+        if (runInFlight && live && live.agentId !== namedStep.agent) {
+          throw new DispatchRefused(
+            `${task.id} 正在由 ${live.agentId ?? '默认智能体'}（会话 ${task.currentSessionId}）执行，` +
+              `而 ${namedStep.id} 指定了 ${namedStep.agent}。串行模式：等当前会话交接后再派这一步。`,
+          );
+        }
+        /**
+         * No run in flight, different owner: the old worker's session is not the executor of
+         * this step. Sending there would hand an agent-ui step to the default agent; dropping
+         * the destination makes the spawn path open a session for the owner the plan names.
+         */
+        if (!runInFlight && live && live.agentId !== namedStep.agent) {
+          existingSessionId = undefined;
+        }
+        /**
+         * With no run in flight, look for a session of this task already run by this agent.
+         *
+         * The pointer `currentSessionId` only remembers the *last* executor, so a task that
+         * alternates owners grew one session per step: on T-1, 1.1 and 3.1 both belonged to
+         * the default agent and still ran in two different sessions. The scope on the session
+         * is what makes the question answerable — 「谁是这个 agent 且空闲」 — without guessing
+         * from prose.
+         *
+         * Preference: a session opened for this step's outline (same section context), then the
+         * most recently used one. Only idle sessions qualify: a busy one is mid-turn, and sending
+         * into it would queue work behind an instruction it has not finished.
+         */
+        if (!runInFlight && !existingSessionId) {
+          const outlineId = stepOutlineId(namedStep.id);
+          const candidates = (task.sessionIds ?? [])
+            .map((id: string) => this.deps.getSession(id))
+            .filter(
+              (session): session is SupervisorSessionInfo =>
+                Boolean(session) &&
+                session!.role === 'worker' &&
+                session!.agentId === namedStep.agent &&
+                session!.isProcessing === false &&
+                session!.taskId === task.id,
+            )
+          const sameOutline = outlineId
+            ? candidates.find((session: SupervisorSessionInfo) => session.taskScope?.outlineId === outlineId)
+            : undefined;
+          const chosen = sameOutline ?? candidates[candidates.length - 1];
+          if (chosen) {
+            existingSessionId = chosen.id;
+            this.deps.logDispatch?.(`${task.id}: reusing ${chosen.id} for ${namedStep.id} (agent ${namedStep.agent})`);
+          }
+        }
+        /**
+         * Changing hands needs a report to hand over.
+         *
+         * Runs after the executor is chosen, so it can compare 「这一节上次的会话」 with the one
+         * that will actually run it — a different profile and the same profile in a different
+         * session both start cold, and both owe a hand-off.
+         */
+        this.assertOwnerChangeHandedOff(task, namedStep.id, existingSessionId);
+        workerAgentId = namedStep.agent;
+      } else {
+        workerAgentId = task.assigneeAgentId;
+      }
     } else {
       targetKey = `new:${params.target.agentId ?? 'default'}:${params.scope}`;
       workerAgentId = params.target.agentId;
@@ -625,6 +764,7 @@ export class SupervisorRuntime {
       // the same gate, including the ones that create a session.
       const attached = this.deps.getTask?.(params.attachTaskId);
       if (attached) this.assertTaskAcceptsWork(attached, params);
+      if (attached) this.assertDispatchCanStart(attached.id, params.fromSessionId);
     }
 
     assertDispatchAllowed({
@@ -683,6 +823,10 @@ export class SupervisorRuntime {
            * record and the session disagreeing at exactly the moment a person looks at the board.
            */
           ...(taskId ? { taskId } : {}),
+          // The section this reuse is for: the session's scope grows with it, so a later dispatch
+          // can still answer 「这个会话负责到哪」.
+          ...(params.stepId ? { stepId: params.stepId } : {}),
+          ...(params.stepId ? { outlineId: stepOutlineId(params.stepId) } : {}),
         }),
       }
     }
@@ -695,8 +839,147 @@ export class SupervisorRuntime {
       instruction: params.instruction,
       taskId: params.attachTaskId ?? (params.target.kind === 'task' ? params.target.taskId : undefined),
       spawnDepth: (supervisor.spawnDepth ?? 0) + 1,
+      // The step that opened this session, recorded as its scope.
+      ...(params.stepId ? { stepId: params.stepId } : {}),
+      ...(params.stepId ? { outlineId: stepOutlineId(params.stepId) } : {}),
     })
     return { sessionId: '', queued: true, position }
+  }
+
+  /**
+   * A dispatch that cannot start must say so in its own return value.
+   *
+   * Queueing it and reporting the refusal after the turn ended meant the supervisor announced
+   * 「已派发」 and learned minutes later that nothing had started. Live on T-1 one task queued four
+   * spawns across three turns; one ran and three were refused only when the queue drained. Every
+   * fact needed to answer the question is already on the record at call time, so it belongs in the
+   * answer to the call that asked.
+   *
+   * Two things make a second run impossible, and both are knowable now:
+   *
+   *  - the run lock is held — serial mode allows one live run per task; and
+   *  - an earlier dispatch (this turn or another open one) already queued a run for the same
+   *    task, which will take the lock when its turn ends, so this one could never start.
+   *
+   * Only the spawn path calls this: sending a follow-up to the session that already holds the
+   * lock is a continuation of recorded work, not a second run.
+   */
+  private assertDispatchCanStart(taskId: string, fromSessionId: string): void {
+    const lock = this.deps.getTask?.(taskId)?.stats?.lockSessionId;
+    if (lock) {
+      const holder = lock.startsWith('pending:')
+        ? '上一条派发（正在创建执行会话）'
+        : `会话 ${lock}`;
+      throw new DispatchRefused(
+        `${taskId} 的运行锁已被${holder}持有（串行模式：同一任务同一时刻只跑一个步骤），这次派发没有执行。` +
+          '等它交接后再派下一步，或先 task_get 看任务状态。',
+      );
+    }
+    for (const [supervisorId, state] of this.turnStates) {
+      const index = state.queuedActivations.findIndex((action) => action.taskId === taskId);
+      if (index < 0) continue;
+      const who = supervisorId === fromSessionId ? '本轮' : '另一条尚未结束的督导回合';
+      throw new DispatchRefused(
+        `${taskId} 已在${who}排入派发队列（第 ${index + 1} 位），它会在该回合结束时启动。` +
+          '串行模式：同一任务同一时刻只跑一个步骤，这次派发没有执行。等它交接后再派下一步。',
+      );
+    }
+  }
+
+  /**
+   * A section may only change hands with a report in hand.
+   *
+   * The plan says who does what; the hand-off is what carries 「上一节做到哪、留下了什么」 to
+   * whoever takes over. Without this gate the dispatcher could start a section whose
+   * predecessor was never reported on, and the new session would begin cold while the record
+   * pretended the work had been handed over.
+   *
+   * Two things count as a change of hands, and both are gated: a different profile, and the same
+   * profile in a different session (the previous one ended, was replaced, or the dispatcher chose
+   * another). Only a continuation — same step, same session — passes without a report.
+   */
+  private assertOwnerChangeHandedOff(
+    task: {
+      spec?: { plan?: Array<{ id: string; status?: string; agent?: string; updatedAt?: number; executedBy?: string }> };
+      handoffs?: Array<{ outcome?: string; at?: number; passed?: boolean; stepId?: string }>;
+    },
+    stepId: string,
+    nextSessionId?: string,
+  ): void {
+    const plan = task.spec?.plan ?? [];
+    const index = plan.findIndex((step) => step.id === stepId);
+    if (index < 0) return;
+    const self = plan[index];
+    if (!self) return;
+
+    /**
+     * Before a section runs, compare the session that ran the *previous* section with the one
+     * that will run this one.
+     *
+     * That comparison is the rule: work passes between sessions constantly — 1.1 in the default
+     * agent's session, 2.1 in the UI worker's, 3.1 back in the default one — and every one of
+     * those switches starts cold unless the outgoing session left a report. Comparing profiles
+     * alone missed the case the person actually hit: 「同一个 agent，但不是同一个会话」.
+     *
+     * `self.executedBy` is the fallback: when the preceding step never recorded an executor (a
+     * record written before this field existed), the step's own last executor is the best
+     * evidence of who holds its context.
+     */
+    const previous = [...plan.slice(0, index)].reverse().find((step) => step.agent || step.executedBy);
+    const previousSession = previous?.executedBy ?? self.executedBy;
+    /**
+     * No `nextSessionId` means the spawn path: a new session will execute this step, so the
+     * executor changes by definition.
+     */
+    const swappedSession = Boolean(previousSession) && previousSession !== nextSessionId;
+    const swappedOwner =
+      Boolean(previous?.agent) && Boolean(self.agent) && previous!.agent !== self.agent;
+    if (!swappedOwner && !swappedSession) return;
+
+    if (previous && previous.status !== 'done') {
+      throw new DispatchRefused(
+        `${previous.id}（由 ${previous.agent ?? '上一个会话'} 执行）还没完成，现在不能派 ${self.id}` +
+          `${self.agent ? `（${self.agent}）` : ''}。串行模式按计划顺序推进：等上一节交接后再派这一步。`,
+      );
+    }
+    const accepted = (task.handoffs ?? []).filter(
+      (handoff) => handoff.outcome !== 'needs_decision' && handoff.passed !== false,
+    );
+    /**
+     * Match on the step when the record says which step it covers.
+     *
+     * A report for 1.1 is not a report for 2.1, even when it is recent: the point of the gate is
+     * that the section being started has its own hand-off. Records written before `stepId`
+     * existed carry none, so those fall back to the timestamp check below rather than being
+     * rejected outright.
+     */
+    const forPrevious = previous?.id
+      ? accepted.filter((handoff) => handoff.stepId === previous.id)
+      : accepted;
+    /**
+     * Prefer the report that names the section. Fall back to an *unlabelled* one rather than
+     * deadlocking: a worker that forgot `stepId` still produced a real hand-off, and refusing
+     * forever would leave the task unable to advance on a wording mistake. A report labelled for
+     * a *different* section is never accepted — that is the mistake this gate exists to catch.
+     */
+    const fallback = accepted.filter((handoff) => handoff.stepId === undefined);
+    const candidatesForGate = forPrevious.length ? forPrevious : fallback;
+    const last = candidatesForGate[candidatesForGate.length - 1];
+    if (!last) {
+      throw new DispatchRefused(
+        `${self.id} 要换到${nextSessionId ? `会话 ${nextSessionId}` : '一个新会话'}执行，` +
+          `但没有任何交接报告可以带过去。先让上一个执行者` +
+          `${previousSession ? `（会话 ${previousSession}）` : ''}用 report_result 交接，` +
+          '写清做到哪、留下了什么，再派这一步。',
+      );
+    }
+    const since = previous?.updatedAt ?? self.updatedAt;
+    if (since && last.at !== undefined && last.at < since) {
+      throw new DispatchRefused(
+        `${self.id} 换执行会话之前，交接报告早于上一节的实际结果——那份报告没有覆盖这段工作。` +
+          '先让上一个执行者重新交接，再派这一步。',
+      );
+    }
   }
 
   /** Queue an activation for the end of this turn; returns its 1-based position. */
@@ -757,17 +1040,38 @@ export class SupervisorRuntime {
            * Claiming after the send would leave the original hole open on a send that throws:
            * the worker would still be told to work, and the task would still say `paused`.
            */
-          if (action.taskId) this.deps.claimRun?.(action.taskId, action.sessionId)
+          if (action.taskId)
+            this.deps.claimRun?.(action.taskId, action.sessionId, {
+              ...(action.stepId ? { stepId: action.stepId } : {}),
+              ...(action.outlineId ? { outlineId: action.outlineId } : {}),
+            })
           await this.deps.sendToSession(action.sessionId, action.message)
         } else {
-          await this.deps.spawnWorker({
+          const outcome = await this.deps.spawnWorker({
             name: action.name,
             agentId: action.agentId,
             scope: action.scope,
             instruction: action.instruction,
             taskId: action.taskId,
+            ...(action.stepId ? { stepId: action.stepId } : {}),
+            ...(action.outlineId ? { outlineId: action.outlineId } : {}),
             spawnDepth: action.spawnDepth,
           })
+          /**
+           * Refused, not failed — and the difference is the point.
+           *
+           * Serial mode refuses a dispatch when the task's run lock is already held: no session
+           * was created, and telling the supervisor 「执行失败」 would invite exactly the retry
+           * that just got refused. The supervisor has already told the user 「已派发」, so the
+           * correction must reach it as a refusal with the reason attached.
+           */
+          if ('refused' in outcome) {
+            await this.deps.sendToSession(
+              supervisorSessionId,
+              `上一轮排队的派发被拒绝：${outcome.reason}
+该派发没有执行。等当前工作交接后再派，或先 task_get 看任务状态。`,
+            )
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)

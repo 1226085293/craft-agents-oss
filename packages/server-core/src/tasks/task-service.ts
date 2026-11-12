@@ -77,12 +77,6 @@ export interface TaskServiceDeps {
    * supervisor's conversation.
    *
    * Why not just wake the supervisor and let it dispatch: that queue is the same
-   * one the user talks to. With several tasks handing off, every hand-off would
-   * put a message in front of the user's next sentence, and the delay would grow
-   * with the number of tasks — the busier the work, the slower the human. The
-   * decision itself is a lookup in the plan, so it does not need a model either.
-   */
-  startNextLeg?: (task: Task, agent: string | undefined) => Promise<boolean>;
   /**
    * Stop the session that is working on a task.
    *
@@ -632,18 +626,6 @@ export class TaskService {
     ok: boolean;
     error?: string;
     plan?: Task['spec'] extends undefined ? never : NonNullable<Task['spec']>['plan'];
-    /**
-     * The agent a new session was started for because the plan crossed an
-     * ownership boundary. The caller tells the reporting worker to stop.
-     */
-    handedOffTo?: string;
-    /**
-     * Whether that session actually started.
-     *
-     * A boundary that could not be crossed is still a boundary: the caller must
-     * stop either way, but it must not be told a worker exists when none does.
-     */
-    legStarted?: boolean;
   } {
     const task = this.require(id);
     const now = this.now();
@@ -658,43 +640,14 @@ export class TaskService {
     };
 
     /**
-     * Ownership is a boundary, not a label.
+     * No auto-start at the ownership boundary.
      *
-     * The plan says which profile owns each step, and until now nothing acted on
-     * it: one worker finished section 3.1, turned to 3.2 (owned by another
-     * agent), and did it in the same session. The agent column was decoration and
-     * "click 3.1, click 3.2" landed in one conversation.
-     *
-     * Closing a step is the only moment the boundary can be crossed cheaply, so
-     * the check happens here: a lookup in the plan, no model call. The next owner
-     * gets its own session and the current one is told to stop, which is the
-     * difference between a plan that assigns work and a plan that pretends to.
+     * The plan says which profile owns each step, and this write used to start the next owner's
+     * session the moment a step closed. That call always fired while this run still held the
+     * task's lock — `startRun` refuses a second lock — so it was refused, logged, and swallowed
+     * while the record said a session existed. The next leg is the supervisor's call now: the
+     * hand-off wakes it with the next open step attached, and it decides whom to dispatch.
      */
-    /**
-     * The comparison is between the two steps, not against the task's assignee.
-     *
-     * `assigneeAgentId` is unset for a task that was dispatched by the scheduler
-     * without a named agent, and comparing the next step's owner against
-     * `undefined` made every such task cross a boundary on its first completed
-     * step — a boundary that only existed because the field was blank. The owner
-     * of the step just closed is the fact: when the next step names the same
-     * agent, the worker keeps its authority and no session is owed.
-     */
-    const closedStep = result.plan.find((step) => step.id === patch.id);
-    const currentOwner = closedStep?.agent ?? next.assigneeAgentId;
-    let handedOffTo: string | undefined;
-    const previousAssignee = next.assigneeAgentId;
-    if (patch.status === 'done' && currentOwner) {
-      const leg = nextLeg(result.plan);
-      if (leg?.kind === 'step' && leg.agent && leg.agent !== currentOwner && this.deps.startNextLeg) {
-        handedOffTo = leg.agent;
-        // Record the hand-off on the task before starting it: the new session's
-        // own write path reads `assigneeAgentId` to decide whether it is the
-        // owner, and leaving it stale would make the next boundary fire on the
-        // wrong comparison.
-        next = { ...next, assigneeAgentId: handedOffTo };
-      }
-    }
 
     this.save(next);
     appendJournal(this.root, id, {
@@ -703,65 +656,9 @@ export class TaskService {
       data: { step: patch.id, status: patch.status, agent: patch.agent, removed: patch.remove === true },
     });
 
-    /**
-     * Awaited, because the answer changes what the worker is told.
-     *
-     * This used to be fire-and-forget with the failure logged and the caller told
-     * 「已经为它开了一个新会话」 regardless. Observed live: the start was refused
-     * (the worker's own run still held the task), the log said so, the worker was
-     * told a session existed, and both the hand-off summary and the supervisor's
-     * report to the user repeated it — a session that was never created was
-     * described to the person as the one continuing the work.
-     *
-     * The refusal path returns synchronously (`claim.ok` is checked before any
-     * session is created), so waiting costs nothing in the case that needs the
-     * truth most.
-     */
-    let legStarted = false;
-    if (handedOffTo) {
-      const agent = handedOffTo;
-      /**
-       * Asked before started, because the answer is knowable and the worker is told it.
-       *
-       * The start cannot succeed while this run owns the task — `startRun` refuses a
-       * second lock, which is exactly what a worker crossing a boundary in its own
-       * turn asks for. The refusal used to be logged and swallowed while the record
-       * and the tool result both said a session existed; the hand-off summary repeated
-       * it and the supervisor passed it to the person. `startGate` is the same
-       * predicate `startRun` uses, and it answers synchronously.
-       */
-      const refusal = this.startGate({ ...next, status: 'running' }, now);
-      legStarted = refusal === null;
-      if (legStarted) {
-        appendJournal(this.root, id, {
-          type: 'next_leg_started',
-          at: now,
-          data: { step: patch.id, agent },
-        });
-        try {
-          this.deps.startNextLeg!(next, agent).catch((error: unknown) => {
-            log.warn(`[tasks] could not start ${agent} at the ${id} boundary`, {
-              error: String(error),
-            });
-          });
-        } catch (error) {
-          log.warn(`[tasks] could not start ${agent} at the ${id} boundary`, { error: String(error) });
-        }
-      } else {
-        // No new owner exists, so the record must not name one: leaving the flip
-        // behind made the task claim an assignee that never worked on it, and the
-        // hand-off after it compared against the wrong owner.
-        log.warn(
-          `[tasks] ownership boundary of ${id} not started for ${agent}: ${refusal?.reason ?? 'unknown'}`,
-        );
-        this.save({ ...next, assigneeAgentId: previousAssignee });
-      }
-    }
-
     return {
       ok: true,
       plan: result.plan,
-      ...(handedOffTo ? { handedOffTo, legStarted } : {}),
     };
   }
 
@@ -1474,6 +1371,10 @@ export class TaskService {
    */
   private deriveGateReason(task: Task): Task {
     if (task.pauseReason === 'process_lost') return task;
+    // The acceptance cap is on the record (`verifyRounds` vs `maxIterations`), but no gate
+    // re-derives it — keeping the label is what stops the pause from reading 「已暂停」 with no
+    // reason after the first post-pause write.
+    if (task.pauseReason === 'verify_exhausted') return task;
     // A person declared this one; the record cannot prove or disprove it.
     if (task.pauseReason === 'awaiting_release') return task;
     const refusal = resumeRefusal(task, {
@@ -1634,6 +1535,9 @@ export class TaskService {
         requirement: acceptance.map((item) => item.check).join('\n'),
         lastVerdict: undefined,
       },
+      // New wording is a new object being judged: rounds spent against the old
+      // list must not count towards the cap on the new one.
+      verifyRounds: 0,
       updatedAt: this.now(),
     };
     this.save(next);
@@ -1806,36 +1710,58 @@ export class TaskService {
      * `delivered` means the whole task is finished, `handoff` means this leg is finished
      * and the task continues. Naming it costs one sentence; not naming it cost the plan.
      */
-    if (handoff.outcome === 'delivered' && accepted) {
-      const progress = planProgress(task.spec?.plan);
-      if (progress.total > 0 && !progress.complete) {
-        const remaining = (task.spec?.plan ?? []).filter(
-          (step) => step.status !== 'done' && childrenOf(task.spec?.plan, step.id).length === 0,
-        );
-        accepted = false;
-        reasons.push(
-          `计划里还有 ${remaining.length} 步没完成，不能作为“整个任务已完成”交付（delivered）：${remaining.map((step) => `${step.id} ${step.title}`).join('；')}。` +
-            '如果你的分配范围只是计划的一部分，用 outcome: "handoff" 交接——任务不会关闭，剩下的步骤留给后绡的会话；' +
-            '如果这一步确实做完了，就标 done 并在 note 里写证据；' +
-            '只有当计划本身写错了（这一步根本不该存在）才移除它。',
-        );
-      }
+    // Terminal acceptance only: the model judge and the verify record are reserved
+    // for the state where the plan is finished. `total > 0` keeps plan-less tasks
+    // on the old path — with no plan there are no intermediate states, so every
+    // hand-off is already the final one.
+    const progress = planProgress(task.spec?.plan);
+    const planOpen = progress.total > 0 && !progress.complete;
+
+    if (handoff.outcome === 'delivered' && accepted && planOpen) {
+      const remaining = (task.spec?.plan ?? []).filter(
+        (step) => step.status !== 'done' && childrenOf(task.spec?.plan, step.id).length === 0,
+      );
+      accepted = false;
+      reasons.push(
+        `计划里还有 ${remaining.length} 步没完成，不能作为“整个任务已完成”交付（delivered）：${remaining.map((step) => `${step.id} ${step.title}`).join('；')}。` +
+          '如果你的分配范围只是计划的一部分，用 outcome: "handoff" 交接——任务不会关闭，剩下的步骤留给后绡的会话；' +
+          '如果这一步确实做完了，就标 done 并在 note 里写证据；' +
+          '只有当计划本身写错了（这一步根本不该存在）才移除它。',
+      );
     }
 
     // Second layer: a requirement the commands cannot express is judged by a
     // model that only reads — never by the worker that wrote the handoff, and
     // only after the cheap rules passed.
-    if (accepted && task.verify.requirement && this.deps.judgeHandoff) {
-      try {
-        const judged = await this.deps.judgeHandoff(task, handoff);
-        if (!judged.pass) {
-          accepted = false;
-          reasons.push(...(judged.reasons.length ? judged.reasons : ['acceptance requirement not met']));
-        }
-      } catch (error) {
-        // A judge that cannot run must not silently pass the task.
+    //
+    // Terminal state only: an intermediate hand-off used to spawn a hidden
+    // 「T-x 验收」 session per slice, judging work that was not finished yet.
+    // `maxIterations` caps how many times the finished plan can be re-verified;
+    // beyond that the decision belongs to a person, not another judge round.
+    let verifyLimitReached = false;
+    if (accepted && task.verify.requirement && this.deps.judgeHandoff && !planOpen) {
+      const maxIterations = task.verify.maxIterations ?? 3;
+      if ((task.verifyRounds ?? 0) + 1 > maxIterations) {
+        verifyLimitReached = true;
         accepted = false;
-        reasons.push(`judge unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        reasons.push(`验收已跑满 ${maxIterations} 轮，需要人工介入`);
+        appendJournal(this.root, id, {
+          type: 'verify_limit_reached',
+          at: now,
+          data: { rounds: (task.verifyRounds ?? 0) + 1, maxIterations },
+        });
+      } else {
+        try {
+          const judged = await this.deps.judgeHandoff(task, handoff);
+          if (!judged.pass) {
+            accepted = false;
+            reasons.push(...(judged.reasons.length ? judged.reasons : ['acceptance requirement not met']));
+          }
+        } catch (error) {
+          // A judge that cannot run must not silently pass the task.
+          accepted = false;
+          reasons.push(`judge unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     }
 
@@ -1861,17 +1787,24 @@ export class TaskService {
       handoffs: [...task.handoffs, { ...handoff, passed: accepted }],
       updatedAt: now,
       lifecycle: recordRunResult(task.lifecycle, accepted, now, accepted ? undefined : reasons.join('; ')),
-      verify: {
-        ...task.verify,
-        lastVerdict: accepted ? 'pass' : 'fail',
-        ...(handoff.revision ? { lastVerifiedRevision: handoff.revision } : {}),
-      },
-      // Every handoff round counts, so `maxIterations` is no longer decorative —
-      // except across a revision boundary, where the previous rounds were spent
-      // judging a different object.
-      verifyRounds: isNewRevision(task.verify, handoff.revision)
-        ? 1
-        : (task.verifyRounds ?? 0) + 1,
+      // Intermediate hand-offs do not touch the verdict: 「验收：通过」 may not
+      // appear before the plan is done, and the rounds cap below counts only
+      // terminal acceptance.
+      verify: planOpen
+        ? task.verify
+        : {
+            ...task.verify,
+            lastVerdict: accepted ? 'pass' : 'fail',
+            ...(handoff.revision ? { lastVerifiedRevision: handoff.revision } : {}),
+          },
+      // `maxIterations` is the cap on terminal acceptance rounds — except across
+      // a revision boundary, where the previous rounds were spent judging a
+      // different object.
+      verifyRounds: planOpen
+        ? (task.verifyRounds ?? 0)
+        : isNewRevision(task.verify, handoff.revision)
+          ? 1
+          : (task.verifyRounds ?? 0) + 1,
     };
     // A handoff ends the worker's run no matter what the verdict decides next:
     // the lock is released and the active time banked here, through the one
@@ -1924,6 +1857,10 @@ export class TaskService {
       }
     } else if (accepted && handoff.outcome === 'delivered') {
       next = applyTransition(next, 'completed', { now }).task;
+    } else if (verifyLimitReached) {
+      // The acceptance cap is a decision for a person, not another judge round.
+      next = applyTransition(next, 'paused', { now, pauseReason: 'verify_exhausted' }).task;
+      this.stopWorker(next);
     } else if (!accepted && shouldTripFuse(next.lifecycle)) {
       next = applyTransition(next, 'paused', { now, pauseReason: 'failures' }).task;
       this.stopWorker(next);
@@ -2015,12 +1952,11 @@ export class TaskService {
     /**
      * Decide whether this hand-off belongs on the timeline.
      *
-     * Recorded before the next-leg attempt below, because the question is what this
-     * hand-off implies, not whether the spawn succeeded: "the plan now belongs to
-     * another agent" is a fact about the plan, and a failed spawn does not make the
-     * boundary disappear. Attempts that changed nothing stay in `handoffs` — the
-     * spinning detector reads every one of them — but the timeline stops showing
-     * them, which is the difference between a log of attempts and a history.
+     * The question is what this hand-off implies: "the plan now belongs to
+     * another agent" is a fact about the plan, not about any spawn. Attempts that
+     * changed nothing stay in `handoffs` — the spinning detector reads every one
+     * of them — but the timeline stops showing them, which is the difference
+     * between a log of attempts and a history.
      */
     const nextLegRead = nextLeg(next.spec?.plan)
     // Only a step has an owner: an unexpanded section is not assigned to anyone yet.
@@ -2075,69 +2011,17 @@ export class TaskService {
       },
     });
 
-    // The next section may belong to someone else. When it does, start them here
-    // — the plan already says who, so asking the supervisor would be paying a
-    // model call and a queue slot to read a field.
+    // No auto-start after a hand-off.
     //
-    // Only for an accepted `handoff`: `delivered` means the task is finished, and
-    // `needs_decision` means it is waiting on a person. Starting work in either
-    // case would be acting on a decision nobody made.
-    let startedNextLeg = false;
-    let startedStepId: string | undefined;
-    /**
-     * The authorisation boundary outranks the ownership boundary.
-     *
-     * Two rules answered 「may work continue」 and neither knew about the other: `sliceDeliveredButPlanOpen`
-     * paused the task (「已按指示停止」) at the same instant this block opened the next step in a fresh
-     * session. Observed live twice — 10:21:18 and 10:32:24 — both times against an explicit
-     * 「只做 1.1，做完就停」, and the second time the person found a session doing 1.2 while the board
-     * said the task had stopped as instructed.
-     *
-     * A directive that says "stop after this slice" is not an opinion about who owns the next step.
-     * If the slice is delivered and the plan is still open, nobody starts the next leg — the pause
-     * says so, and this is the same function the pause reads.
-     */
-    const boundarySaysStop = this.sliceDeliveredButPlanOpen(next);
-    if (accepted && handoff.outcome === 'handoff' && this.deps.startNextLeg && !boundarySaysStop) {
-      const leg = nextLeg(next.spec?.plan);
-      const startedStep = leg?.kind === 'step' ? leg : undefined;
-      /**
-       * The owner of the step just closed is the comparison, not the task's assignee.
-       *
-       * `assigneeAgentId` is blank for a task the scheduler dispatched without a named
-       * agent (`attachSession` writes only the session), so `1.2.agent !== undefined`
-       * was always true: every same-agent hand-off looked like a boundary and started
-       * the next leg on its own. Observed live: the user said 「只做 1.1，做完就停」, the
-       * worker obeyed, and the system opened 1.2 in a fresh session anyway.
-       */
-      const justFinished = [...(next.spec?.plan ?? [])]
-        .filter((step) => step.status === 'done')
-        .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))[0];
-      const current = justFinished?.agent ?? next.assigneeAgentId;
-      const nextAgent = startedStep?.agent ?? current;
-      /**
-       * `sameAgent`, not `!==`: a worker wrote `@builtin-default` where the roster said
-       * `builtin-default`, and the mismatch read as 「a different agent owns the next step」 —
-       * which is what started 1.2 on its own at 10:32:24.
-       */
-      const belongsElsewhere = Boolean(startedStep?.agent && current && !sameAgent(startedStep.agent, current));
-      if (startedStep && belongsElsewhere) {
-        try {
-          startedNextLeg = await this.deps.startNextLeg(next, nextAgent);
-        } catch (error) {
-          startedNextLeg = false;
-          log.warn(`[tasks] could not start the next leg of ${id}`, { error: String(error) });
-        }
-        if (startedNextLeg) {
-          startedStepId = startedStep.step.id;
-          appendJournal(this.root, id, {
-            type: 'next_leg_started',
-            at: now,
-            data: { step: startedStep.step.id, agent: nextAgent },
-          });
-        }
-      }
-    }
+    // The system used to start the next owner's session right here (and, before that, from
+    // inside the worker's own plan write) — the plan said who, so asking the supervisor looked
+    // like paying a model call to read a field. But the field is not the decision: it cannot
+    // see 「用户说只做 1.1，做完就停」, and both auto-starts kept ignoring exactly that.
+    //
+    // The supervisor decides what comes next: the nudge below carries the next open step and
+    // its owner, and the model chooses whether to dispatch it, ask the user, or end the task.
+    const leg = accepted && handoff.outcome === 'handoff' ? nextLeg(next.spec?.plan) : undefined;
+    const suggestedStep = leg?.kind === 'step' ? leg : undefined;
 
     /**
      * Only the supervisor decides what the user sees; the worker never does.
@@ -2158,8 +2042,9 @@ export class TaskService {
      * longer counts as 「filed this run」 (`Handoff.passed`), so the watchdog's
      * 「stopped and never filed」 rule wakes the supervisor the moment the turn ends.
      *
-     * The nudge is never skipped when a next leg started, which used to be the rule —
-     * 「the supervisor has nothing to route」 — and left a leg started by mistake unheard.
+     * The nudge always carries the next open step so the supervisor can decide: the system no
+     * longer auto-starts the next leg (see the block above), which is why the model's decision
+     * — dispatch it, ask the user, or end the task — is the only thing that starts work again.
      */
     /**
      * Tell the supervisor when the task's state changed, or when the slice landed.
@@ -2173,7 +2058,7 @@ export class TaskService {
      * plain accepted hand-off that keeps the task running with the same owner is not a
      * milestone — but it is exactly the news the supervisor is waiting for.
      */
-    if (accepted || milestone || startedNextLeg) {
+    if (accepted || milestone) {
       /**
        * A pending decision must be named in the nudge.
        *
@@ -2184,18 +2069,22 @@ export class TaskService {
        * 进行中 with a decision nobody had surfaced.
        */
       const pending = next.decision && !next.decision.resolvedAt ? next.decision : undefined
+      const openSteps = (next.spec?.plan ?? []).filter((step) => step.status !== 'done')
+      const nextHint = suggestedStep
+        ? `。计划还剩 ${openSteps.length} 步，下一步 ${suggestedStep.step.id}（${suggestedStep.agent ?? '未指定 owner'}），请决定：dispatch 派发该步 / 询问用户 / 结束任务。`
+        : ''
       this.deps.wakeSupervisor(
         next.supervisorSessionId,
-        pending
-          ? `${id} 现在需要用户拍板（${pending.label}）：${pending.reason} 请用 report_to_user 带 kind=decision 告知用户。`
-          : accepted
-            ? startedNextLeg
-              ? `${id} 交接通过，已自动开始下一节（${startedStepId ?? '?'}）：${handoff.summary}`
-              : `${id} 交接通过：${handoff.summary}`
-            : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
+        verifyLimitReached
+          ? `${id} 终态验收已跑满 ${task.verify.maxIterations ?? 3} 轮仍未通过，任务已暂停。请 report_to_user 告知用户，由人决定重开验收还是修改验收要求。`
+          : pending
+            ? `${id} 现在需要用户拍板（${pending.label}）：${pending.reason} 请用 report_to_user 带 kind=decision 告知用户。`
+            : accepted
+              ? `${id} 交接通过：${handoff.summary}${nextHint}`
+              : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
         // One subject per task and outcome: a second failure notice about the same task is the same
         // fact restated, and a queue that stacks them makes the supervisor act twice.
-        `${id}:${pending ? 'decision' : accepted ? 'handoff-pass' : 'handoff-fail'}`,
+        `${id}:${verifyLimitReached ? 'verify-limit' : pending ? 'decision' : accepted ? 'handoff-pass' : 'handoff-fail'}`,
       );
     }
 

@@ -26,6 +26,12 @@ export const ReportResultSchema = z.object({
   summary: z
     .string()
     .describe('What was done, in at most a few sentences. This is what the user or the next session reads first.'),
+  stepId: z
+    .string()
+    .optional()
+    .describe(
+      'The plan step this report covers, e.g. "1.2". Required in practice when the task has a plan: the supervisor will not start the next section until the previous section has an accepted report naming it.',
+    ),
   keyFindings: z.array(z.string()).optional().describe('Facts the next session must know (max 5).'),
   nextAction: z.string().optional().describe('Where the next session should start, if more work is needed.'),
   artifacts: z

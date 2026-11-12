@@ -60,7 +60,7 @@ export const SESSION_PERSISTENT_FIELDS = [
   // Multi-agent: role profile + its frozen snapshot, the session's role and
   // the task/lineage binding. Without these, a restart lost the persona, the
   // scope ceilings and the supervisor/worker distinction.
-  'agentId', 'agentSnapshot', 'role', 'supervisorLane', 'taskId', 'spawnDepth',
+  'agentId', 'agentSnapshot', 'role', 'supervisorLane', 'taskId', 'spawnDepth', 'taskScope',
   // Folder tree membership (workspace/project scoped folders)
   'folderId', 'archivedFolderId', 'archivedFolderPath', 'archivedProjectId', 'archivedByParent', 'sortOrder', 'pinnedAt',
 ] as const;
@@ -142,6 +142,22 @@ export interface SessionConfig {
   supervisorLane?: 'user' | 'task';
   /** Task this session works on (set when the supervisor delegated it). */
   taskId?: string;
+  /**
+   * Which slices of that task this session is responsible for.
+   *
+   * The name carried the step in prose, which is readable by a person and invisible to the
+   * dispatcher — so 「这个会话负责到哪」 could not be asked of the record. Reuse of a session
+   * across sections needs exactly that answer, and so does the hand-off gate that runs when the
+   * executor changes.
+   *
+   * `stepIds` accumulates as sections are handed to the same session; `outlineId` is the
+   * section it was opened for, so a session can be preferred for its own section first.
+   */
+  taskScope?: {
+    taskId: string;
+    outlineId?: string;
+    stepIds: string[];
+  };
   /**
    * Tools this session may use, from the task it was spawned for.
    *

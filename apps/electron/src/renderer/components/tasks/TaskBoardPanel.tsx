@@ -183,6 +183,9 @@ export const PAUSE_REASON_LABEL: Record<string, string> = {
   // The executor reported and stopped, the plan still has work, and no run owns it: nobody is
   // asking anything, and nobody is working either.
   awaiting_dispatch: '等待派活',
+  // Terminal acceptance re-verified `maxIterations` rounds without passing: the plan is done,
+  // the work failed every round, and the next decision belongs to a person.
+  verify_exhausted: '验收轮数耗尽',
 }
 
 export function pauseReasonLabel(reason: string): string {

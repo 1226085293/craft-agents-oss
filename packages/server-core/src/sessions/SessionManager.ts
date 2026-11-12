@@ -6031,21 +6031,41 @@ export class SessionManager implements ISessionManager {
           sendToSession: (sessionId, text) => this.sendSystemMessage(sessionId, text),
           askUser: async (payload) => {
             /**
-             * One list per turn, delivered once when the turn ends.
+             * One list per turn, delivered once when the turn ends — and the list is replaced, not
+             * appended, so the person reads the last thing the supervisor said, not every draft of it.
              *
              * `report_to_user` used to deliver immediately and `ask_user` at turn end, so one turn
              * could reach the person twice — observed as two decision cards six seconds apart for
              * one unresolved situation, the first with no buttons because the model had not decided
              * what the answers were yet. Two doors, two moments, one question.
              *
-             * Now every entry joins the turn's list. A decision is also written to the task
-             * immediately, because a task must not be startable while a person is still deciding —
-             * that has to be true from the moment the question exists, not from the moment a card
-             * appears.
+             * Appending had the same defect in one call instead of two: a supervisor that re-asked
+             * to fix its wording (the prompt told it a re-ask wins) left both drafts on the list,
+             * and both reached the person as separate bubbles eight seconds apart. The array is the
+             * complete list of what to say — one call, whole state; the next call replaces it.
+             *
+             * A decision is also written to the task immediately, because a task must not be
+             * startable while a person is still deciding — that has to be true from the moment the
+             * question exists, not from the moment a card appears. When a new call replaces an
+             * earlier one, the questions the earlier call left open and undelivered are retired as
+             * obsolete first: the record-side flush would otherwise send them alongside the new
+             * wording, recreating the duplicate card.
              */
             const tasks = this.getTasks(managed.workspace.id)
             const named = payload.taskId?.trim()
             const targetId = named || this.pickOpenQuestionTask(managed)
+            const hasDecision = payload.entries.some((entry) => entry.kind === 'decision')
+            if (targetId && hasDecision) {
+              const task = tasks.get(targetId)
+              const superseded = task ? undeliveredQuestions(task) : []
+              for (const entry of superseded) {
+                try {
+                  tasks.resolveDecision(targetId, 'obsolete', '被同一轮后一次的 ask_user 替换', entry.id)
+                } catch (error) {
+                  sessionLog.warn('[supervisor] could not retire a superseded question', { error })
+                }
+              }
+            }
             for (const entry of payload.entries) {
               if (entry.kind !== 'decision') continue
               if (!targetId) continue
@@ -6058,15 +6078,12 @@ export class SessionManager implements ISessionManager {
                 sessionLog.warn('[supervisor] could not record the question on its task', { error })
               }
             }
-            managed.pendingUserEntries = [
-              ...(managed.pendingUserEntries ?? []),
-              ...payload.entries.map((entry) => ({
-                kind: entry.kind,
-                text: entry.text,
-                ...(entry.options?.length ? { options: [...entry.options] } : {}),
-                ...(targetId ? { taskId: targetId } : {}),
-              })),
-            ]
+            managed.pendingUserEntries = payload.entries.map((entry) => ({
+              kind: entry.kind,
+              text: entry.text,
+              ...(entry.options?.length ? { options: [...entry.options] } : {}),
+              ...(targetId ? { taskId: targetId } : {}),
+            }))
           },
           dispatchViaSupervisor: async (params) => {
             const runtime = this.getSupervisorRuntime(managed.workspace.id)

@@ -1,55 +1,48 @@
 import { describe, expect, it } from 'bun:test';
 
 /**
- * One turn, one list, one delivery.
+ * One turn, one list, one delivery — and the list is the last word, not every draft of it.
  *
  * The two-card defect was reported from a real run: T-1's hand-off landed at 17:25:17 with prose
  * and no options, and again at 17:25:23 with three buttons — the same unresolved situation, two
  * cards, the first with nothing to click. Both calls came from one turn of one supervisor session.
  *
- * The cause was structural rather than a model mistake: `report_to_user` delivered immediately and
- * `ask_user` collected until the turn ended, so the same turn had two paths to the person at two
- * moments. The model had no way to know they were one queue.
- *
- * What is asserted here is the shape that removes the choice: entries accumulate on the session, and
- * the flush reads them in order exactly once.
+ * The first fix made the turn collect entries and flush them once. That still delivered both
+ * drafts when one call was a re-ask: the prompt told the supervisor a re-ask wins, so it asked
+ * again to fix its wording, and the person read both bubbles — 「已全部完成并收尾」 eight seconds
+ * before 「已全部做完」. The array is the complete list of what to say: one call is the whole
+ * state, and the next call replaces it.
  */
 describe('a turn collects its entries before speaking', () => {
-  /** Mirrors the accumulation in the `askUser` binding. */
+  /** Mirrors the `askUser` binding. */
   type Entry = { kind: 'completed' | 'decision' | 'blocked'; text: string; options?: string[]; taskId?: string };
 
-  function collect(turn: Entry[], pending: Entry[] | undefined, taskId?: string): Entry[] {
-    return [
-      ...(pending ?? []),
-      ...turn.map((entry) => ({ ...entry, ...(taskId ? { taskId } : {}) })),
-    ];
+  function collect(turn: Entry[], taskId?: string): Entry[] {
+    return turn.map((entry) => ({ ...entry, ...(taskId ? { taskId } : {}) }));
   }
 
-  it('appends a second call to the same list instead of drawing a second card', () => {
+  it('replaces the list, so a re-ask leaves one draft instead of two', () => {
     const first = collect(
-      [{ kind: 'decision', text: '请拍板下一步。', options: [] }],
-      undefined,
+      [{ kind: 'completed', text: 'T-1 已全部完成并收尾。' }],
       'T-1',
     );
     const second = collect(
-      [{ kind: 'decision', text: '剩 1.2 与 2 未动工，请拍板。', options: ['放行 1.2', '收尾'] }],
-      first,
+      [{ kind: 'completed', text: 'T-1 已全部做完：1.1 ✓、1.2 ✓、2 ✓。' }],
       'T-1',
     );
 
-    // Two entries, one delivery — which is why the person reads one turn, not two cards.
-    expect(second).toHaveLength(2);
-    expect(second.every((entry) => entry.taskId === 'T-1')).toBe(true);
+    // One entry survives — the last call is the whole list.
+    expect(second).toHaveLength(1);
+    expect(second[0]!.text).toContain('已全部做完');
   });
 
-  it('keeps statements and questions in the order they were said', () => {
+  it('keeps the whole array of one call, in the order it was said', () => {
     const list = collect(
       [
         { kind: 'completed', text: '1.1 做完了' },
         { kind: 'decision', text: '下一步？', options: ['放行 1.2', '收尾'] },
         { kind: 'blocked', text: '账号过期，需要你重登' },
       ],
-      undefined,
       'T-1',
     );
 
@@ -59,7 +52,6 @@ describe('a turn collects its entries before speaking', () => {
   it('takes the list before delivering, so a racing flush cannot send twice', () => {
     let pending = collect(
       [{ kind: 'completed', text: 'done' }],
-      undefined,
       'T-1',
     );
 

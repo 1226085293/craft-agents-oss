@@ -522,6 +522,20 @@ export interface Task {
   /** Run bookkeeping. Missing on tasks created before v2. */
   stats?: TaskStats;
 
+  /**
+   * The last time a person's words reached this task, stamped by machine — never by a model.
+   *
+   * Three channels stamp it: a decision card answer (`recordDecisionAnswer`), and the two relay
+   * entrances in `createTaskFromUser` (new task, follow-up words). Nothing else may write it,
+   * because everything else is a model — and a model-stamped 「human spoke」 is exactly the
+   * self-authorisation this field exists to stop.
+   *
+   * Read by `resumeDecisionFor` and the dispatch pause gate as 「did the person speak after the
+   * question was asked?」. A decision closed without an answer (obsolete) unlocks nothing unless
+   * this timestamp is newer than the question.
+   */
+  humanAuthAt?: number;
+
   /** Task-level heartbeat: proves the whole task is alive, not just a turn. */
   heartbeatIntervalMin: number;
   lastHeartbeatAt?: number;

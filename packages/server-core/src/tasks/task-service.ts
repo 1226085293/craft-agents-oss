@@ -1072,7 +1072,15 @@ export class TaskService {
         ? { ...entry, answer: { text: trimmed, at: now }, resolvedAt: now, resolution: 'approved' as const }
         : entry,
     );
-    const next: Task = { ...task, decisions: queue, updatedAt: now };
+    /**
+     * A person's words reached this task: stamp the contact.
+     *
+     * This is the one fact `resumeDecisionFor` cannot derive from the decision queue — an answer
+     * is obviously human, but the timestamp is what lets a *later* question be compared against
+     * 「did the person speak after it was asked?」. A scope write that closes a question without
+     * this stamp unlocks nothing.
+     */
+    const next: Task = { ...task, decisions: queue, updatedAt: now, humanAuthAt: now };
     this.save(next);
     appendJournal(this.root, id, {
       type: 'decision_answered',
@@ -1087,6 +1095,27 @@ export class TaskService {
      * on screen. `save` derives the reason from the queue, so this needs no explicit reset.
      */
     return this.get(id)
+  }
+
+  /**
+   * Stamp that a person's words reached this task — the machine's bookkeeping, not a model's claim.
+   *
+   * Called from the two relay entrances in `createTaskFromUser` (new task, follow-up). A model can
+   * never call this; `task_update` has no path to it. That is the entire point: `humanAuthAt` is
+   * the timestamp `resumeDecisionFor` and the dispatch gate compare against `askedAt`, and a
+   * timestamp a model can write is a timestamp that proves nothing.
+   */
+  markHumanContact(id: string): Task {
+    const task = this.require(id);
+    const now = this.now();
+    const next: Task = { ...task, humanAuthAt: now, updatedAt: now };
+    this.save(next);
+    appendJournal(this.root, id, {
+      type: 'human_contact',
+      at: now,
+      data: {},
+    });
+    return next;
   }
 
   /**

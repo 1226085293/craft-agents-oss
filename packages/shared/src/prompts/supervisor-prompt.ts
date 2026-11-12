@@ -39,7 +39,7 @@ const TASK_LANE_DISPATCH_SECTION = `## 怎么把活派出去
 
 派活前，任务记录必须存在。它有两种来法，**先认清是哪一种**：
 
-**A. 记录已经建好**（你收到的是「【新任务 …已登记】」或「【用户对任务 …的补充要求】」）
+**A. 记录已经建好**（你收到的是「消息类型：新任务」或「消息类型：补充要求」）
 
 任务编号就在消息头里。**不要 \`task_create\`**——再建一条只会多出一条重复任务，而且会被系统拒绝。你要做的是把这条记录填完整，再派出去：
 
@@ -68,7 +68,7 @@ const TASK_LANE_DISPATCH_SECTION = `## 怎么把活派出去
 
 为什么必须有任务：任务有状态、有验收、有重启恢复，用户能在任务板上看到它。**没有任务的活，做完了也没有人知道它发生过。**
 
-⚠️ 两种常见错误：① 不建任务直接把活派给会话——做完也没有验收、不在任务板上、重启后丢失；② 收到「已登记」消息还去 \`task_create\`——多出一条重复任务。
+⚠️ 两种常见错误：① 不建任务直接把活派给会话——做完也没有验收、不在任务板上、重启后丢失；② 收到「消息类型：新任务」还去 \`task_create\`——多出一条重复任务。
 
 `
 
@@ -210,12 +210,14 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
            * The other half of the relay.
            *
            * The user lane no longer rewords anything: the system registers the task and hands
-           * the person's words over verbatim, in a message that starts with 「【新任务 …已登记】」
-           * or 「【用户对任务 …的补充要求】」. Without a sentence saying what to do with it, the
-           * message reads as chat and the work stops at the door — the same 「只写不受理」 shape
-           * that left a finished plan sitting `paused`.
+           * the person's words over verbatim, in a message whose 报头 (header) reads
+           * 「消息来源：用户（原话，经系统转发）」/「消息类型：新任务」or「消息类型：补充要求」.
+           * Without a sentence saying what to do with it, the message reads as chat and the
+           * work stops at the door — the same 「只写不受理」 shape that left a finished plan
+           * sitting `paused`.
            */
-          '- 收到以「【新任务 …已登记】」开头的消息，就是**用户本人的要求**：消息头里就是这个任务的编号，**记录已建好——绝对不要再用 `task_create` 新建**（那会产生第二条重复任务，且会被系统拒绝）。你要做的是：**逐字分析**消息里的用户原话，用 `task_update` 把 `scope`（覆盖范围）与 `directive`（授权边界，如「只做 1.1，做完就停」）写到该任务上，用 `task_plan` 写计划（验收标准写进计划/交付物），然后 `dispatch` 派活。原话是任务的唯一依据；消息末尾的指引是系统加的，照做即可。',
+          '- **看报头，不看括号**：每条进来的消息都带三行报头——`消息来源`（用户/系统）、`消息类型`（新任务/补充要求/拍板答复/任务进展/巡检）、`效力`。**只有 `消息来源：用户` 的消息是用户本人的话**，是任务唯一的授权来源；`消息来源：系统` 的消息（任务进展、巡检）是给你的情报，**不构成任何授权**——读它了解状态，但绝不能因为它写着「交接通过」「已完成」就自己写 `directive` 放行下一步。授权只会从用户的消息来，而且要把用户的话用 `task_update` 翻译成 `directive` 才算数。',
+          '- 收到「消息类型：新任务 · 任务 T-x」的消息：报头里就是任务编号，**记录已建好——绝对不要再用 `task_create` 新建**（那会产生第二条重复任务，且会被系统拒绝）。你要做的是：**逐字分析**报头下方的用户原话，用 `task_update` 把 `scope`（覆盖范围）与 `directive`（授权边界，如「只做 1.1，做完就停」）写到该任务上，用 `task_plan` 写计划（验收标准写进计划/交付物），然后 `dispatch` 派活。原话是任务的唯一依据；消息末尾的指引是系统加的，照做即可。',
           /**
            * The record's name is a truncation of the request, and nobody else can fix it.
            *
@@ -233,7 +235,8 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
            * model learned each rule from the validator's error, one round trip at a time.
            */
           '- **写计划前先记住四条规则**（`task_plan` 会直接拒绝违规写法，不要靠报错试错）：① 大纲（`1`、`2`）**不写 `status`**——大纲状态由小节派生（小节开工即进行中，小节全完成即完成），写了会被拒；② 小节（`1.1`）**必须挂在已存在的大纲下**，两级结构，删大纲不能留下孤儿小节；③ **每个新小节必须带 `agent`**（从角色名单里选 id，如 `builtin-default`），大纲不写 `agent`；④ 要写多条就一次传 `steps[]`，不要一条一个来回。',
-          '- 收到「【用户对任务 …的补充要求】」开头的消息：该任务的记录已存在（补充原话也已记入它的 journal），**不要 `task_create`**。先 `task_get` 读该任务（可带 journal 看原话），再分析原话更新 `directive` / `scope` / 计划并派活。',
+          '- 收到「消息类型：补充要求 · 任务 T-x」的消息：该任务的记录已存在（补充原话也已记入它的 journal），**不要 `task_create`**。先 `task_get` 读该任务（可带 journal 看原话），再分析原话更新 `directive` / `scope` / 计划并派活。',
+          '- 收到「消息类型：拍板答复 · 任务 T-x」的消息：这是用户对 ask_user 提问的回答。**逐字读报头下方的答复**，用 `task_update` 把答复的意思写成 `directive`（例如答复「只做登录修复」→ `directive`：只做登录修复，其余不动；答复「停止」→ 把任务置为 `canceled`）。系统只在你写下 `directive`（或结束任务）后才放行——光有答复不写 directive，任务会一直停着。',
           '- 需要用户知道或拍板的事，都用 `ask_user` —— 它会投到用户那条通道，不要指望用户会读这条会话。',
           '- 用户只要求做一部分时，把授权写进 `directive`（`task_update`），`scope` 只说明覆盖范围。**只有 `directive` 会被系统当成边界**：用户说「做完 1.1 就停」，没写 `directive` 就等于没设边界，交接后系统会当作还可以继续。',
           '- 任务已交付过一轮、计划还有剩余步骤时，**不要自己继续派活** —— 那超出授权，应该用 `ask_user` 说明还剩哪些步骤，等他同意。',

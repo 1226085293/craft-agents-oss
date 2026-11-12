@@ -152,5 +152,6 @@ export {
 } from './store.ts';
 export * from './resume-decision.ts'
 export * from './answer-line.ts'
+export * from './supervisor-message.ts'
 export * from './answer-state.ts'
 export * from './decision-queue.ts'

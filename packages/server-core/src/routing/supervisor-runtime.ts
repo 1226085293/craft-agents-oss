@@ -27,7 +27,7 @@ import {
 } from '@craft-agent/shared/agents/supervisor';
 import { loadRoutes, matchRoute, formatRouteInstruction, formatRouteRuleIssue, ruleParallelism } from '@craft-agent/shared/routing';
 import { readAgentRoster } from '@craft-agent/shared/agents';
-import { isTerminal } from '@craft-agent/shared/tasks';
+import { isTerminal, resumeDecisionFor } from '@craft-agent/shared/tasks';
 import { DispatchQueue } from './dispatch-queue.ts';
 
 const log = createLogger('supervisor');
@@ -110,7 +110,7 @@ export interface SupervisorRuntimeDeps {
       /** Read by `resumeDecisionFor`: the instruction the person's reply was turned into. */
       directive?: { text: string; at: number };
     };
-    handoffs?: Array<{ outcome?: string }>;
+    handoffs?: Array<{ outcome?: string; at?: number }>;
     /**
      * Read by `resumeDecisionFor` — the same verdict the run gate reads.
      *
@@ -119,7 +119,13 @@ export interface SupervisorRuntimeDeps {
      * status flip starts a run.
      */
     status?: string;
-    decision?: { resolvedAt?: number; answer?: { at?: number } };
+    /** The newest open decision's mirror; `askedAt` is what `resumeDecisionFor` compares against. */
+    decision?: { askedAt?: number; label?: string; resolvedAt?: number; answer?: { text?: string; at?: number } };
+    /**
+     * Last time a person's words reached this task, machine-stamped. Read by
+     * `resumeDecisionFor` — without it a question closed without an answer looks settled.
+     */
+    humanAuthAt?: number;
   } | null;
   /** Start a task by id; returns true when a run actually began. */
   runTask?: (taskId: string, reason: string) => Promise<boolean>;
@@ -477,6 +483,21 @@ export class SupervisorRuntime {
           `${task.id} 现在是暂停状态，而且没有覆盖这次继续的授权。` +
             '先让用户确认，再用 task_update 把他的话写成 directive，然后 dispatch —— 不要用改状态的方式启动任务。',
         );
+      }
+      /**
+       * The date is not the whole answer.
+       *
+       * The supervisor can write a directive itself — the date check above cannot tell a
+       * person-backed instruction from a self-authored one. `resumeDecisionFor` can: a question
+       * closed without an answer unlocks nothing unless the person spoke after it was asked.
+       * Observed live on T-1: the lane wrote its own directive, its scope write closed its own
+       * question as obsolete, and the old date-only gate read the whole chain as authorised.
+       */
+      const verdict = resumeDecisionFor(task as never)
+      if (!verdict.allowed) {
+        throw new DispatchRefused(
+          `${task.id} 现在是暂停状态，而且这次继续没有拿到用户的拍板：${verdict.why}`,
+        )
       }
     }
     if (params.userApproved) return;

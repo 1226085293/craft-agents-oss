@@ -129,3 +129,112 @@ describe('may this task run', () => {
     expect(verdict.allowed).toBe(true)
   })
 })
+
+/**
+ * The chain that once displayed 「用户拍板放行」 with no answer anywhere in the record:
+ * the supervisor asked, wrote its own directive, and its scope write closed the question as
+ * obsolete. This used to fall through to 「没有待回答的问题」 — allowed on nobody.
+ */
+describe('a question closed without an answer unlocks nothing on its own', () => {
+  const closedWithoutAnswer = {
+    category: 'direction',
+    label: '是否放行大纲2？',
+    reason: 'x',
+    askedAt: 100,
+    deadlineAt: 200,
+    resolvedAt: 150,
+  }
+
+  it('refuses when nobody has spoken since the question was asked', () => {
+    const verdict = resumeDecisionFor(
+      task({
+        spec: { directive: { text: '执行大纲 2 收尾', at: 160 } },
+        decision: closedWithoutAnswer,
+      }),
+    )
+    expect(verdict.allowed).toBe(false)
+    if (!verdict.allowed) expect(verdict.why).toContain('没有任何人回答过')
+  })
+
+  it('refuses when the person spoke but nobody translated the words into a directive', () => {
+    const verdict = resumeDecisionFor(
+      task({ humanAuthAt: 170, decision: closedWithoutAnswer }),
+    )
+    expect(verdict.allowed).toBe(false)
+    if (!verdict.allowed) expect(verdict.why).toContain('翻译成指令')
+  })
+
+  it('allows when the person spoke and a directive newer than that contact exists', () => {
+    const verdict = resumeDecisionFor(
+      task({
+        humanAuthAt: 170,
+        spec: { directive: { text: '只做大纲 2 收尾', at: 180 } },
+        decision: closedWithoutAnswer,
+      }),
+    )
+    expect(verdict.allowed).toBe(true)
+    if (verdict.allowed) expect(verdict.directive).toBe('只做大纲 2 收尾')
+  })
+})
+
+/**
+ * A task can hold several questions. Answering one is not answering the rest, and a second
+ * question the supervisor closes for itself must not ride the first question's answer.
+ */
+describe('several questions in the queue', () => {
+  it('refuses when an answered question sits beside a closed one nobody saw', () => {
+    const verdict = resumeDecisionFor(
+      task({
+        humanAuthAt: 4,
+        spec: { directive: { text: '只做 1.2', at: 10 } },
+        decisions: [
+          {
+            category: 'direction',
+            label: 'Q1',
+            reason: 'x',
+            askedAt: 1,
+            deadlineAt: 2,
+            resolvedAt: 3,
+            answer: { text: '只做 1.2', at: 4 },
+          },
+          {
+            category: 'direction',
+            label: 'Q2',
+            reason: 'x',
+            askedAt: 6,
+            deadlineAt: 7,
+            resolvedAt: 9,
+          },
+        ],
+        decision: {
+          category: 'direction',
+          label: 'Q2',
+          reason: 'x',
+          askedAt: 6,
+          deadlineAt: 7,
+          resolvedAt: 9,
+        },
+      }),
+    )
+    // Q2 was asked after the person's last words — closing it is the supervisor answering itself.
+    expect(verdict.allowed).toBe(false)
+  })
+
+  it('refuses while any question in the queue is still open, even without a mirror', () => {
+    const verdict = resumeDecisionFor(
+      task({
+        decisions: [
+          {
+            category: 'direction',
+            label: '等你拍板',
+            reason: 'x',
+            askedAt: 1,
+            deadlineAt: 2,
+          },
+        ],
+      }),
+    )
+    expect(verdict.allowed).toBe(false)
+    if (!verdict.allowed) expect(verdict.why).toContain('等你拍板')
+  })
+})

@@ -18,6 +18,7 @@ import {
   processLostRetryDue,
   formatDecisionAnswerLine,
   formatDecisionAnswersLine,
+  formatSupervisorMessage,
   openDecisions,
   undeliveredAnswers,
 } from '@craft-agent/shared/tasks';
@@ -296,7 +297,15 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
         const taskRecord = service.get(resolvedId)
         const line = taskRecord
           ? formatDecisionAnswerLine(taskRecord, text)
-          : `〔任务 ${resolvedId} 拍板答复〕${text.trim()}`
+          : formatSupervisorMessage(
+              {
+                source: '用户（任务卡拍板）',
+                type: '拍板答复',
+                taskId: resolvedId,
+                effect: '这是用户本人的话。',
+              },
+              text.trim(),
+            )
         void managerForReply.sendMessage(asker, line).catch(() => undefined)
         broadcast(workspaceId)
         return { accepted: true }

@@ -225,10 +225,14 @@ describe('lane-specific rules', () => {
     expect(text).toContain('一个回合只用一次');
   });
 
-  it('tells the task lane that scope is a boundary', () => {
+  it('tells the task lane to continue when the directive already covers the rest', () => {
+    // The old rule was 「已交付过一轮、计划还有剩余 → 一律先问用户」, which asked once per
+    // outline even when the person had said 「做 3 条大纲，全部做完」 and the directive said so.
+    // The test is about the boundary now: continue when authorised, ask only when it stops short.
     const text = taskLane()
     expect(text).toContain('面向任务');
-    expect(text).toContain('不要自己继续派活');
+    expect(text).toContain('directive` 已经覆盖剩下的步骤');
+    expect(text).toContain('不要每完成一个小节就确认一次');
   });
 
   it('does not leak one lane rule into the other', () => {

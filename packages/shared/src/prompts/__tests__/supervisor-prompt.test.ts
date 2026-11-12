@@ -212,6 +212,19 @@ describe('lane-specific rules', () => {
     expect(text).toContain('照抄原话放进');
   });
 
+  it('tells the user lane to stop after creating a task instead of narrating the backlog', () => {
+    // Live on T-1 (2026-11-13 06:03): the person asked for a task; nine seconds later the user
+    // lane had read `backlog` (the working lane dispatches a moment later), concluded the system
+    // was stuck, and sent two ask_user calls — a `decision` offering 「再等一会 / 取消重建」 and a
+    // `blocked`. It also quoted words the person never said. None of that is a question a person
+    // can act on, and all of it came from a rule that was never written down.
+    const text = userLane()
+    expect(text).toContain('建完就停');
+    expect(text).toContain('同一回合里不要再');
+    expect(text).toContain('不要拿系统内部记账去问用户');
+    expect(text).toContain('一个回合只用一次');
+  });
+
   it('tells the task lane that scope is a boundary', () => {
     const text = taskLane()
     expect(text).toContain('面向任务');

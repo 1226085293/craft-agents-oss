@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test'
 import { getSupervisorSystemPrompt, SUPERVISOR_PROMPT_TOOLS, USER_LANE_PROMPT_TOOLS } from '../supervisor-prompt.ts'
-import { SUPERVISOR_TOOL_NAMES, USER_LANE_DENIED_TOOL_NAMES, getSessionToolNames } from '../../../../session-tools-core/src/tool-defs.ts'
+import { SUPERVISOR_TOOL_NAMES, USER_LANE_DENIED_TOOL_NAMES, USER_LANE_ONLY_TOOL_NAMES, getSessionToolNames } from '../../../../session-tools-core/src/tool-defs.ts'
 
 /**
  * These tests exist because of an observed failure, not for coverage.
@@ -139,7 +139,11 @@ describe('supervisor prompt', () => {
       expect(SUPERVISOR_TOOL_NAMES.has(name)).toBe(true)
     }
     // Compare as numbers: a Set's .size widens to a literal here otherwise.
-    expect(SUPERVISOR_PROMPT_TOOLS.length as number).toBe(SUPERVISOR_TOOL_NAMES.size as number)
+    // `create_task` is in the supervisor table but user-lane-only, so it is absent from the
+    // working-lane list; the user-lane list is pinned against the real table below.
+    expect(SUPERVISOR_PROMPT_TOOLS.length as number).toBe(
+      (SUPERVISOR_TOOL_NAMES.size - USER_LANE_ONLY_TOOL_NAMES.size) as number
+    )
   })
 })
 
@@ -151,7 +155,9 @@ describe('lane-specific rules', () => {
     const text = userLane()
     expect(text).toContain('面向用户');
     expect(text).toContain('不推进任务');
-    expect(text).toContain('不要把范围外的步骤写进计划');
+    // The relay verbatim rule replaced the old 「不要把范围外的步骤写进计划」 line:
+    // this lane no longer writes anything, so the rule is about not rewriting the person's words.
+    expect(text).toContain('照抄原话放进');
   });
 
   it('tells the task lane that scope is a boundary', () => {
@@ -233,8 +239,13 @@ describe('lane prompts match their tool tables', () => {
     const user = getSessionToolNames({ role: 'supervisor', supervisorLane: 'user' })
     const task = getSessionToolNames({ role: 'supervisor', supervisorLane: 'task' })
     expect(user.size as number).toBeLessThan(task.size as number)
-    // Everything the user lane has, the working lane has too: a lane only narrows.
-    for (const name of user) expect(task.has(name)).toBe(true)
+    // Everything the user lane has, the working lane has too — with one deliberate exception:
+    // `create_task` is the user lane's own door (the task lane has `task_create`), so it is the
+    // only name a lane may carry that the other does not. Everything else still only narrows.
+    for (const name of user) {
+      if (USER_LANE_ONLY_TOOL_NAMES.has(name)) continue
+      expect(task.has(name)).toBe(true)
+    }
   })
 })
 

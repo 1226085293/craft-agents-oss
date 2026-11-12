@@ -42,6 +42,7 @@ import {
   handleDispatch,
   handleReportResult,
   handleTaskCreate,
+  handleCreateTask,
   handleTaskGet,
   handleTaskHandoff,
   handleTaskPlan,
@@ -54,6 +55,7 @@ import {
   DispatchSchema,
   ReportResultSchema,
   TaskCreateSchema,
+  CreateTaskSchema,
   TaskGetSchema,
   TaskHandoffSchema,
   TaskListSchema,
@@ -422,6 +424,7 @@ export const TOOL_DESCRIPTIONS = {
   spawn_session: `Create an independent session running with its own prompt, connection, model, and sources. Useful for delegating research/analysis/drafts to parallel sessions. Use help=true first to list connections/models/sources. The prompt param is required; optional overrides: model, llmConnection, permissionMode, thinkingLevel, enabledSourceSlugs, workingDirectory. By default (subscribe=true) this session starts FOLLOWING the new session: every finished turn is posted back here as a message and you are woken. Pass subscribe=false for fire-and-forget work. This call returns as soon as the session starts (status 'started'); end your turn instead of polling.`,
 
   task_create: `Supervisor-only: create a task when the work spans more than one session. instruction is the original request and is immutable — changing it means a new task. Returns the human id (T-1). If you pass plan[], read the roster in this brief first and give every sub-step (ids like '1.1') an agent from it — a plan with an unowned sub-step is refused outright, because a sub-step is the unit of assignment and an unowned one was assigned to nobody. Outlines ('1', '2') take no agent.`,
+  create_task: `User-facing supervisor only: the single door through which a person's words enter the system. Pass the user's request VERBATIM in \`request\` — never summarise or reword it (a relay that paraphrased 「只做 1.1，做完就停」 into a meta-instruction produced a task whose boundary existed nowhere). The system creates the task record and hands the words to the lane that analyses them into scope / directive / plan and dispatches. You do not see that lane and cannot message it. To add to an existing task, pass its taskId — nothing new is created, the words become a follow-up.`,
   task_list: `Supervisor-only: list tasks, newest activity first. Filter by status to find what is still running or waiting on a decision.`,
   task_get: `Supervisor-only: read one task, including its handoff trail and budget. Use includeJournal for the full event log.`,
   task_update: `Supervisor-only: advance a task (running / paused / completed / failed / canceled) or annotate it. Illegal transitions are refused. Pass directive for ANY authorisation boundary, in the user's terms — at creation (「做完 1.1 就停」) and after a reply. It is the only boundary the system reads: scope says what the work covers and stops nothing, so a task with no directive runs on past the slice the person allowed. Pass acceptance[{id, check, command}] to correct the acceptance list — an item is about the RESULT, and a mis-worded one used to be permanent: 「本轮未执行 1.2」 stayed false forever after the next run did 1.2, failing every hand-off until the fuse paused the task. A check that describes what THIS run may do belongs in directive.`,
@@ -430,7 +433,7 @@ export const TOOL_DESCRIPTIONS = {
   report_result: `Report the outcome of this turn to the supervisor: what you did (summary, max ~200 chars), what you found, what the next session should do, where the deliverables are, and how you verified it. Choose the outcome by what finished, not by how well you did it: 'handoff' (default) when your assigned part is done and the plan still has steps left — the task continues with the next session; 'delivered' only when the whole plan is finished and this is the final answer for the user; 'needs_decision' when a human must choose. Reporting 'delivered' with steps still open fails the gate — use 'handoff' instead, do not remove the remaining steps. The supervisor's rule gate fails a handoff with no artifacts or no verification command.`,
   dispatch: `Supervisor-only: send work to an existing session, an existing task, or a brand new session. Requires instruction (the work: goal, acceptance criteria, where the deliverable goes) and scope (one sentence describing what that session is responsible for, used to match later dispatches). A brand new session runs as whatever role you name in target.agentId — pick from the roster by what the work actually is, not by rank; omit it only when the workspace default is genuinely the right fit. Pass stepId (e.g. "1.2") whenever the task has a plan: work that is already done is refused, so naming the step is how you find out before spending a turn — dispatching 1.2 after the worker had marked it done re-ran the same file and reported 「交接通过」 twice. At most 3 dispatches per turn; end the turn after dispatching instead of polling.`,
   list_questions: `Supervisor-only: what is already queued for the person this turn. Call it before adding more: re-wording an existing question goes through the same queue, and asking the same thing twice draws two cards for one decision. The queue is cleared when the turn ends and the entries go out, so an empty list means nothing new to say — what the person already has lives on the task (\`task_get\`).`,
-  ask_user: `Supervisor-only: the single channel to the user. Pass every entry this turn has for them, in order, in one call — \`completed\` (the task is finished), \`blocked\` (a failure needing human hands), or \`decision\` (only a person can choose). Keep each text under ~100 words: conclusions plus a session link for detail; never paste worker logs, and never narrate progress. A \`decision\` must carry \`options\` (max 4) — each becomes a button and comes back verbatim, so phrase them as answers, not labels, and do not repeat them inside the text. Pass \`taskId\` (e.g. "T-1") when the entries are about a task. Everything is delivered together when the turn ends, so calling this twice appends to the same list instead of drawing a second card.`,
+  ask_user: `Supervisor-only: the single channel to the user. Pass every entry this turn has for them, in order, in one call — \`completed\` (the task is finished), \`blocked\` (a failure needing human hands), or \`decision\` (only a person can choose). Keep each text under ~100 words: conclusions plus a session link for detail; never paste worker logs, and never narrate progress. A \`decision\` must carry \`options\` (max 4) — each becomes a button and comes back verbatim, so phrase them as answers, not labels, and do not repeat them inside the text. Pass \`taskId\` (e.g. "T-1") when the entries are about a task. Everything is delivered together when the turn ends. Each call REPLACES the previous one — the array is the complete list; re-call only to fix wording, and the person reads the last version only.`,
   send_developer_feedback: `Send freeform feedback to the Craft Agent development team: issues, improvement ideas, patterns found. Write in markdown with as much detail as possible.`,
   archive_session: `Archive or purely unarchive ANOTHER session by ID: removes it from active list/unread counts (does not delete). Requires explicit sessionId; you cannot archive your own. Find ids via list_sessions.`,
   list_pages: `List the workspace's Pages (persistent HTML mini-apps shown in sidebar). Returns slug, name, kind (static/interactive/live), project, refresh schedule, last outcome, share state, folder. Use get_page for full details.`,
@@ -540,6 +543,7 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'list_questions', description: TOOL_DESCRIPTIONS.list_questions, inputSchema: ListQuestionsSchema, executionMode: 'registry', safeMode: 'allow', handler: handleListQuestions },
   { name: 'ask_user', description: TOOL_DESCRIPTIONS.ask_user, inputSchema: AskUserSchema, executionMode: 'registry', safeMode: 'block', handler: handleAskUser },
   { name: 'task_create', description: TOOL_DESCRIPTIONS.task_create, inputSchema: TaskCreateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskCreate },
+  { name: 'create_task', description: TOOL_DESCRIPTIONS.create_task, inputSchema: CreateTaskSchema, executionMode: 'registry', safeMode: 'block', handler: handleCreateTask },
   { name: 'task_list', description: TOOL_DESCRIPTIONS.task_list, inputSchema: TaskListSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskList },
   { name: 'task_get', description: TOOL_DESCRIPTIONS.task_get, inputSchema: TaskGetSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskGet },
   { name: 'task_update', description: TOOL_DESCRIPTIONS.task_update, inputSchema: TaskUpdateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskUpdate },
@@ -649,6 +653,7 @@ export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
   'ask_user',
   'list_questions',
   'task_create',
+  'create_task',
   'task_list',
   'task_get',
   'task_update',
@@ -706,13 +711,24 @@ export const USER_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'task_update',
   'task_handoff',
   'SubmitPlan',
+  'send_agent_message',
 ]);
+
+/**
+ * Tools only the user lane carries.
+ *
+ * `create_task` replaced `send_agent_message` as the relay: where the old tool asked the model to
+ * reword the person's request into a message (and the reworded message was all the working lane
+ * ever saw), this one takes the person's words verbatim and does the relaying itself. The task
+ * lane has `task_create`; giving it `create_task` too would be a second door to the same room.
+ */
+export const USER_LANE_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set(['create_task']);
 
 /** Whether a tool is visible to a supervisor lane. */
 export function isToolVisibleToLane(name: string, lane?: 'user' | 'task'): boolean {
   // Absent lane = the working lane, which keeps the full table. Defaulting the other way
   // would silently remove the dispatcher from every supervisor written before lanes existed.
-  if ((lane ?? 'task') === 'task') return true;
+  if ((lane ?? 'task') === 'task') return !USER_LANE_ONLY_TOOL_NAMES.has(name);
   return !USER_LANE_DENIED_TOOL_NAMES.has(name);
 }
 

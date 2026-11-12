@@ -47,6 +47,17 @@ export interface AgentToolBindingsDeps {
       askedAt: number;
     }>
   >;
+  /**
+   * The user lane's one door into the system: the person's words, verbatim.
+   *
+   * With no `taskId` the implementation creates the task skeleton and wakes the working lane to
+   * analyse the words; with one it hands them over as a follow-up. See the implementation in
+   * SessionManager for why this replaced `send_agent_message`.
+   */
+  createTaskFromUser?: (payload: { request: string; taskId?: string }) => Promise<{
+    taskId?: string;
+    message: string;
+  }>;
   /** Supervisor runtime, for dispatch guards. */
   dispatchViaSupervisor?: (params: {
     target:
@@ -163,5 +174,8 @@ export function buildAgentToolBindings(deps: AgentToolBindingsDeps) {
     }): Promise<void> {
       await deps.askUser(payload);
     },
+
+    /** Absent in lanes that should not have the door; the tool refuses itself then. */
+    ...(deps.createTaskFromUser ? { createTaskFromUser: deps.createTaskFromUser } : {}),
   };
 }

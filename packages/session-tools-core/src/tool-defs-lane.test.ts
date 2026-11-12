@@ -37,10 +37,16 @@ describe('supervisor lanes', () => {
 
   it('leaves the user lane able to do its own job', () => {
     const tools = userLaneTools()
-    // Read the board, answer the person, and relay work to the lane that owns it.
-    for (const name of ['task_list', 'task_get', 'ask_user', 'send_agent_message']) {
+    // Read the board, answer the person, and hand the person's words to the working lane.
+    for (const name of ['task_list', 'task_get', 'ask_user', 'create_task']) {
       expect(tools.has(name)).toBe(true)
     }
+  })
+
+  it('gives the working lane task_create, not the relay-only create_task', () => {
+    const tools = taskLaneTools()
+    expect(tools.has('task_create')).toBe(true)
+    expect(tools.has('create_task')).toBe(false)
   })
 
   it('narrows the JSON-schema path the Pi proxy defs use', () => {
@@ -53,7 +59,7 @@ describe('supervisor lanes', () => {
     for (const name of USER_LANE_DENIED_TOOL_NAMES) {
       expect(names.has(name)).toBe(false)
     }
-    for (const name of ['task_list', 'task_get', 'ask_user', 'send_agent_message']) {
+    for (const name of ['task_list', 'task_get', 'ask_user', 'create_task']) {
       expect(names.has(name)).toBe(true)
     }
   })

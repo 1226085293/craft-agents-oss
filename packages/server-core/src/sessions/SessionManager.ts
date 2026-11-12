@@ -6089,6 +6089,60 @@ export class SessionManager implements ISessionManager {
             const runtime = this.getSupervisorRuntime(managed.workspace.id)
             return runtime.dispatch({ fromSessionId: managed.id, ...params })
           },
+          createTaskFromUser: async (payload) => {
+            /**
+             * The user lane's one door: the person's words, verbatim, into the system.
+             *
+             * `send_agent_message` used to be this door, and it asked the model to reword the
+             * person's request into a message — the reworded message was all the working lane saw.
+             * The failure that retired it: the person said 「先只做 1.1，做完就停」 and the relay
+             * read 「建好后回报任务号与计划、directive 的最终内容，以便我核对」 — the boundary was
+             * gone, so nothing started. The model's own meta-instructions displaced the person's.
+             *
+             * So the machine carries the words now. With no taskId it creates the task skeleton
+             * (instruction = the person's words, immutable) and wakes the working lane to draw
+             * scope / directive / plan out of them and dispatch. With a taskId it hands the words
+             * over as a follow-up — nothing new is created. Either way the user lane never sees
+             * the other lane: the prompt says the system relays, and the tool return says the
+             * same thing.
+             */
+            const taskLaneId = (await this.ensureSupervisorSession(managed.workspace.id, 'task')).id
+            const request = payload.request.trim()
+            if (payload.taskId?.trim()) {
+              const taskId = payload.taskId.trim()
+              const relayed = [
+                '【用户对任务 ' + taskId + ' 的补充要求，原话如下。请先 task_get 了解该任务，再分析这些话写 directive / scope / 计划并派活】',
+                '',
+                request,
+              ].join('\n')
+              void this.sendMessage(taskLaneId, relayed).catch((error) => {
+                sessionLog.warn('create_task: follow-up delivery failed', { taskId, error })
+              })
+              return { message: `Follow-up to ${taskId} handed to the working lane.` }
+            }
+
+            const tasks = this.getTasks(managed.workspace.id)
+            // The name is a placeholder the task lane may refine via its own reads; the
+            // instruction is the person's words and stays.
+            const shortName = request.length > 40 ? `${request.slice(0, 40)}…` : request
+            const task = tasks.create({
+              name: shortName,
+              instruction: request,
+              supervisorSessionId: taskLaneId,
+              toolCallId: randomUUID(),
+            })
+            const relayed = [
+              '【新任务 ' + task.id + ' 已登记。用户原话（这是任务的唯一依据，不可改写）：】',
+              '',
+              request,
+              '',
+              '【请自己分析用户原话，确定 name 含义、scope（覆盖范围）、directive（授权边界，如「只做 1.1，做完就停」）、验收标准与计划，然后 dispatch 派活。不要把用户的话当成给你的元指令。】',
+            ].join('\n')
+            void this.sendMessage(taskLaneId, relayed).catch((error) => {
+              sessionLog.warn('create_task: relay to the working lane failed', { taskId: task.id, error })
+            })
+            return { taskId: task.id, message: 'The working lane has been woken to analyse the request and dispatch.' }
+          },
           continueTask: (taskId) => {
             // The worker reported that its context is close to the limit. Compact
             // this session rather than starting a new one: the thread — what was

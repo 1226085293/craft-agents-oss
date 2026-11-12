@@ -12,6 +12,7 @@ import type { ToolResult } from '../types.ts';
 import { errorResponse, successResponse } from '../response.ts';
 import type {
   AskUserInput,
+  CreateTaskInput,
   DispatchInput,
   ListQuestionsInput,
   ReportResultInput,
@@ -320,6 +321,34 @@ export async function handleTaskCreate(
     return successResponse(`Task ${id} created.`);
   } catch (error) {
     return errorResponse(`Failed to create the task: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}
+
+/**
+ * User-lane supervisor: the person's words, verbatim, handed to the working lane.
+ *
+ * `task_create` is deliberately not in the user lane's table — it cannot dispatch, and a
+ * half-created task no lane can move is the shape that got stuck before. So the user lane
+ * gets this instead: it does not write the record, it only says what the person said.
+ */
+export async function handleCreateTask(
+  ctx: SessionToolContext,
+  args: CreateTaskInput,
+): Promise<ToolResult> {
+  if (!ctx.agentTools?.createTaskFromUser) {
+    return errorResponse('create_task is only available to the user-facing supervisor.');
+  }
+  if (!args.request?.trim()) {
+    return errorResponse('request is required — copy the user\'s words verbatim.');
+  }
+  try {
+    const { taskId, message } = await ctx.agentTools.createTaskFromUser({
+      request: args.request.trim(),
+      ...(args.taskId?.trim() ? { taskId: args.taskId.trim() } : {}),
+    });
+    return successResponse(taskId ? `Task ${taskId} registered. ${message}` : message);
+  } catch (error) {
+    return errorResponse(`Failed to hand the request over: ${error instanceof Error ? error.message : 'unknown error'}`);
   }
 }
 

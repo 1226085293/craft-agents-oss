@@ -127,9 +127,9 @@ export const AskUserSchema = z.object({
   /**
    * Everything this turn has to say to the person, in the order it should be read.
    *
-   * The list is the unit, not the call: a supervisor that calls this twice appends to the same
-   * turn's list, and the whole list goes out once when the turn ends. That is what makes 「this turn
-   * asked one thing」 true no matter how many times the model reached for the tool.
+   * The list is the unit, not the call: each call is the complete list for the turn, and a
+   * second call **replaces** the first (the model re-asks when it wants to fix its wording).
+   * The final list goes out once when the turn ends.
    */
   entries: z
     .array(
@@ -193,6 +193,44 @@ export const ListQuestionsSchema = z.object({
 
 export type AskUserInput = z.infer<typeof AskUserSchema>;
 export type ListQuestionsInput = z.infer<typeof ListQuestionsSchema>;
+
+/**
+ * User-lane supervisor: the one door through which a person's words enter the system.
+ *
+ * The user lane used to hand work over with `send_agent_message`, which asked the model to
+ * reword the person's request into a message — and the reworded message is all the working lane
+ * ever saw. A real run showed what that costs: the person said 「先只做 1.1，做完就停下」 and
+ * the relay read 「建好后回报任务号与计划、directive 的最终内容，以便我核对」 — the boundary
+ * was gone, so no work started.
+ *
+ * This tool takes the person's own words verbatim and does the relaying itself. The task lane
+ * then reads the words and draws scope / directive / plan out of them.
+ */
+export const CreateTaskSchema = z.object({
+  /**
+   * The person's request, verbatim — not a summary, not a rewording.
+   *
+   * This becomes the task's immutable `instruction` and the working lane's only basis for
+   * deciding what the task is. Anything this field loses, the task never had: the relay that
+   * paraphrased 「只做 1.1」 produced a task whose boundary existed nowhere.
+   */
+  request: z
+    .string()
+    .min(1)
+    .describe('The user\'s own words, verbatim. Do not summarise, do not add your own requirements — copy what the person said.'),
+  /**
+   * When the person is adding to a task that already exists, name it instead of creating one.
+   *
+   * Omit for a new task. With it, the words are handed to the task\'s lane as a supplement —
+   * 「用户对 T-3 的补充要求」 — and nothing new is created.
+   */
+  taskId: z
+    .string()
+    .optional()
+    .describe('Omit to create a new task from the request. Give an existing task id (e.g. "T-3") when the request is a follow-up to that task.'),
+});
+
+export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
 
 /** Task tools (supervisor only). */
 export const TaskCreateSchema = z.object({

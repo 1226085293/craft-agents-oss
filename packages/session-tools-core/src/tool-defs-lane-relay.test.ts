@@ -64,12 +64,14 @@ describe('supervisor lanes: one writer, one reader', () => {
   /**
    * The relay has to exist, or Path A is a lane that can neither write nor hand over.
    *
-   * It is the one "routing" tool allowed back in, precisely because removing every route left the
-   * user lane able to write a directive — and then unable to make anything happen.
+   * It used to be `send_agent_message`, which asked the model to reword the person's words into
+   * a message — the reworded message was all the working lane saw. `create_task` replaced it: the
+   * words travel verbatim, and the machine does the relaying.
    */
   it('gives the user lane exactly one way to hand work over', () => {
     const tools = userTools();
-    expect(tools.has('send_agent_message')).toBe(true);
+    expect(tools.has('create_task')).toBe(true);
+    expect(tools.has('send_agent_message')).toBe(false);
     expect(tools.has('dispatch')).toBe(false);
   });
 

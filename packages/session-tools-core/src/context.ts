@@ -385,6 +385,21 @@ export interface SessionToolContext {
         askedAt: number;
       }>
     >;
+    /**
+     * User-lane supervisor: hand the person's words to the working lane, verbatim.
+     *
+     * Injected by the backend (SessionManager), which owns both what gets created and what gets
+     * relayed. With no `taskId` it creates the task skeleton (instruction = the person's words,
+     * immutable) and wakes the task lane to draw scope / directive / plan out of them; with one,
+     * it relays the words as a follow-up to that task. The user lane never sees the other lane,
+     * and the model never rewords what the person said.
+     */
+    createTaskFromUser?(payload: {
+      /** The person's words, verbatim. */
+      request: string;
+      /** Omit to create a new task; give an id to hand the words to that task as a follow-up. */
+      taskId?: string;
+    }): Promise<{ taskId?: string; message: string }>;
   };
 
   /** Task-board surface (supervisor only). */

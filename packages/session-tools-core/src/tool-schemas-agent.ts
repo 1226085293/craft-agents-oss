@@ -148,9 +148,9 @@ export const AskUserSchema = z.object({
          * transcript and pushed the next real decision off the screen.
          */
         kind: z
-          .enum(['completed', 'decision', 'blocked'])
+          .enum(['notice', 'completed', 'decision', 'blocked'])
           .describe(
-            'completed = the task is finished. decision = you cannot proceed without a choice only a person can make. blocked = a failure needing human hands. Work in progress is NOT reportable.',
+            'notice = something the person should read, with nothing to answer (a scheduled message, a periodic report, a status they asked for). completed = the task is finished. decision = you cannot proceed without a choice only a person can make. blocked = a failure needing human hands. Work in progress is NOT reportable as completed/decision/blocked — that is what notice is.',
           ),
         text: z
           .string()

@@ -14,7 +14,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { readJournal, type Task } from '@craft-agent/shared/tasks';
+import { formatTaskBrief, readJournal, type Task } from '@craft-agent/shared/tasks';
 import { TaskService } from './task-service.ts';
 
 let root: string;
@@ -184,6 +184,43 @@ describe('a recurring round ends, not the task', () => {
     svc.updatePlan(task.id, { id: '1.1', status: 'done' })
 
     expect(announced).toEqual([task.id])
+  })
+
+
+  it('carries the round delivery into the next round brief', async () => {
+    // What the person asked for: 「每分钟发个你好+0，后面的数字每次累加」. The number cannot live in the
+    // supervisor's context — one lost turn restarts it. It has to be on the record, and the next
+    // round's brief has to read it.
+    const svc = service();
+    const artifact = join(root, 'greeting-3.md');
+    writeFileSync(artifact, 'hello+3', 'utf-8');
+    const task = createRecurring(svc);
+    svc.startRun(task.id, 'sess_w1');
+    svc.updatePlan(task.id, { id: '1.1', status: 'done' });
+
+    await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'delivered',
+        summary: '已发出 你好+3（下一句是 你好+4）',
+        stepId: '1.1',
+        artifacts: [{ path: artifact }],
+        verify: { ran: ['cat greeting-3.md'], passed: true },
+      },
+      'sess_w1',
+    );
+
+    const after = svc.get(task.id)!;
+    // The delivery record survives the reset ...
+    expect(after.stats?.lastRound?.summary).toContain('你好+3');
+    expect(after.stats?.lastRound?.result?.artifacts?.[0]).toContain('greeting-3.md');
+    expect(after.stats?.lastRound?.result?.verify?.passed).toBe(true);
+
+    // ... and the next round's brief is where it gets read.
+    const brief = formatTaskBrief(after, { reason: 'cron:* * * * *' })
+    expect(brief).toContain('## Previous round (#1)')
+    expect(brief).toContain('你好+3')
+    expect(brief).toContain('carry its numbers and state forward')
   })
 
   it('lets the supervisor close a recurring task from backlog', () => {

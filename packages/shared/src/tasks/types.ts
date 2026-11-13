@@ -236,6 +236,18 @@ export interface TaskStats {
     finishedAt: number;
     outcome: 'delivered' | 'handoff' | 'needs_decision';
     summary: string;
+    /**
+     * What the round delivered, kept for the next one.
+     *
+     * A recurring task repeats the same work, and the work often carries state forward — 「你好+N」
+     * with N incrementing is the simplest case, and it is the one that failed: the number lived only
+     * in the supervisor's context, so a lost turn restarted the count. The record now holds what the
+     * round produced, and the next round's brief reads it.
+     */
+    result?: {
+      artifacts?: string[];
+      verify?: { ran: string[]; passed: boolean };
+    };
   };
   /**
    * Triggers that fired while the task could not start, in order.

@@ -184,6 +184,34 @@ describe('supervisor prompt', () => {
     }
   })
 
+
+  it('says relaying means handing the work to another session, not doing it here', () => {
+    // Live: the task lane answered 「你好+N」 out of its own turn. Its reasoning was that the greeting
+    // could only be sent with ask_user, which the worker lacks — true, and it read that as 「so I do
+    // it」. The fix is the sentence it was missing: the worker composes, you send.
+    const text = getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane: 'task' })
+    expect(text).toContain('making the work happen in a session that is not this one')
+    expect(text).toContain('you may not sit at this desk and write the output yourself')
+  })
+
+  it('gives periodic messages a notice channel instead of a decision', () => {
+    // Live: every round asked 「shall I stop?」 because the greeting had to travel as kind=decision —
+    // the only kind that carries text without ending the task. Two greetings in one turn then
+    // replaced each other, so 「你好+1」 was never sent and +2 was.
+    const text = getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane: 'task' })
+    expect(text).toContain('`notice`')
+    expect(text).toContain('A periodic message is a `notice`, never a `decision`')
+  })
+
+  it('plans one round for a task that repeats, not the whole future', () => {
+    // Live: 「每分钟发个你好，数字累加」 became ten steps (1.1 hello+0 … 1.10 hello+9). Ten rounds in one
+    // plan means no round can ever be delivered, and the counter it was counting dies with the steps.
+    const text = getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane: 'task' })
+    expect(text).toContain('plans one round, not the whole future')
+    expect(text).toContain('not ten steps')
+    expect(text).toContain('lastRound')
+  })
+
   it('declares a tool list that matches the real supervisor table', () => {
     // Catches drift in either direction: this list is documentation, the table is
     // enforcement, and they must not disagree.

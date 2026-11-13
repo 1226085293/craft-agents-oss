@@ -735,8 +735,15 @@ export class TaskService {
    * The supervisor decides whether the task is still wanted — that decision is a `task_update`,
    * not a side effect of a round succeeding.
    */
-  private closeRound(task: Task, options: { now: number; summary: string }): Task {
-    const { now, summary } = options;
+  private closeRound(
+    task: Task,
+    options: {
+      now: number;
+      summary: string;
+      result?: { artifacts?: string[]; verify?: { ran: string[]; passed: boolean } };
+    },
+  ): Task {
+    const { now, summary, result } = options;
     const plan = task.spec?.plan ?? [];
     const stats = task.stats ?? { runs: 0, activeMs: 0 };
     const round = (stats.rounds?.ok ?? 0) + (stats.rounds?.failed ?? 0) + 1;
@@ -764,7 +771,7 @@ export class TaskService {
       stats: {
         ...stats,
         rounds: { ok: (stats.rounds?.ok ?? 0) + 1, failed: stats.rounds?.failed ?? 0 },
-        lastRound: { round, finishedAt: now, outcome: 'delivered', summary },
+        lastRound: { round, finishedAt: now, outcome: 'delivered', summary, ...(result ? { result } : {}) },
       },
     };
 
@@ -2159,7 +2166,14 @@ export class TaskService {
        * Closing it is a decision, not an automatic consequence of one round succeeding.
        */
       next = isRecurring(next)
-        ? this.closeRound(next, { now, summary: handoff.summary })
+        ? this.closeRound(next, {
+            now,
+            summary: handoff.summary,
+            result: {
+              ...(handoff.artifacts?.length ? { artifacts: handoff.artifacts.map((a) => a.path) } : {}),
+              ...(handoff.verify ? { verify: handoff.verify } : {}),
+            },
+          })
         : applyTransition(next, 'completed', { now }).task;
     } else if (verifyLimitReached) {
       // The acceptance cap is a decision for a person, not another judge round.

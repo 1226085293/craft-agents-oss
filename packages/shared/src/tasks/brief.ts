@@ -169,6 +169,33 @@ export function formatDispatchTaskContext(
   return sections.join('\n\n');
 }
 
+
+/**
+ * What the last round delivered, for the round that has to continue from it.
+ *
+ * A recurring task repeats the same work, and the work usually carries state — the simplest case is
+ * 「你好+N」 with N incrementing. That number used to live only in the supervisor's context: one
+ * lost turn and the count restarted, because nothing on the record said what the previous round
+ * produced. The record says it now (`stats.lastRound`), written when the round closed.
+ */
+export function formatLastRoundBlock(task: Pick<Task, 'stats'>): string {
+  const last = task.stats?.lastRound;
+  if (!last) return '';
+  const lines: string[] = [`## Previous round (#${last.round})`, ''];
+  lines.push(`Delivered: ${last.summary}`);
+  const artifacts = last.result?.artifacts ?? [];
+  if (artifacts.length) lines.push('', `Artefacts:\n${bullet(artifacts)}`);
+  const verify = last.result?.verify;
+  if (verify) {
+    lines.push('', `Verification: ${verify.passed ? 'passed' : 'failed'} (${verify.ran.join('; ')})`);
+  }
+  lines.push(
+    '',
+    'This task repeats. Continue from what that round produced — carry its numbers and state forward — instead of starting over from the request.',
+  );
+  return lines.join('\n');
+}
+
 export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): string {
   const sections: string[] = [];
   const id = task.id;
@@ -178,6 +205,10 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
   if (options.reason) sections.push(`Triggered by: ${options.reason}`);
 
   sections.push(`## Request\n${task.instruction}`);
+
+  // A repeating task's next round starts from the last round's delivery, not from the request again.
+  const lastRound = formatLastRoundBlock(task);
+  if (lastRound) sections.push(lastRound);
 
   const spec = task.spec;
   const contract: string[] = [];

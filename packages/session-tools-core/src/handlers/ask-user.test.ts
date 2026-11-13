@@ -116,6 +116,34 @@ describe('ask_user is the one channel to the person', () => {
     expect(textOf(result)).toContain('3 条问题');
   });
 
+
+  /**
+   * A periodic message is not a question.
+   *
+   * Live: 「每分钟发个你好+0，数字每次累加」 was delivered as `decision` cards — the only kind that could
+   * carry text without ending the task — so every round asked 「shall I stop?」, and because one turn's
+   * ask_user replaces the previous one, 「你好+1」 was overwritten by 「你好+2」 and never arrived.
+   */
+  it('accepts a notice and does not count it as a question', async () => {
+    const seen: Payload[] = []
+    const result = await handleAskUser(askCtx(seen), {
+      entries: [{ kind: 'notice', text: '你好+1' }],
+    } as never)
+
+    expect(seen[0]!.entries).toEqual([{ kind: 'notice', text: '你好+1' }])
+    expect(textOf(result)).not.toContain('条问题')
+  })
+
+  it('refuses options on a notice, which is a statement', async () => {
+    const seen: Payload[] = []
+    const result = await handleAskUser(askCtx(seen), {
+      entries: [{ kind: 'notice', text: '你好+1', options: ['停', '继续'] }],
+    } as never)
+
+    expect(textOf(result)).toContain('take no options')
+    expect(seen).toHaveLength(0)
+  })
+
   it('rejects an empty list and blank text', async () => {
     const seen: Payload[] = [];
     expect(textOf(await handleAskUser(askCtx(seen), { entries: [] } as never))).toContain('at least one');

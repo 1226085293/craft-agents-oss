@@ -360,7 +360,15 @@ export interface SessionToolContext {
      */
     askUser(payload: {
       entries: Array<{
-        kind: 'completed' | 'decision' | 'blocked';
+        /**
+         * `notice` is the one that says something without asking anything.
+         *
+         * Without it a scheduled message had nowhere to go: 「你好+N」 reported as `completed`
+         * closed the task, as `blocked` claimed it was stuck, and as `decision` drew a card asking
+         * the person a question they had already answered — then the next round's card replaced it,
+         * so one greeting vanished. A periodic message is none of those three; it is a notice.
+         */
+        kind: 'notice' | 'completed' | 'decision' | 'blocked';
         text: string;
         /** kind=decision only: the answers, rendered as buttons. */
         options?: string[];

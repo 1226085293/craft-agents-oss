@@ -855,7 +855,7 @@ export class TaskService {
      * Deliberately not derived from the lock: a pause written by the service releases the run lock
      * (the run is over), so 「lock still held」 cannot be the test for 「waiting for a person」.
      */
-    if (task.status === 'paused') {
+    if (task.status === 'paused' && !this.canRunWhilePaused(task, now)) {
       const next: Task = {
         ...task,
         stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), pendingTriggers: accumulated },
@@ -912,6 +912,24 @@ export class TaskService {
     this.save(claimed);
     appendJournal(this.root, id, { type: 'trigger_claimed', at: now, data: trigger });
     return claimed;
+  }
+
+  /**
+   * Whether a paused task may be restarted by a trigger.
+   *
+   * 「Paused means waiting for a person」 was too broad. A pause is also what the record derives when
+   * a run ends with work left and nobody running it (`awaiting_dispatch`) — and live, that pause
+   * deadlocked a per-minute task: the plan was finished, the worker had filed `handoff`, the derived
+   * pause stopped every later trigger at 「accumulate only」, and the person received one greeting
+   * while three triggers piled up behind a pause nobody owed an answer to.
+   *
+   * The distinction is the gate, not the label: a pause that is really waiting for a decision is
+   * refused by `startGate` (open decision, budget, fuse, dependency), and that refusal is the thing
+   * worth respecting. A pause with nothing refusing it is just a task nobody picked up.
+   */
+  private canRunWhilePaused(task: Task, now: number): boolean {
+    if (openDecisions(task).length > 0) return false;
+    return this.startGate(task, now) === null;
   }
 
   /** Push a pending claim's deadline out, for a supervisor turn that is still working. */
@@ -2213,6 +2231,34 @@ export class TaskService {
             },
           })
         : applyTransition(next, 'completed', { now }).task;
+    } else if (
+      /**
+       * A finished plan ends the round, whichever word the worker used.
+       *
+       * For a recurring task the plan *is* the round: when every step is done, this round is over.
+       * Requiring the extra word `delivered` split the two facts apart, and live it deadlocked a
+       * task — the worker finished 1.1 and 1.2 and filed `handoff` (correctly: its brief says a
+       * partial part is a hand-off), the supervisor then had nothing to dispatch, nobody closed the
+       * round, `rounds` stayed empty, and the task sat `paused` while triggers piled up. The person
+       * received one greeting and nothing more.
+       *
+       * `handoff` still means 「someone else continues」 for a task that is not repeating — that path
+       * keeps its own branches below.
+       */
+      accepted &&
+      isRecurring(next) &&
+      handoff.outcome === 'handoff' &&
+      !planOpen
+    ) {
+      next = this.closeRound(next, {
+        now,
+        summary: handoff.summary,
+        result: {
+          ...(handoff.artifacts?.length ? { artifacts: handoff.artifacts.map((a) => a.path) } : {}),
+          ...(handoff.verify ? { verify: handoff.verify } : {}),
+          ...(handoff.roundResult !== undefined ? { data: handoff.roundResult } : {}),
+        },
+      });
     } else if (verifyLimitReached) {
       // The acceptance cap is a decision for a person, not another judge round.
       next = applyTransition(next, 'paused', { now, pauseReason: 'verify_exhausted' }).task;
@@ -2355,7 +2401,17 @@ export class TaskService {
     //
     // The supervisor decides what comes next: the nudge below carries the next open step and
     // its owner, and the model chooses whether to dispatch it, ask the user, or end the task.
-    const leg = accepted && handoff.outcome === 'handoff' ? nextLeg(next.spec?.plan) : undefined;
+    /**
+     * A round that just closed has nothing to dispatch.
+     *
+     * `next` is read after the round-level writes, so `status: 'backlog'` here means this hand-off
+     * ended a round — the plan is already reset for the next trigger. Offering 「还剩 N 步，派下一节」
+     * in that case is what made a live supervisor try to dispatch a step that had just been
+     * completed, get refused, and conclude the trigger message was stale.
+     */
+    const roundClosed = next.status === 'backlog';
+    const leg =
+      accepted && handoff.outcome === 'handoff' && !roundClosed ? nextLeg(next.spec?.plan) : undefined;
     const suggestedStep = leg?.kind === 'step' ? leg : undefined;
 
     /**
@@ -2418,8 +2474,10 @@ export class TaskService {
        * actually the person's — his own stated boundary, or a decision only he can make.
        */
       const nextHint = suggestedStep
-        ? `。计划还剩 ${openSteps.length} 步，下一步 ${suggestedStep.step.id}（${suggestedStep.agent ?? '未指定 owner'}）——除非用户的话把边界划在这里，否则直接 dispatch 派发它；只有用户的边界已到、或必须他拍板时才问他。`
-        : ''
+        ? `。计划还剩 ${openSteps.length} 步，下一步 ${suggestedStep.step.id}（${suggestedStep.agent ?? '未指定 owner'}）——除非用户的话把边界在这里，否则直接 dispatch 派发它；只有用户的边界已到、或必须他拍板时才问他。`
+        : roundClosed
+          ? `。本轮到此结束，计划已复位，下一次触发会自动开下一轮——现在不用派活。`
+          : ''
       /**
        * Triggers that fired during the round ride along with the report.
        *

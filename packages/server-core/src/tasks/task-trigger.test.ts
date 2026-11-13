@@ -82,11 +82,15 @@ describe('a fired trigger wakes the supervisor', () => {
     expect(readJournal(root, task.id).some((entry) => entry.type === 'trigger_accumulated')).toBe(true);
   });
 
-  it('accumulates while a person is answering, because that run still holds the lock', async () => {
+  it("accumulates while a person is deciding, because that question is not a timer's to answer", async () => {
     const svc = service();
     const task = recurring(svc);
     svc.startRun(task.id, 'sess_w1');
     svc.setStatus(task.id, 'paused', { pauseReason: 'needs_decision' });
+    // The open, worded decision is what makes this a pause for a person. A pause label alone is not:
+    // the derived `awaiting_dispatch` pause looks the same on the record and must not deadlock a
+    // per-minute task (see `task-round-deadlock.test.ts`).
+    svc.setDecisionWording(task.id, { question: '要继续吗？', options: ['继续', '停'] });
     const woken: string[] = [];
 
     await runCronPass(deps(svc, woken), new Date('2026-11-13T10:02:00Z'));

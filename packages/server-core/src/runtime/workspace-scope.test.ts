@@ -141,3 +141,48 @@ describe('install/uninstall consistency', () => {
     expectNothingLeaked(before, snapshotScopes(scopes))
   })
 })
+
+describe('effect(start) semantics, because they were misread twice', () => {
+  it('runs the body immediately and disposes with its return value', () => {
+    // The bug this pins: `effect(() => { stop(); })` ran `stop()` at registration, so a loop that was
+    // just started was stopped in the same statement. Observed twice — once for the watchdog, once for
+    // the task scheduler, where the only visible symptom was a startup line and then no ticks ever.
+    let running = false
+    const start = () => {
+      running = true
+      return () => {
+        running = false
+      }
+    }
+
+    const scope = new WorkspaceScope('ws')
+    scope.effect(() => start())
+
+    // Started by registration…
+    expect(running).toBe(true)
+    scope.dispose()
+    // …and stopped only by disposal.
+    expect(running).toBe(false)
+  })
+
+  it('stops it immediately when the body calls stop itself', () => {
+    // The wrong shape, kept as a test so the next reader sees what it does rather than what it looks
+    // like it does.
+    let running = false
+    const start = () => {
+      running = true
+      return () => {
+        running = false
+      }
+    }
+
+    const scope = new WorkspaceScope('ws')
+    scope.effect(() => {
+      const stop = start()
+      stop() // ← this is the mistake: registration acts like disposal
+      return () => {}
+    })
+
+    expect(running).toBe(false)
+  })
+})

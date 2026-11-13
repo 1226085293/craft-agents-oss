@@ -8504,7 +8504,15 @@ ${request.prompt}`;
         })
       })
       const stop = startTaskScheduler(runner)
-      this.workspaceScopes.open(workspaceId).effect(() => {
+      /**
+       * `effect(start)` runs the body now and keeps its **return value** as the disposer.
+       *
+       * Calling `stop()` inside the body therefore killed the loop the instant it started — the same
+       * mistake the watchdog block above documents, made again here. The symptom is exact: the
+       * startup line appears (`recorded N cron gap(s)`), then not one tick, forever, and every task
+       * looks idle while its triggers pile up.
+       */
+      this.workspaceScopes.open(workspaceId).effect(() => () => {
         stop()
         this.taskSchedulerPokers.delete(workspaceId)
         this.taskSchedulerLastPass.delete(workspaceId)

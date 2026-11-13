@@ -8035,6 +8035,23 @@ ${request.prompt}`;
   }
 
   /**
+   * Whether a supervisor is working, allowing for a turn that died mid-flight.
+   *
+   * `isProcessing` is set when a turn starts and cleared when it ends — and a turn that never ends
+   * (its process gone, its stream dead) leaves the flag on forever. Live: a task lane stuck this way
+   * since 23:36 was treated as 「busy」 by every later tick, so its task accumulated triggers and ran
+   * no rounds at all for thirteen minutes.
+   *
+   * A real turn updates `lastMessageAt` as it streams, so ten minutes of silence while claiming to be
+   * processing is not a slow turn — it is a dead one, and the trigger may proceed.
+   */
+  private isSupervisorBusy(managed: { isProcessing?: boolean; lastMessageAt?: number } | undefined): boolean {
+    if (!managed?.isProcessing) return false;
+    const idleFor = Date.now() - (managed.lastMessageAt ?? 0);
+    return idleFor < 10 * 60 * 1000;
+  }
+
+  /**
    * Ask the scheduler to look now.
    *
    * Called when a round closes: the trigger that piled up behind it can start immediately instead of
@@ -8419,7 +8436,7 @@ ${request.prompt}`;
          * 跑 / 是不是不再需要了」 ever saw the round. 「每分钟发一次你好」 ran once and closed for exactly
          * that reason.
          */
-        isBusy: (sessionId) => this.sessions.get(sessionId)?.isProcessing === true,
+        isBusy: (sessionId) => this.isSupervisorBusy(this.sessions.get(sessionId)),
         triggerTask: async (task, reason) => {
           try {
             const lane = await this.ensureSupervisorSession(workspaceId, 'task')
@@ -8448,6 +8465,19 @@ ${request.prompt}`;
             if (!loaded) {
               sessionLog.warn('[tasks] trigger wake refused: supervisor lane not loaded', { taskId: task.id })
               return { ok: false, reason: 'supervisor lane not loaded' }
+            }
+            /**
+             * A lane that is mid-turn cannot take the round, and claiming to have woken it lies.
+             *
+             * `notifySupervisor` would hold the notice until the turn ends, which is right — but the
+             * scheduler has already claimed the round by then, and a claim nobody acts on expires
+             * three minutes later and is claimed again. Returning `ok: false` releases it instead, so
+             * the trigger waits on the record and the next turn picks it up.
+             */
+            const busy = this.isSupervisorBusy(this.sessions.get(lane.id))
+            if (busy) {
+              sessionLog.info('[tasks] trigger wake deferred: supervisor mid-turn', { taskId: task.id })
+              return { ok: false, reason: 'supervisor mid-turn' }
             }
             this.notifySupervisor(lane.id, `trigger:${task.id}`, text)
             // Recorded so a turn that ends can settle exactly the tasks it was shown — and only those.

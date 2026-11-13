@@ -2299,7 +2299,19 @@ export class SessionManager implements ISessionManager {
 
   private notifySupervisor(sessionId: string, key: string, text: string): void {
     const managed = this.sessions.get(sessionId)
-    if (!managed) return
+    if (!managed) {
+      /**
+       * A wake for a session that is not loaded is a dropped wake.
+       *
+       * This used to `return` in silence. Live: after a restart the task-lane supervisor was not in
+       * the in-memory map yet, `triggerTask` had already claimed the round, the wake went nowhere,
+       * and the task sat on a `pending:` lock with `wakeFailures: 0` — nothing recorded the loss, so
+       * nothing could recover it. Callers that claim work before waking now check this explicitly;
+       * at minimum the drop is on the record.
+       */
+      sessionLog.warn('[supervisor] wake dropped: session not loaded', { sessionId, key })
+      return
+    }
     if (!managed.isProcessing) {
       void this.sendMessage(sessionId, text).catch((error) => {
         sessionLog.warn('Failed to wake supervisor', { sessionId, error })
@@ -8402,6 +8414,19 @@ ${request.prompt}`;
             ]
               .filter(Boolean)
               .join('\n')
+            /**
+             * The lane has to be loaded before the wake counts.
+             *
+             * `notifySupervisor` is synchronous and silently skips an unloaded session; returning
+             * `ok: true` there left the round claimed by nobody, which is exactly the freeze seen
+             * after a restart. Loading first (`getSession` hydrates) and refusing otherwise lets the
+             * caller release the claim and retry on the next tick.
+             */
+            const loaded = await this.getSession(lane.id)
+            if (!loaded) {
+              sessionLog.warn('[tasks] trigger wake refused: supervisor lane not loaded', { taskId: task.id })
+              return { ok: false, reason: 'supervisor lane not loaded' }
+            }
             this.notifySupervisor(lane.id, `trigger:${task.id}`, text)
             // Recorded so a turn that ends can settle exactly the tasks it was shown — and only those.
             service.markTriggersDelivered(task.id)

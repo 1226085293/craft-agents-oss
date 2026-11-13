@@ -829,6 +829,15 @@ export class TaskService {
         lockSessionId: undefined,
         runStartedAt: undefined,
         lastHeartbeatAt: now,
+        /**
+         * The deadline belongs to the lock, so it goes with it.
+         *
+         * Live: a record ended up with `lockSessionId: undefined` and a stale `lockDeadlineAt`. The
+         * expiry pass skips a task without a `pending:` lock — deliberately, that is how a real run is
+         * left alone — so the orphaned deadline made the claim invisible: nothing could expire it, and
+         * the task sat `running` with two triggers behind it. One field cannot outlive the other.
+         */
+        lockDeadlineAt: undefined,
       },
       lastHeartbeatAt: now,
       updatedAt: now,

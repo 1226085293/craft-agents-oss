@@ -297,7 +297,9 @@ export function startTaskScheduler(deps: TaskRunnerDeps, intervalMs = TASK_SCHED
      * stalled loop and an idle one looked identical in the log. This is the cheapest way to tell
      * them apart, and it is one line.
      */
-    log.debug(`[task-scheduler] tick ${minute}`);
+    log.info(
+      `[task-scheduler] tick ${minute} tasks=${deps.listTasks().length}`,
+    );
     void runCronPass(deps, now).catch((error) => {
       log.warn('[task-scheduler] cron pass failed', { error });
     });

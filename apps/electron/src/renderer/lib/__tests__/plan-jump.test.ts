@@ -66,4 +66,52 @@ describe('plan jumps', () => {
     // Resuming should land on the latest attempt, not the first one.
     expect(jumps.get('1')?.at).toBe(1500)
   })
+
+  /**
+   * The claim writes a placeholder, the bind writes the session — one run, two lines.
+   *
+   * `startRun` claims with `pending:dispatch` and binds the real id once the session exists. A
+   * reader that took `run_started` at face value returned the placeholder, and clicking a step
+   * navigated to an id nothing can open.
+   */
+  it('resolves a claimed run to the session that was bound to it', () => {
+    const claimed: JournalLine[] = [
+      { at: 1000, type: 'run_started', data: { sessionId: 'pending:dispatch' } },
+      { at: 1050, type: 'run_bound', data: { sessionId: 'sess-real' } },
+      { at: 1100, type: 'plan_updated', data: { step: '1.1', status: 'done' } },
+    ]
+    const jumps = resolvePlanJumps([{ id: '1.1', status: 'done' }], claimed)
+    expect(jumps.get('1.1')).toMatchObject({ at: 1100, sessionId: 'sess-real' })
+  })
+
+  it('never hands out a placeholder as a session id', () => {
+    const claimed: JournalLine[] = [
+      { at: 1000, type: 'run_started', data: { sessionId: 'pending:next-leg:1.1' } },
+      { at: 1100, type: 'plan_updated', data: { step: '1.1', status: 'done' } },
+    ]
+    const jumps = resolvePlanJumps([{ id: '1.1', status: 'done' }], claimed, 'pending:dispatch')
+    // No run was ever bound, and the fallback is a placeholder too: the row stays inert.
+    expect(jumps.get('1.1')?.sessionId).toBeUndefined()
+  })
+
+  /**
+   * A section with no `doing` line still began somewhere — at its first child, not at its end.
+   *
+   * `deriveOutlineStatus` only writes the section's own status when the derived value differs, so
+   * a section can reach `done` having recorded nothing but that. Landing on `done` puts the reader
+   * at the end of the section, which is the one place 「这一节从哪里开始」 is not.
+   */
+  it('sends a section without a doing line to its first child instead of its end', () => {
+    const derived: JournalLine[] = [
+      { at: 1000, type: 'run_started', data: { sessionId: 'sess-A' } },
+      { at: 1200, type: 'plan_updated', data: { step: '1.1', status: 'doing' } },
+      { at: 1300, type: 'plan_updated', data: { step: '1.1', status: 'done' } },
+      { at: 1400, type: 'plan_updated', data: { step: '1', status: 'done' } },
+    ]
+    const jumps = resolvePlanJumps(
+      [{ id: '1', status: 'done' }, { id: '1.1', status: 'done' }],
+      derived,
+    )
+    expect(jumps.get('1')).toMatchObject({ at: 1200, sessionId: 'sess-A' })
+  })
 })

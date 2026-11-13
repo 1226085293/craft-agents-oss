@@ -37,30 +37,81 @@ function isOutlineId(id: string): boolean {
   return !id.includes('.');
 }
 
-/** Journal status changes for one step, oldest first. */
-function statusChanges(journal: JournalLine[], stepId: string): Array<{ at: number; status?: string }> {
-  const changes: Array<{ at: number; status?: string }> = [];
+/**
+ * Journal STATUS changes for one step, oldest first.
+ *
+ * A `plan_updated` line is also written when the plan is created (`{ step, removed: false }`, no
+ * status) and when an owner is changed. Those edit the plan; they do not move a step. Counting
+ * them as movements put a section's jump target at 「计划写入时刻」 — before anything had run — and
+ * let a sub-step fall back to an owner edit instead of its last real transition.
+ */
+function statusChanges(journal: JournalLine[], stepId: string): Array<{ at: number; status: string }> {
+  const changes: Array<{ at: number; status: string }> = [];
   for (const line of journal) {
     if (line.type !== 'plan_updated') continue;
     const data = line.data as { step?: string; status?: string; removed?: boolean } | undefined;
     if (!data || data.removed) continue;
     if (data.step !== stepId) continue;
-    changes.push({ at: line.at, ...(data.status ? { status: data.status } : {}) });
+    if (!data.status) continue;
+    changes.push({ at: line.at, status: data.status });
   }
   return changes.sort((a, b) => a.at - b.at);
 }
 
+/**
+ * A placeholder is not a session.
+ *
+ * `startRun` claims the lock before the worker session exists and names the claim
+ * `pending:<reason>`; the real id arrives later, as a `run_bound` line. The first version of this
+ * reader looked only at `run_started`, so a step that moved after a claim but before the bind was
+ * attributed to `pending:dispatch` — an id nothing can open. Clicking a section then did nothing
+ * (or opened the wrong place), which is what 「跳转到的会话是错的」 looked like from the outside.
+ */
+function isPlaceholder(id: string): boolean {
+  return id.startsWith('pending:');
+}
+
+interface RunWindow {
+  /** When the run claimed the lock — the claim is the moment work began, not the bind. */
+  at: number;
+  sessionId: string;
+}
+
+/**
+ * Every run this journal knows about, with the placeholder resolved to the real session.
+ *
+ * A claim (`pending:…`) followed by `run_bound` is ONE run: the bind supplies the id and the
+ * claim supplies the time, so a change that happened between the two is still attributed to the
+ * session that was about to do the work.
+ */
+function runWindows(journal: JournalLine[]): RunWindow[] {
+  const runs: RunWindow[] = [];
+  let claimedAt: number | undefined;
+
+  for (const line of journal) {
+    if (line.type !== 'run_started' && line.type !== 'run_bound') continue;
+    const data = line.data as { sessionId?: string } | undefined;
+    const sessionId = data?.sessionId;
+    if (!sessionId) continue;
+    if (isPlaceholder(sessionId)) {
+      // Hold the claim until the bind names the session it belongs to.
+      if (claimedAt === undefined) claimedAt = line.at;
+      continue;
+    }
+    runs.push({ at: claimedAt ?? line.at, sessionId });
+    claimedAt = undefined;
+  }
+  return runs;
+}
+
 /** The session that was running at `at` — the last run to start at or before it. */
-function sessionAt(journal: JournalLine[], at: number): string | undefined {
+function sessionAt(runs: RunWindow[], at: number): string | undefined {
   let found: string | undefined;
   let best = -Infinity;
-  for (const line of journal) {
-    if (line.type !== 'run_started') continue;
-    const data = line.data as { sessionId?: string } | undefined;
-    if (!data?.sessionId) continue;
-    if (line.at <= at && line.at > best) {
-      best = line.at;
-      found = data.sessionId;
+  for (const run of runs) {
+    if (run.at <= at && run.at > best) {
+      best = run.at;
+      found = run.sessionId;
     }
   }
   return found;
@@ -79,18 +130,41 @@ export function resolvePlanJumps(
   const result = new Map<string, PlanJumpTarget>();
   if (!steps?.length || !journal?.length) return result;
 
+  const runs = runWindows(journal);
+  const statement: string | undefined =
+    fallbackSessionId && !isPlaceholder(fallbackSessionId) ? fallbackSessionId : undefined;
+
   for (const step of steps) {
     const changes = statusChanges(journal, step.id);
-    if (changes.length === 0) continue;
+    const outline = isOutlineId(step.id);
+
+    /**
+     * A section that never recorded `doing` still began somewhere.
+     *
+     * `deriveOutlineStatus` only writes a section's own status when the derived value differs from
+     * the stored one, so a plan written with its sections already `todo` and moved by sub-step can
+     * reach `done` without ever producing a `doing` line. Falling back to the last change then sent
+     * the reader to the END of the section — the one place 「这一节从哪里开始」 is not.
+     * The beginning of a section is the earliest thing that happened under it.
+     */
+    const ownAndChildren = outline
+      ? [...changes, ...steps.flatMap((other) =>
+          other.id.startsWith(`${step.id}.`) ? statusChanges(journal, other.id) : [],
+        )]
+      : changes;
+    if (ownAndChildren.length === 0) continue;
 
     // Outline → when it started. Sub-step → when it finished.
-    const wanted = isOutlineId(step.id) ? 'doing' : 'done';
+    const wanted = outline ? 'doing' : 'done';
     // Last time it entered that state: re-entry (after a pause) should land on
     // the most recent attempt, not the first one years ago.
     const reached = [...changes].reverse().find((change) => change.status === wanted);
-    const chosen = reached ?? changes[changes.length - 1]!;
+    const chosen = reached
+      ?? (outline
+        ? ownAndChildren.reduce((earliest, change) => (change.at < earliest.at ? change : earliest))
+        : changes[changes.length - 1]!);
 
-    const sessionId = sessionAt(journal, chosen.at) ?? fallbackSessionId;
+    const sessionId = sessionAt(runs, chosen.at) ?? statement;
     result.set(step.id, {
       at: chosen.at,
       ...(sessionId ? { sessionId } : {}),

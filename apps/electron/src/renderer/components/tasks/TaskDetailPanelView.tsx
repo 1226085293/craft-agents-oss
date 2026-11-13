@@ -1355,7 +1355,14 @@ function PlanSection({
                       title={`${step.id}. ${step.title} — ${hint}`}
                       onClick={() => onJump?.(jump!)}
                       className={cn(
-                        'td-row min-w-0 flex-1 truncate rounded text-left underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                        /**
+                         * `min-w-0` without `flex-1`, so the text keeps its natural width and the
+                         * owner sits right after it. `flex-1` stretched the title to the end of the
+                         * row and pushed 「— 默认」 to the far edge, where it read as a column of its
+                         * own instead of part of the line it describes. The title still truncates
+                         * when the row runs out of room: it shrinks, the owner does not (`shrink-0`).
+                         */
+                        'td-row min-w-0 truncate rounded text-left underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                         isOutline ? 'font-medium' : 'font-normal',
                         step.status === 'done' ? 'text-muted-foreground' : 'text-foreground',
                       )}
@@ -1366,7 +1373,7 @@ function PlanSection({
                     <span
                       title={`${step.id}. ${step.title}`}
                       className={cn(
-                        'td-row min-w-0 flex-1 truncate',
+                        'td-row min-w-0 truncate',
                         isOutline ? 'font-medium' : 'font-normal',
                         step.status === 'done' ? 'text-muted-foreground' : 'text-foreground',
                       )}
@@ -1387,6 +1394,7 @@ function PlanSection({
                     <span
                       title={ownerOf(step)}
                       className="td-row-sub max-w-[38%] shrink-0 truncate whitespace-nowrap text-muted-foreground"
+                      data-owner={step.id}
                     >
                       — {ownerOf(step)}
                     </span>

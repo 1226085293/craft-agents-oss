@@ -223,6 +223,51 @@ describe('a recurring round ends, not the task', () => {
     expect(brief).toContain('carry its numbers and state forward')
   })
 
+
+  it('does not count a round until the whole task is done', async () => {
+    // 「一轮」 is the whole task, not one sub-step. A recurring task with three steps that delivers
+    // after the first one has not finished a round — and must not have its plan reset, or the two
+    // remaining steps would silently come back as work for the next round.
+    const svc = service();
+    const artifact = join(root, 'step-1.md');
+    writeFileSync(artifact, 'one of three', 'utf-8');
+    const task = svc.create({
+      name: '三步任务',
+      instruction: '做三步，每分钟重复',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_three',
+      trigger: { kind: 'cron', expr: '* * * * *', enabled: true },
+      spec: {
+        plan: [
+          { id: '1.1', title: '第一步', status: 'todo', agent: 'builtin-default' },
+          { id: '1.2', title: '第二步', status: 'todo', agent: 'builtin-default' },
+          { id: '1.3', title: '第三步', status: 'todo', agent: 'builtin-default' },
+        ],
+      },
+    });
+    svc.startRun(task.id, 'sess_w1');
+    svc.updatePlan(task.id, { id: '1.1', status: 'done' });
+
+    const result = await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'delivered',
+        summary: '只做完第一步',
+        stepId: '1.1',
+        artifacts: [{ path: artifact }],
+        verify: { ran: ['cat step-1.md'], passed: true },
+      },
+      'sess_w1',
+    )
+
+    const after = svc.get(task.id)!
+    // The delivery is refused as premature (§ plan still open), so no round is counted and the plan
+    // is untouched — 1.2 and 1.3 still say todo, which is the truth.
+    expect(result.task?.status).not.toBe('backlog')
+    expect(after.stats?.rounds?.ok ?? 0).toBe(0)
+    expect(after.spec?.plan?.map((step) => step.status)).toEqual(['done', 'todo', 'todo'])
+  })
+
   it('lets the supervisor close a recurring task from backlog', () => {
     // The decision 「not needed any more」 arrives after a round, when the record is `backlog`.
     // Without this edge the only way to close it would be to reopen it first.

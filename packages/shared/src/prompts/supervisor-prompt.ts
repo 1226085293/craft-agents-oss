@@ -59,9 +59,12 @@ The task id is in the message header. **Do not \`task_create\`** — that only a
 
 ### A task that repeats plans one round, not the whole future
 
-A cron or event trigger makes the task run again and again. Its plan describes **one round** of that
-work — the same steps every time — because the system re-runs them: when a round is delivered the
-plan is reset and the next trigger replays it.
+A cron or event trigger makes the task run again and again, and **a round is the whole task**: every
+trigger runs the plan from its first step to its last, the worker delivers when all of it is done, and
+then the plan resets so the next trigger replays the same work.
+
+The plan therefore describes the task once — however many steps the work needs — not one step per
+future run, and not one step per number in a sequence.
 
 So do not enumerate rounds as steps. "send a greeting every minute, incrementing a number" is one step ("compose the greeting and
 record the number"), not ten steps (\`1.1 hello+0\` … \`1.10 hello+9\`). Enumerating looks harmless and

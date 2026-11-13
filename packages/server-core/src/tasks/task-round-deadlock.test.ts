@@ -154,3 +154,43 @@ describe('a closed round does not wait for the next tick', () => {
     expect(poked).toBe(1);
   })
 })
+
+describe('a round does not hand its session to the next one', () => {
+  it('releases the session that ran it, so the next dispatch opens a new one', async () => {
+    // Rounds used to share one worker session: every round's context carried all the earlier ones, so
+    // each minute's turn was slower and the model could read last round's numbers as this round's. The
+    // round's result travels on the record (`stats.lastRound`) instead.
+    const archived: Array<{ taskId: string; sessionId: string }> = [];
+    const svc = new TaskService({
+      workspaceRoot: root,
+      sessionExists: () => false,
+      wakeSupervisor: () => undefined,
+      onRoundEnd: (taskId, sessionId) => archived.push({ taskId, sessionId }),
+    });
+    const task = recurring(svc);
+    const artifact = join(root, 'round.md');
+    writeFileSync(artifact, 'hello+1', 'utf-8');
+
+    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' });
+    svc.startRun(task.id, 'sess_round_1');
+    svc.updatePlan(task.id, { id: '1.1', status: 'done' });
+    svc.updatePlan(task.id, { id: '1.2', status: 'done' });
+    await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'delivered',
+        summary: '第 1 轮完成',
+        stepId: '1.2',
+        artifacts: [{ path: artifact }],
+        verify: { ran: ['cat round.md'], passed: true },
+      },
+      'sess_round_1',
+    );
+
+    const after = svc.get(task.id)!;
+    // `dispatch` reuses a session only when `currentSessionId` is set, present and unarchived.
+    expect(after.currentSessionId).toBeUndefined();
+    expect(after.stats?.lockSessionId).toBeUndefined();
+    expect(archived).toEqual([{ taskId: task.id, sessionId: 'sess_round_1' }]);
+  })
+})

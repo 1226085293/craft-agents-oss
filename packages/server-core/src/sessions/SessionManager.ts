@@ -8064,6 +8064,28 @@ ${request.prompt}`;
        * but once the task is over the conversation is just clutter in a list the person reads. The
        * record is terminal, so nothing will reuse it again.
        */
+      /**
+       * A finished round takes its worker session with it.
+       *
+       * The next round must start clean: the same session carried every earlier round in its context,
+       * so each minute's turn was slower and the model could read last round's numbers as this round's.
+       * The round's result travels on the record (`stats.lastRound`), which is what the next brief
+       * shows — the conversation itself is not the hand-off.
+       */
+      onRoundEnd: (_taskId, sessionId) => {
+        const managed = this.sessions.get(sessionId)
+        // Still finishing its turn: it has already handed off, and archiving under it would tear down
+        // a live conversation. `currentSessionId` is cleared either way, so it will not be reused.
+        if (!managed || managed.isArchived || managed.isProcessing) return
+        void this.moveSessionToScope(
+          sessionId,
+          managed.projectId ?? null,
+          managed.folderId ?? null,
+          true,
+        ).catch((error) => {
+          sessionLog.warn('failed to archive a finished round worker', { sessionId, error })
+        })
+      },
       onTaskTerminal: (task) => {
         for (const sessionId of task.sessionIds ?? []) {
           const managed = this.sessions.get(sessionId)

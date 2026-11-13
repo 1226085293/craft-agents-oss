@@ -143,6 +143,16 @@ export interface TaskServiceDeps {
    * archive them. Called once per transition into a terminal state, not on every write.
    */
   onTaskTerminal?: (task: Task) => void;
+  /**
+   * A round is over; the session that ran it is done with.
+   *
+   * Rounds used to share one worker session, which meant each round's context carried every earlier
+   * round — the same conversation getting slower every minute, and a model reading last round's
+   * numbers as if they were this round's. A round is a unit of work with its own result (kept in
+   * `stats.lastRound`), so it gets its own session: the host archives the one that just finished and
+   * the next dispatch opens a fresh one with only the round result to continue from.
+   */
+  onRoundEnd?: (taskId: string, sessionId: string) => void;
   now?: () => number;
   /** Id generator (tests inject a stable one). */
   newId?: () => string;
@@ -792,8 +802,16 @@ export class TaskService {
           })(),
     );
 
+    /**
+     * The session that ran this round is released with it.
+     *
+     * Clearing `currentSessionId` is what makes the next dispatch open a new session instead of
+     * continuing in this one: `dispatch` reuses it only when it is set, present and unarchived.
+     */
+    const ranBy = task.currentSessionId ?? task.stats?.lockSessionId;
     const closed: Task = {
       ...task,
+      currentSessionId: undefined,
       handoffs: trimmedHandoffs,
       spec: task.spec ? { ...task.spec, plan: resetPlan } : task.spec,
       stats: {
@@ -804,6 +822,7 @@ export class TaskService {
     };
 
     const closedTask = applyTransition(closed, 'backlog', { now }).task;
+    if (ranBy) this.deps.onRoundEnd?.(task.id, ranBy);
     // The round is over and the trigger backlog is not: let it start now rather than at the next tick.
     this.deps.pokeScheduler?.();
     return closedTask;

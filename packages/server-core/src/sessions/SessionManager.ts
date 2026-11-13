@@ -8993,6 +8993,14 @@ ${request.prompt}`;
            * turn's end. Without it the pre-check sees no lock on every task.
            */
           stats: { lockSessionId: task.stats?.lockSessionId },
+          /**
+           * Triggers travel too, because a refusal's wording depends on them.
+           *
+           * A task that repeats is told 「本轮到此为止」; a one-shot task is told 「要收尾就结束、要返工
+           * 就新开一节」. Without this field the runtime could not tell them apart and gave every task
+           * the second sentence — which is how 「第 N 轮」 became a new section every minute.
+           */
+          triggers: task.triggers ?? (task.trigger ? [task.trigger] : []),
           // The task's assigned profile has to survive this lookup: without it the
           // dispatch path below spawns with no `agentId` and silently runs the
           // work as the workspace default, while the cron/event path

@@ -640,7 +640,18 @@ disagree with it — the shape that produced a task whose triggers kept firing a
  *
  * `trigger` (singular) is the legacy slot; records written before `triggers[]` still carry it.
  */
-export function isRecurring(task: Pick<Task, 'triggers' | 'trigger'>): boolean {
+/**
+ * What the question needs: a trigger list, in either spelling.
+ *
+ * Structural rather than `Task['triggers']`: callers project the record down to what they use, and a
+ * refusal's wording should not force a full `Task` through the dispatcher.
+ */
+export type RecurringSubject = {
+  triggers?: ReadonlyArray<{ kind: 'manual' | 'cron' | 'event'; enabled?: boolean }>;
+  trigger?: { kind: 'manual' | 'cron' | 'event'; enabled?: boolean };
+};
+
+export function isRecurring(task: RecurringSubject): boolean {
   const triggers = task.triggers ?? (task.trigger ? [task.trigger] : []);
   return triggers.some((trigger) =>
     trigger.kind === 'cron' || trigger.kind === 'event' ? trigger.enabled : false,

@@ -58,6 +58,8 @@ function harness(
         /** Why it is paused; `awaiting_release` is the pause the person owns. */
         pauseReason?: string;
         lifecycle?: { lastPausedAt?: number };
+        /** Read only to word a refusal: a repeating task's finished plan ends a round. */
+        triggers?: Array<{ kind: 'manual' | 'cron' | 'event'; enabled?: boolean }>;
         spec?: { plan?: Array<{ id: string; status?: string; agent?: string; updatedAt?: number; executedBy?: string }> };
       }
     >;
@@ -1620,6 +1622,36 @@ describe('a finished task accepts no dispatch', () => {
       expect(h.claimed).toEqual([])
     })
   }
+
+
+  it('words a refusal differently for a task that repeats', async () => {
+    // Live: 「每分钟你好循环」 finished its plan, the round was not seen as finished, and the refusal
+    // told the supervisor to open a new section — so each minute added `2`/`2.1`, then `3`/`3.1`.
+    // The advice is the bug: for a repeating task a finished plan means the round is over.
+    const tasks = new Map([
+      [
+        'T-7',
+        {
+          id: 'T-7',
+          assigneeAgentId: 'builtin-default',
+          triggers: [{ kind: 'cron', enabled: true }],
+          spec: { plan: [{ id: '1.1', title: '发一句', status: 'done' }] },
+        } as never,
+      ],
+    ])
+    const h = harness(workspace(), { tasks })
+
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-7' },
+        stepId: '1.1',
+        scope: '本轮',
+        instruction: '再来一轮',
+        parallel: false,
+      } as never),
+    ).rejects.toThrow(/不要为了「第 N 轮」新开一节/)
+  })
 
   it('does not let user approval resurrect a finished task', async () => {
     const h = harness(workspace(), { tasks: finished('completed') })

@@ -27,7 +27,7 @@ import {
 } from '@craft-agent/shared/agents/supervisor';
 import { loadRoutes, matchRoute, formatRouteInstruction, formatRouteRuleIssue, ruleParallelism } from '@craft-agent/shared/routing';
 import { readAgentRoster } from '@craft-agent/shared/agents';
-import { isTerminal, resumeDecisionFor } from '@craft-agent/shared/tasks';
+import { isRecurring, isTerminal, resumeDecisionFor } from '@craft-agent/shared/tasks';
 import { DispatchQueue } from './dispatch-queue.ts';
 
 const log = createLogger('supervisor');
@@ -138,6 +138,14 @@ export interface SupervisorRuntimeDeps {
      * holds the task's single run. Absent means the task is not running.
      */
     stats?: { lockSessionId?: string };
+    /**
+     * Why a refusal is worded the way it is.
+     *
+     * A task that repeats treats a finished plan as the end of a round; a one-shot task treats it as
+     * 「nothing left to do」. The two need different advice when a dispatch is refused, and advice is
+     * what the model follows — the wrong sentence here is how rounds became new sections.
+     */
+    triggers?: Array<{ kind: 'manual' | 'cron' | 'event'; enabled?: boolean }>;
     /** Profile the task is assigned to; absent means the workspace default. */
     assigneeAgentId?: string;
     /**
@@ -449,6 +457,8 @@ export class SupervisorRuntime {
         directive?: { text: string; at: number };
       };
       handoffs?: Array<{ outcome?: string; at?: number }>;
+      /** Read only to word a refusal: a task that repeats treats a finished plan as one round. */
+      triggers?: Array<{ kind: 'manual' | 'cron' | 'event'; enabled?: boolean }>;
     },
     params: { userApproved?: boolean; stepId?: string },
   ): void {
@@ -489,8 +499,21 @@ export class SupervisorRuntime {
         );
       }
       if (step.status === 'done') {
+        /**
+         * 「新开一节」 was the wrong advice for a task that repeats.
+         *
+         * Observed live: 「每分钟你好循环」 finished its plan and handed off, the round was not detected
+         * as finished, and this refusal told the supervisor to open a new section — so it opened
+         * `2`/`2.1` beside `1`/`1.1`, and the next minute `3`/`3.1`. The plan became a log of rounds
+         * instead of a plan, and every round after the first was refused the same way. For a task
+         * that repeats, a finished step means the round is over, not that new work is needed.
+         */
         throw new DispatchRefused(
-          `${task.id} 的 ${params.stepId} 已经完成了，不要重复派。要收尾就结束任务，要返工就用 task_plan 新开一节。`,
+          isRecurring(task)
+            ? `${task.id} 的 ${params.stepId} 已经完成了，不要重复派。这个任务每次触发重跑同一套步骤：` +
+              '本轮若已全部完成，直接结束本轮（下个触发会自动从第一小节重放）；要改本轮范围才用 task_plan 改小节。' +
+              '**不要为了「第 N 轮」新开一节——那不是新工作。**'
+            : `${task.id} 的 ${params.stepId} 已经完成了，不要重复派。要收尾就结束任务，要返工就用 task_plan 新开一节。`,
         );
       }
     }
@@ -591,8 +614,11 @@ export class SupervisorRuntime {
     const openSteps = (task.spec?.plan ?? []).filter((step) => step.status !== 'done');
     if (task.spec?.plan?.length && openSteps.length === 0) {
       throw new DispatchRefused(
-        `${task.id} 的计划已经全部完成，没有可派的步骤。不要重复派已经做完的活：` +
-          '要收尾就直接把任务结束，要返工就先用 task_plan 新开一节。',
+        isRecurring(task)
+          ? `${task.id} 的计划已经全部完成，本轮到此为止——没有可派的步骤，也不需要新开一节。` +
+            '这个任务每次触发重跑同一套步骤；现在结束本轮即可，下个触发会自动从第一小节重放（计数请写进 roundResult 带给下一轮）。'
+          : `${task.id} 的计划已经全部完成，没有可派的步骤。不要重复派已经做完的活：` +
+            '要收尾就直接把任务结束，要返工就先用 task_plan 新开一节。',
       );
     }
     if (!handedOff || openSteps.length > 0) return;

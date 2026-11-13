@@ -38,8 +38,14 @@ describe('supervisor lanes', () => {
   it('leaves the user lane able to do its own job', () => {
     const tools = userLaneTools()
     // Read the board, answer the person, and hand the person's words to the working lane.
-    for (const name of ['task_list', 'task_get', 'ask_user', 'create_task']) {
+    for (const name of ['task_list', 'task_get', 'create_task']) {
       expect(tools.has(name)).toBe(true)
+    }
+    // …and without a tool for asking the person: `ask_user` targets 「the user lane」, which from
+    // inside this lane is itself (`resolveReaderLane` returns the session). Its reply reaches the
+    // person directly, so a card would only be a round trip through itself.
+    for (const name of ['ask_user', 'list_questions']) {
+      expect(tools.has(name)).toBe(false)
     }
   })
 
@@ -59,8 +65,12 @@ describe('supervisor lanes', () => {
     for (const name of USER_LANE_DENIED_TOOL_NAMES) {
       expect(names.has(name)).toBe(false)
     }
-    for (const name of ['task_list', 'task_get', 'ask_user', 'create_task']) {
+    for (const name of ['task_list', 'task_get', 'create_task']) {
       expect(names.has(name)).toBe(true)
+    }
+    // Same narrowing on the schema path the proxy defs are built from.
+    for (const name of ['ask_user', 'list_questions']) {
+      expect(names.has(name)).toBe(false)
     }
   })
 

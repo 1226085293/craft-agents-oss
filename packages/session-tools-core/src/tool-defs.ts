@@ -724,6 +724,8 @@ export const USER_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'task_plan',
   'SubmitPlan',
   'send_agent_message',
+  'ask_user',
+  'list_questions',
 ]);
 
 /**

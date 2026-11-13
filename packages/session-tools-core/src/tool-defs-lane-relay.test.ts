@@ -75,6 +75,24 @@ describe('supervisor lanes: one writer, one reader', () => {
     expect(tools.has('dispatch')).toBe(false);
   });
 
+  /**
+   * A lane that talks to the person must not have a tool for asking the person.
+   *
+   * `ask_user` delivers to 「the user lane」, and from inside that lane the target is itself
+   * (`resolveReaderLane` returns `managed`). On a real run the person wrote 「一分钟给我发一次你好」,
+   * the lane called `ask_user` with a decision, and the card came back into the same conversation —
+   * 「督导 · 用户 发来的问句」 — while the requirement was never turned into a task.
+   */
+  it('gives the user lane no way to ask the lane it already is', () => {
+    const tools = userTools()
+    for (const name of ['ask_user', 'list_questions']) {
+      expect(tools.has(name)).toBe(false)
+    }
+    // The working lane still asks: its questions are the ones that need a card.
+    expect(taskTools().has('ask_user')).toBe(true)
+    expect(taskTools().has('list_questions')).toBe(true)
+  })
+
   it('declares a user-lane prompt list that matches the real table', () => {
     const tools = userTools();
     for (const name of USER_LANE_PROMPT_TOOLS) {

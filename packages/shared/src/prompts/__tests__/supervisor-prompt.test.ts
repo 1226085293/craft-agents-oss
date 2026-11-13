@@ -222,7 +222,9 @@ describe('lane-specific rules', () => {
     expect(text).toContain('建完就停');
     expect(text).toContain('同一回合里不要再');
     expect(text).toContain('不要拿系统内部记账去问用户');
-    expect(text).toContain('一个回合只用一次');
+    // The 「只用一次 ask_user」 line went with the tool: this lane has none, so the rule is
+    // 「停在这里」 — the same intent, without naming a capability it does not have.
+    expect(text).toContain('建完这一句就够');
   });
 
   it('tells the task lane to continue when the directive already covers the rest', () => {
@@ -233,6 +235,36 @@ describe('lane-specific rules', () => {
     expect(text).toContain('面向任务');
     expect(text).toContain('directive` 已经覆盖剩下的步骤');
     expect(text).toContain('不要每完成一个小节就确认一次');
+  });
+
+  /**
+   * A live run, 2026-11-13: the person wrote 「一分钟给我发一次你好」. The user lane checked its own
+   * abilities (it has no timer), answered 「我做不到」, and asked the person to pick a fallback —
+   * no task was ever created. Then it called `ask_user`, whose card landed in its own transcript,
+   * because `resolveReaderLane` returns the session itself for this lane.
+   *
+   * Both rules are asserted as text because both were absent text: the lane was told where it
+   * speaks, never that speaking IS the answer, and never that 「能不能做到」 is not its call.
+   */
+  it('tells the user lane that it is already talking to the person', () => {
+    // The line used to explain that `ask_user` would address the lane itself. It no longer names
+    // the tool at all: the table already withholds it, and a name in the prompt is half a
+    // capability. What has to survive is the fact the lane kept forgetting — this IS the person's
+    // conversation.
+    const text = userLane()
+    expect(text).toContain('你就是在跟用户说话');
+    expect(text).toContain('这条会话他直接读');
+  });
+
+  it('does not let the user lane decide whether something is possible', () => {
+    const text = userLane()
+    expect(text).toContain('你不判断能不能做到');
+    // The three shapes the task system actually has, named so the lane stops inventing a fourth.
+    expect(text).toContain('跑一次（手动）');
+    expect(text).toContain('按时间重复（定时）');
+    expect(text).toContain('被事件触发');
+    // Only as the sentence that forbids saying it — there is no 「I can't」 branch left.
+    expect(text).toContain('也不要回答「我做不到」');
   });
 
   it('does not leak one lane rule into the other', () => {
@@ -275,15 +307,34 @@ describe('lane prompts match their tool tables', () => {
       .filter((name) => SUPERVISOR_TOOL_NAMES.has(name) || USER_LANE_DENIED_TOOL_NAMES.has(name))
 
   it('never names a routing tool in the user lane', () => {
-    const named = new Set(mentionedTools(userLane()))
+    // Naming a tool in order to deny it is the point — 「你手上没有这两个工具」 is what stops the
+    // model reaching for it. What must not happen is a denied tool being *described as usable*,
+    // so every mention has to sit in a clause that says no. Split on line breaks without a
+    // backslash in the pattern: this file is written through tools that eat them.
+    const NL = String.fromCharCode(10)
+    const clauses = userLane()
+      .split(NL)
+      .flatMap((line) => line.split('。'))
     for (const denied of USER_LANE_DENIED_TOOL_NAMES) {
-      expect(named.has(denied)).toBe(false)
+      for (const clause of clauses) {
+        if (!clause.includes(denied)) continue
+        const denies =
+          clause.includes('没有') ||
+          clause.includes('不要') ||
+          clause.includes('不是') ||
+          clause.includes('别') ||
+          clause.includes('禁止')
+        expect(denies).toBe(true)
+      }
     }
   })
 
   it('names no tool the user lane lacks, anywhere in its prompt', () => {
     const laneTools = getSessionToolNames({ role: 'supervisor', supervisorLane: 'user' })
     for (const name of mentionedTools(userLane())) {
+      // The only permitted mentions of a tool this lane does not have are the ones that say it
+      // does not have it: 「你手上没有这两个工具」 is what stops the model reaching for them.
+      if (USER_LANE_DENIED_TOOL_NAMES.has(name)) continue
       expect(laneTools.has(name)).toBe(true)
     }
   })

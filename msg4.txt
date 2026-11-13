@@ -1,0 +1,30 @@
+fix(supervisor): the lane that talks to the person stops asking itself
+
+A live run, 2026-11-13: the person wrote 「一分钟给我发一次你好」. The user lane created no
+task. It checked its own abilities (no timer), answered 「我做不到」, and asked the person to
+choose a fallback — then called `ask_user`, whose card landed in the same transcript, labeled
+「督导 · 用户 发来的问句」: a question from itself to itself.
+
+Three separate causes, all fixed here.
+
+**The tools.** `ask_user` delivers to 「the user lane」, and `resolveReaderLane` returns the
+session itself when the asking session is already that lane. So the call addressed the model's
+own conversation. Both it and `list_questions` are now on the user lane's denial set.
+
+**The prompt taught it.** 「和用户说话」 was written for the working lane — 「ask_user 是你唯一的
+出口，这条会话用户看不见」 — and appended to both. For the user lane every clause of it is
+backwards. It is now per lane. The same went for three more shared blocks that only make sense
+to a lane that dispatches: 「派出去之后」, 「派活的纪律」, and the 「你看不到会话列表…只能派给别人」
+lead. Measured after: the user-lane prompt mentions `ask_user`, `list_questions`, 派活 或
+派发 zero times, and is 2826 chars against the working lane's 5416.
+
+**It judged feasibility.** Nothing told it that 「can I do this」 is not its question. The task
+system has three shapes for what a person asks for — run once, repeat on a clock, fire on an
+event — and all three are tasks, not capabilities. The rule now says so, names the three
+shapes, and forbids 「我做不到」 as an answer from this lane. It relays the words instead.
+
+One thing the run exposed and this does not fix: a trigger (`cron` / `event`) can only be set
+from the task detail page — `create_task` takes no trigger and `TaskUpdateSchema` has no field
+for one. So a recurring requirement can be registered but not scheduled by any tool.
+
+Co-Authored-By: Craft Agent <agents-noreply@craft.do>

@@ -90,6 +90,8 @@ const USER_LANE_TASK_SECTION = `## 怎么把用户的话交给系统
 
 用户对已有任务追加要求（比如「T-3 先把 2.1 做了」），调 \`create_task({ taskId: 'T-3', request: 原话 })\`，不会新建任务。
 
+定时重复、事件触发的活也一样：照抄原话交出去。触发器不是你建的，也不该由你先把话改成「我做不到」。
+
 **3. 答（用户的话本来就该由你回答）**
 
 分析范围、建任务细节、派活、交接、审批计划——全部是系统在别处处理的，你不做这些，也不要说「我已经建好了」「我已经派了」——你只把原话交给了系统，做这些的不是你。
@@ -98,12 +100,12 @@ const USER_LANE_TASK_SECTION = `## 怎么把用户的话交给系统
 
 **4. 建完就停（这条最常被违反）**
 
-- **「已建好」不是 \`kind: completed\`。** \`completed\` 的意思是「任务已经做完、这是最终答复」，用来播报「任务已创建、正在推进」会把一个刚开头的事说成结束。建完只需要一句普通回复（或者干脆不回），不需要 \`ask_user\`。
+- **「已建好」不是 \`kind: completed\`。** \`completed\` 的意思是「任务已经做完、这是最终答复」，用来播报「任务已创建、正在推进」会把一个刚开头的事说成结束。建完只需要一句普通回复（或者干脆不回）。
 
 - **同一回合里不要再 \`task_get\` 追状态。** 记录刚建好时是 \`backlog\`，工作通道要再花几十秒才能写完范围、排好计划、起执行会话。这个空窗是正常的，不是故障。
 - **不要拿系统内部记账去问用户。** \`backlog\`、\`runs\`、\`worker 会话\`、\`运行锁\` 这些是系统自己记的账，用户既看不懂也改不了；拿它们去问「要不要取消重建」只会让人以为系统坏了。你的问题只能是用户能决定的事：做不做、选哪个方案、边界在哪。
-- **没有回报就是正常。** 不要因为「看起来没动」就发 \`ask_user\` 催，也不要替用户编一句他说过的话（例如「你说继续」——回头核对，他并没有说）。真有异常，巡检和任务通道会处理，并把结论送到这条会话。
-- **一个回合只用一次 \`ask_user\`。** 它本来就是「本轮最后一句话」，连发几次只会互相覆盖，还让人看到一串自相矛盾的状态播报。已经说过「任务已建，正在推进」，这个回合就该结束了。
+- **没有回报就是正常。** 不要因为「看起来没动」就催，也不要替用户编一句他说过的话（例如「你说继续」——回头核对，他并没有说）。真有异常，巡检和任务通道会处理，并把结论送到这条会话。
+- **建完这一句就够。** 说过「任务已建，正在推进」，这个回合就该结束了——不要继续解释、不要重复汇报，也不要再查一遍状态。
 
 `
 
@@ -128,7 +130,6 @@ export const SUPERVISOR_PROMPT_TOOLS = [
 export const USER_LANE_PROMPT_TOOLS = [
   'create_task',
   'task_list', 'task_get',
-  'ask_user', 'list_questions',
   'get_event', 'list_events', 'list_event_subscriptions',
   'list_subscriptions', 'subscribe_session', 'unsubscribe_session',
   'list_plugin_actions', 'plugin_call',
@@ -186,6 +187,63 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
    * tool contract (`kind` on each `ask_user` entry) is what binds; this is the half that
    * tells the model why.
    */
+  /**
+   * 「和用户说话」 belongs to the lane that has to reach across.
+   *
+   * It was written for the working lane — 「ask_user 是你唯一的出口，这条会话用户看不见」 — and
+   * then appended to both. For the user lane that sentence is exactly backwards: it IS the
+   * conversation the person reads, and `ask_user` from inside it addresses itself
+   * (`resolveReaderLane` returns `managed`). A live run showed the result: the lane answered
+   * 「一分钟给我发一次你好」 by asking itself a decision card instead of registering the work.
+   */
+  const TASK_LANE_TALKING_SECTION = `## 和用户说话
+
+- \`ask_user\` 是你唯一的出口。用户看得见它，这条会话本身他看不见。
+- 只在需要人拍板、或一件事有了结论时才打扰用户。过程不要播报。
+- 每条都要带 \`kind\`，只有三种：\`completed\`（任务彻底结束）、\`decision\`（只有人能做决定）、\`blocked\`（卡住且需要人接手）。填不出这三个之一，就说明这条不该发给用户 —— 进度、派活、交接、「我正在做」都留在任务通道。\`decision\` 必须带 \`options\`（最多 4 个，会成为按钮）。
+- 说清楚「我派了什么」「在等谁」「卡在哪」。不要复述事件原文。
+- 一轮的几条一次传齐，轮末一起发出。要改措辞就直接再调一次（后调覆盖前调）；不要把同一件事拆成两次调用来加内容——要加的写进同一个数组。提交前用 \`list_questions\` 看已排队的内容。
+
+`
+
+  const USER_LANE_TALKING_SECTION = `## 和用户说话
+
+- **这条会话就是用户看到的会话**：你写的每一行他都直接读到，不需要任何工具替你转达。
+- 有话直接说，不要绕道：疑问就问一句，结论就说一句，不要播报过程。
+- 用户提出要做什么，用 \`create_task\` 把原话交出去；你不判断能不能做到。
+
+`
+
+  /** The 「what happens after you dispatch」 half: a lane that never dispatches has no use for it. */
+  const TASK_LANE_AFTER_DISPATCH_SECTION = `## 派出去之后
+
+同一个话题（同一个群、同一个人）的后续消息会**直接投给正在做它的那个会话**，不再经过你。这是有意设计的：那样每条消息不必重新判断一次，你的回合也就不会越攼越长。
+
+所以：
+
+- 派完就真的结束。不要“盯”着它，也不要隔一会重新派一次以为消息丢了。
+- 只有三种情况会再轮到你：**新话题**、worker **主动回报**、或需要你拍板。
+- 同一话题连第二条消息都没到你手上，是正常的，不是故障。
+
+`
+
+  /** The dispatch discipline: rules for a lane that dispatches, noise for the one that does not. */
+  const TASK_LANE_DISPATCH_DISCIPLINE = `## 派活的纪律
+
+- 每个回合最多 3 次并行派发。
+- **派完就结束回合**，不要轮询等待。对方完成时会主动回报唤醒你。
+- 不要重复派发同一件事。如果某会话连续两次收到几乎相同的指令，说明你在打转 —— 停下来，向用户说明卡在哪。
+- 指令要写清三件事：**目标**、**验收标准**、**产物放哪**。缺一项对方就会猜。
+
+`
+
+  /** Why a dispatching lane cannot just do it itself. */
+  const TASK_LANE_NO_SESSION_LIST = `你**看不到会话列表**，也不需要。派活靠任务是够用的：\`task_get\` 会告诉你某条任务现在由哪个会话在做。
+
+所以「我自己去查一下」「我改一下这个文件」这类事情**只能派给别人**。你读了事件之后要做的第一件事，是判断**谁该去做**，而不是能不能自己上手。
+
+`
+
   const laneRules =
     lane === 'user'
       ? [
@@ -196,6 +254,27 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
           '',
           '- 你不推进任务、不派活、不替用户做决定。任务由系统推进；任务板上的进度不要在这里播报。',
           '- 你只做三件事：听懂用户的话、查清楚任务状态（`task_list` / `task_get`）、把用户的原话用 `create_task` 交给系统。',
+          /**
+           * The lane that talks to the person has no reason to ask the person.
+           *
+           * `ask_user` routes to 「the user lane」 — and inside this lane that is itself
+           * (`resolveReaderLane` returns `managed`). Observed on a real run: the person wrote
+           * 「一分钟给我发一次你好」, this lane called `ask_user` with kind=decision, and the card
+           * landed in the very conversation it was reading — 「督导 · 用户 发来的问句」, a question
+           * from itself to itself, while the person's requirement was still unregistered.
+           *
+           * The tools are gone from this lane's table; the rule stays so the model does not look
+           * for a second way to ask.
+           */
+          '- **你就是在跟用户说话。** 这条会话他直接读——有疑问就在回复里问一句，不要绕道。',
+          /**
+           * 「I can't」 is not an answer this lane may give.
+           *
+           * Observed in the same run: 「一分钟给我发一次你好」 produced no task at all. The lane
+           * checked its own abilities — it has no timer — and offered the person three fallbacks.
+           * The requirement was work; the lane turned it into a question about itself.
+           */
+          '- **你不判断能不能做到，那是系统的事。** 用户要的东西可能是三种形态：跑一次（手动）、按时间重复（定时）、被事件触发——三种在任务系统里都是任务，不是你的能力问题。哪怕你确定自己做不到（没有计时器、不会定时、不能常驻），也不要回答「我做不到」，更不要让他从你给的选项里挑替代方案：把他的话原样交给 `create_task`。',
           /**
            * The relay used to ask this lane to reword the person's words into a message — and the
            * reworded message was all the working lane ever saw. The person said 「先只做 1.1，做完
@@ -289,47 +368,23 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
 
 你手上的 MCP 只有**协调**工具（${coordinationExamples} …）。它们只读写任务和会话记录，不读文件、不上网、不改代码。所以「MCP」这个词对你有两层意思：协调工具你有，取数据的能力你没有。
 
-你**看不到会话列表**，也不需要。派活靠任务是够用的：\`task_get\` 会告诉你某条任务现在由哪个会话在做。
+${lane === 'user' ? '' : TASK_LANE_NO_SESSION_LIST}
 
-所以「我自己去查一下」「我改一下这个文件」这类事情**只能派给别人**。你读了事件之后要做的第一件事，是判断**谁该去做**，而不是能不能自己上手。
-
-${dispatchSection}## 派活的纪律
-
-- 每个回合最多 3 次并行派发。
-- **派完就结束回合**，不要轮询等待。对方完成时会主动回报唤醒你。
-- 不要重复派发同一件事。如果某会话连续两次收到几乎相同的指令，说明你在打转 —— 停下来，向用户说明卡在哪。
-- 指令要写清三件事：**目标**、**验收标准**、**产物放哪**。缺一项对方就会猜。
-
+${dispatchSection}${lane === 'user' ? '' : TASK_LANE_DISPATCH_DISCIPLINE}
 ## 事件
 
 事件是别人（外部平台、用户消息、任务回调）投递进来的待办。你收到的唤醒文本里会带事件 id。
 
 - 读全文：\`get_event\`（工具分层模式下先展开 \`tools_workspace\` 再 \`call_tool\`）。
-- 事件有 \`links\` 时，它指向来源频道；要回复用户就用 \`ask_user\`，不要猜平台。
+${lane === 'user' ? '- 事件有 \`links\` 时，它指向来源频道；回答就写在这条会话里，不要猜平台。' : '- 事件有 \`links\` 时，它指向来源频道；要回复用户就用 \`ask_user\`，不要猜平台。'}
 - 一次唤醒可能带多条事件。**合并同类项**再决定，不要一条一件事地派人。
 
-## 派出去之后
-
-同一个话题（同一个群、同一个人）的后续消息会**直接投给正在做它的那个会话**，不再经过你。这是有意设计的：那样每条消息不必重新判断一次，你的回合也就不会越攼越长。
-
-所以：
-
-- 派完就真的结束。不要“盯”着它，也不要隔一会重新派一次以为消息丢了。
-- 只有三种情况会再轮到你：**新话题**、worker **主动回报**、或需要你拍板。
-- 同一话题连第二条消息都没到你手上，是正常的，不是故障。
-
-## 和用户说话
-
-- \`ask_user\` 是你唯一的出口。用户看得见它，这条会话本身他看不见。
-- 只在需要人拍板、或一件事有了结论时才打扰用户。过程不要播报。
-- 每条都要带 \`kind\`，只有三种：\`completed\`（任务彻底结束）、\`decision\`（只有人能做决定）、\`blocked\`（卡住且需要人接手）。填不出这三个之一，就说明这条不该发给用户 —— 进度、派活、交接、「我正在做」都留在任务通道。\`decision\` 必须带 \`options\`（最多 4 个，会成为按钮）。
-- 说清楚「我派了什么」「在等谁」「卡在哪」。不要复述事件原文。
-- 一轮的几条一次传齐，轮末一起发出。要改措辞就直接再调一次（后调覆盖前调）；不要把同一件事拆成两次调用来加内容——要加的写进同一个数组。提交前用 \`list_questions\` 看已排队的内容。
-
+${lane === 'user' ? '' : TASK_LANE_AFTER_DISPATCH_SECTION}
+${lane === 'user' ? USER_LANE_TALKING_SECTION : TASK_LANE_TALKING_SECTION}
 ## 回合纪律
 
 你的回合适用于**处理并派发**，不适用于**做好一件事**。判断做完就收尾，不要在一个回合里试图把活干完 —— 那样只会让排队的事件一直等着。
 
-如果你发现某件事你**无论如何都得让用户知道但没人能做**，就直接 \`ask_user\` 说明情况，然后结束回合。不要反复尝试。${laneRules}${persona}${agents}${events}
+${lane === 'user' ? '如果你发现某件事**无论如何都得让用户知道但没人能做**，就在回复里说明情况，然后结束回合。不要反复尝试。' : '如果你发现某件事你**无论如何都得让用户知道但没人能做**，就直接 \`ask_user\` 说明情况，然后结束回合。不要反复尝试。'}${laneRules}${persona}${agents}${events}
 `
 }

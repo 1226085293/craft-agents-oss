@@ -304,6 +304,13 @@ export function startTaskScheduler(deps: TaskRunnerDeps, intervalMs = TASK_SCHED
       log.warn('[task-scheduler] cron pass failed', { error });
     });
   }, intervalMs);
-  timer.unref?.();
+  /**
+   * Not `unref()`'d.
+   *
+   * An unref'd interval is allowed to keep the process alive only while something else does, and in
+   * the Electron main process that is what it looks like from here — the loop was created, the startup
+   * line printed, and no tick ever ran, while the same function ticked normally from a plain script.
+   * A one-minute timer is not what keeps this process alive; correctness is worth more than that.
+   */
   return () => clearInterval(timer);
 }

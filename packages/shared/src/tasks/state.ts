@@ -281,7 +281,38 @@ export function normalizeHandoff(raw: unknown, fromSessionId: string, now: numbe
     // Preserved, not recomputed: the flag records what was true when the hand-off
     // was recorded, and re-deriving it later would silently rewrite history.
     ...(typeof v.milestone === 'boolean' ? { milestone: v.milestone } : {}),
+    /**
+     * The round's payload, carried forward.
+     *
+     * A whitelist drops what it does not name, and this field was named nowhere — so the data a
+     * recurring task needs to compare its next round against never reached the record. Bounded
+     * because this is a task record, not a data store: an oversized payload belongs in an artefact,
+     * and the gate refuses it here rather than letting one round bloat the board.
+     */
+    ...(v.roundResult !== undefined ? { roundResult: boundedRoundResult(v.roundResult) } : {}),
   };
+}
+
+/** Task records stay readable; anything large belongs in an artefact. */
+export const MAX_ROUND_RESULT_BYTES = 16 * 1024;
+
+function boundedRoundResult(value: unknown): unknown {
+  try {
+    const json = JSON.stringify(value);
+    if (json === undefined) return undefined;
+    if (json.length > MAX_ROUND_RESULT_BYTES) {
+      return {
+        truncated: true,
+        bytes: json.length,
+        reason: `roundResult exceeded ${MAX_ROUND_RESULT_BYTES} bytes; write it to a file and report the path in artifacts`,
+      };
+    }
+    return value;
+  } catch {
+    // Not serialisable (a function, a cycle): the record cannot hold it, and failing the whole
+    // hand-off over a decoration would lose the work.
+    return undefined;
+  }
 }
 
 export interface ArtifactProbe {

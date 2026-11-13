@@ -119,6 +119,7 @@ export {
 export {
   describeTrigger,
   formatTaskBrief,
+  formatLastRoundBlock,
   formatDispatchTaskContext,
   formatHandoffContext,
   formatIdleWakeBrief,

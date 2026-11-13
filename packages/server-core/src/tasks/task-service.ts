@@ -740,7 +740,7 @@ export class TaskService {
     options: {
       now: number;
       summary: string;
-      result?: { artifacts?: string[]; verify?: { ran: string[]; passed: boolean } };
+      result?: { artifacts?: string[]; verify?: { ran: string[]; passed: boolean }; data?: unknown };
     },
   ): Task {
     const { now, summary, result } = options;
@@ -2172,6 +2172,9 @@ export class TaskService {
             result: {
               ...(handoff.artifacts?.length ? { artifacts: handoff.artifacts.map((a) => a.path) } : {}),
               ...(handoff.verify ? { verify: handoff.verify } : {}),
+              // The payload the next round compares against — this is the whole point of keeping
+              // the round's delivery on the record rather than only in the journal.
+              ...(handoff.roundResult !== undefined ? { data: handoff.roundResult } : {}),
             },
           })
         : applyTransition(next, 'completed', { now }).task;

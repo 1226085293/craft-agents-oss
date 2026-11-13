@@ -337,6 +337,8 @@ export interface SessionToolContext {
       nextAction?: string;
       artifacts?: { path: string; note?: string }[];
       verify?: { ran: string[]; passed: boolean; note?: string };
+      /** Structured payload of this round; the next round reads it via `task_get`. */
+      roundResult?: unknown;
     }): Promise<{ message: string }>;
     /** Supervisor: hand work to a session/task/new session. */
     dispatch(payload: {

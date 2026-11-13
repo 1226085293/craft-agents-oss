@@ -55,6 +55,9 @@ export async function handleReportResult(
     nextAction: args.nextAction,
     artifacts: args.artifacts,
     verify: args.verify,
+    // The payload the next round reads back through `task_get`. Optional, and deliberately opaque:
+    // the shape belongs to the work, not to this schema.
+    ...(args.roundResult !== undefined ? { roundResult: args.roundResult } : {}),
   };
 
   try {

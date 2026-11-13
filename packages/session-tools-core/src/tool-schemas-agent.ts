@@ -52,6 +52,22 @@ export const ReportResultSchema = z.object({
     .optional()
     .describe('Verification evidence. Required by the rule gate (at least one command).'),
   /**
+   * What this round produced, as data — for the next round to build on.
+   *
+   * A recurring task repeats the same work, so the work usually needs its own history: 「collect
+   * non-duplicate items」 only works if round three can see what the first two already found. The
+   * `summary` is prose for a person; this is the payload. Keep it small (a counter, ids already
+   * seen, a cursor) and put anything large in an artefact, whose path travels with it.
+   *
+   * It is stored as `stats.lastRound.result.data` and returned by `task_get`.
+   */
+  roundResult: z
+    .unknown()
+    .optional()
+    .describe(
+      'Structured result of this round (e.g. { "total": 12, "ids": [1,2,3] }). Read back by the next round through task_get → stats.lastRound.result.data.',
+    ),
+  /**
    * The task this report is about, when it is about one.
    *
    * Without it the card's task was guessed from "which paused task has an open decision",

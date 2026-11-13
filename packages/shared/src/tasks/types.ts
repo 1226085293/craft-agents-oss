@@ -247,6 +247,8 @@ export interface TaskStats {
     result?: {
       artifacts?: string[];
       verify?: { ran: string[]; passed: boolean };
+      /** The structured payload the round reported (`roundResult`); see `Handoff.roundResult`. */
+      data?: unknown;
     };
   };
   /**
@@ -424,6 +426,19 @@ export interface Handoff {
   nextAction?: string;
   artifacts?: HandoffArtifact[];
   verify?: HandoffVerify;
+  /**
+   * What this round of work produced, as data the next round can compare against.
+   *
+   * A recurring task repeats the same job, and the job usually needs the previous result to do it
+   * well: 「collect non-duplicate items」 could only work if round three can see what rounds one and
+   * two already found. The summary is prose for a person; this is the payload — a counter, a list of
+   * ids already seen, a cursor, whatever the work needs to carry forward.
+   *
+   * Stored on the record as `stats.lastRound.result.data` and returned verbatim by `task_get`, so a
+   * worker reads it the same way it reads anything else about the task. Kept small on purpose: it is
+   * a record, not a data store — large payloads belong in an artefact, whose path travels with it.
+   */
+  roundResult?: unknown;
   /**
    * With `needs_decision`: the choices you are asking the person to pick between.
    *

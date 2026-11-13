@@ -189,6 +189,19 @@ export function formatLastRoundBlock(task: Pick<Task, 'stats'>): string {
   if (verify) {
     lines.push('', `Verification: ${verify.passed ? 'passed' : 'failed'} (${verify.ran.join('; ')})`);
   }
+  /**
+   * The payload, not just the prose.
+   *
+   * 「Collect non-duplicate items」 only works if this round can see what the previous one already
+   * found; the summary cannot express that. Small enough to print, and `task_get` returns the same
+   * value under `stats.lastRound.result.data` when the worker needs it structured.
+   */
+  if (last.result?.data !== undefined) {
+    lines.push('', `Result data:
+\`\`\`json
+${JSON.stringify(last.result.data, null, 2)}
+\`\`\``);
+  }
   lines.push(
     '',
     'This task repeats. Continue from what that round produced — carry its numbers and state forward — instead of starting over from the request.',

@@ -276,6 +276,19 @@ export interface TaskStats {
    */
   wakeFailures?: number;
   /**
+   * The plan a recurring task's round always starts from.
+   *
+   * Written the first time a round is claimed and never widened: steps a round adds while it runs are
+   * dropped when the next round starts, so 「每分钟一轮」 cannot turn into a plan that grows by one
+   * outline per round. Observed live: rounds two and three arrived as new steps (`2`, `2.1`, `3`,
+   * `3.1`) beside the first, so the plan never finished, no round could be delivered, and the task
+   * grew a step a minute until it was stopped by hand.
+   *
+   * Titles and owners only — ids are what the worker advances, and keeping the agent means the next
+   * round runs as the same executor.
+   */
+  roundPlan?: Array<{ id: string; title: string; agent?: string }>;
+  /**
    * When this task's trigger backlog was last put in front of the supervisor.
    *
    * 「Accumulated」 and 「delivered」 are different facts, and a turn that ends settles only what it

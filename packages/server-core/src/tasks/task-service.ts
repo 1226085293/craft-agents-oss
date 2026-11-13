@@ -790,6 +790,15 @@ export class TaskService {
         ...stats,
         rounds: { ok: (stats.rounds?.ok ?? 0) + 1, failed: stats.rounds?.failed ?? 0 },
         lastRound: { round, finishedAt: now, outcome: 'delivered', summary, ...(result ? { result } : {}) },
+        /**
+         * A finished round is the best evidence of what the round's plan should be — used only when
+         * nothing recorded a baseline earlier (a task that was already running when the field
+         * arrived). Never overwritten afterwards: the baseline is what the *next* round is reset to,
+         * and letting a finished round widen it would reintroduce the drift this field prevents.
+         */
+        ...(stats.roundPlan?.length
+          ? {}
+          : { roundPlan: resetPlan.map(({ id, title, agent }) => ({ id, title, ...(agent ? { agent } : {}) })) }),
       },
     };
 
@@ -884,14 +893,54 @@ export class TaskService {
       return null;
     }
 
+    /**
+     * A new round starts from the round's plan, not from whatever the last one added.
+     *
+     * Live failure: each round the supervisor appended a fresh outline (`2`, `2.1`, then `3`, `3.1`)
+     * instead of advancing the existing step. The plan then never finished, so no round could be
+     * delivered — and the task grew one outline a minute until it was stopped by hand.
+     *
+     * The baseline is written once (first claim, or the first close) and re-applied here. Steps added
+     * during a round are dropped at the next round's start, which is exactly 「开始时清理上一轮的执行
+     * 计划」, and it does not depend on the model remembering.
+     */
+    const roundPlan = claim.task.stats?.roundPlan
+    const baseline = roundPlan?.length
+      ? roundPlan.map((step) => ({ ...step, status: 'todo' as const }))
+      : undefined
+    const currentPlan = claim.task.spec?.plan ?? []
+    const drifted =
+      baseline !== undefined &&
+      (currentPlan.length !== baseline.length ||
+        currentPlan.some((step, index) => step.id !== baseline[index]?.id))
+
     const claimed: Task = {
       ...claim.task,
+      ...(baseline ? { spec: { ...(claim.task.spec ?? {}), plan: baseline } } : {}),
+      /**
+       * Verification is judged per round, not per task.
+       *
+       * This counter used to live for the life of the task, so a recurring task hit 「验收已跑满 3
+       * 轮」 on its fourth round and paused for a person — even though each round was a separate
+       * piece of work that had just been verified. Reset with the plan, because they are the same
+       * unit.
+       */
+      verifyRounds: 0,
       stats: {
         ...(claim.task.stats ?? { runs: 0, activeMs: 0 }),
         pendingTriggers: accumulated,
         lockDeadlineAt: now + TRIGGER_CLAIM_MS,
+        // The first round's plan becomes the baseline the rest of the rounds will be judged against.
+        ...(roundPlan?.length ? {} : { roundPlan: currentPlan.map(({ id, title, agent }) => ({ id, title, ...(agent ? { agent } : {}) })) }),
       },
     };
+    if (drifted) {
+      appendJournal(this.root, id, {
+        type: 'round_plan_reset',
+        at: now,
+        data: { dropped: currentPlan.map((step) => step.id), kept: (baseline ?? []).map((step) => step.id) },
+      });
+    }
     this.save(claimed);
     appendJournal(this.root, id, { type: 'trigger_claimed', at: now, data: trigger });
     return claimed;
@@ -939,6 +988,28 @@ export class TaskService {
     this.save({ ...released, stats: { ...(released.stats ?? { runs: 0, activeMs: 0 }), wakeFailures: failures } }, { silentTerminal: true });
     this.disposeRun(id, 'ended');
     appendJournal(this.root, id, { type: 'wake_failed', at: now, data: { wakeFailures: failures } });
+  }
+
+  /**
+   * Accept the current plan as what future rounds start from.
+   *
+   * The round baseline protects a recurring task from growing a step per round, but it must not
+   * freeze a plan that somebody deliberately changed while the task was idle — the supervisor does
+   * add real work between rounds. This is the explicit "yes, this is the round now" record, called
+   * when a plan change is made outside a run.
+   */
+  adoptRoundPlan(id: string): Task {
+    const task = this.require(id);
+    const plan = task.spec?.plan ?? [];
+    const next: Task = {
+      ...task,
+      stats: {
+        ...(task.stats ?? { runs: 0, activeMs: 0 }),
+        roundPlan: plan.map(({ id: stepId, title, agent }) => ({ id: stepId, title, ...(agent ? { agent } : {}) })),
+      },
+    };
+    this.save(next, { silentTerminal: true });
+    return next;
   }
 
   /** The trigger backlog, as the one paragraph the supervisor reads. */

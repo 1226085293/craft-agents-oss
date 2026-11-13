@@ -470,6 +470,15 @@ describe('the trigger is editable from the page', () => {
     expect(html).not.toContain('awaiting_dispatch')
   })
 
+
+  it('keeps the cron expression literal instead of letting Markdown eat the stars', () => {
+    // Live: every cron task read 「定时 · **** (Asia/Shanghai)」 because `* * * * *` is emphasis in
+    // Markdown. The person could not tell one cadence from another, and 「每分钟」 looked broken.
+    const html = renderDetail({ ...detail, trigger: { kind: 'cron', expr: '* * * * *', timezone: 'Asia/Shanghai', enabled: true } })
+    expect(html).toContain('* * * * *')
+    expect(html).not.toMatch(/定时 · \*\*\*\*/)
+  })
+
   it('says so when the schedule is switched off', () => {
     // A stopped timer must not look like a running one: 「定时 · 0 9 * * *」 with no marker reads as
     // "this will fire at nine", and the task would sit waiting for a run that never comes.

@@ -526,7 +526,14 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
   /** One rule, as a short fact: 「定时 · 0 9 * * *」 / 「事件 · github/issues」. */
   const describeRule = (rule: TaskTriggerValue): string => {
     if (rule.kind === 'cron') {
-      return `定时 · ${rule.expr}${rule.timezone ? ` (${rule.timezone})` : ''}${rule.enabled === false ? '（已停用）' : ''}`
+      /**
+       * The expression goes in backticks, not bare.
+       *
+       * `* * * * *` in Markdown is emphasis: the meta line rendered it as `****`, so every cron task
+       * read as 「定时 · **** (Asia/Shanghai)」 and the person could not tell one cadence from another.
+       * Code span keeps the asterisks literal.
+       */
+      return `定时 · \`${rule.expr}\`${rule.timezone ? ` (${rule.timezone})` : ''}${rule.enabled === false ? '（已停用）' : ''}`
     }
     if (rule.kind === 'event') {
       const types = rule.types?.length ? `/${rule.types.join(',')}` : ''

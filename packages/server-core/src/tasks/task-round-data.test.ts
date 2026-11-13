@@ -105,6 +105,36 @@ describe('a round hands its data to the next round', () => {
     })()
   })
 
+
+  it('keeps the payload only on the latest round, not on every hand-off', () => {
+    // `handoffs` grows one entry per round; carrying the payload on each grew the record by the whole
+    // dataset every round (5 rounds ≈ 22 KB measured) while only the latest is ever read.
+    const svc = service()
+    const task = recurring(svc)
+
+    return (async () => {
+      for (let i = 1; i <= 3; i += 1) {
+        await round(svc, task.id, `w${i}`, { total: i, ids: Array.from({ length: 50 }, (_, k) => k) }, `第 ${i} 轮`)
+      }
+      const after = svc.get(task.id)!
+      expect(after.handoffs.length).toBe(3)
+      expect(after.handoffs.filter((h) => h.roundResult !== undefined).length).toBe(0)
+      expect((after.stats?.lastRound?.result?.data as { total: number }).total).toBe(3)
+    })()
+  })
+
+  it('states the previous round once, not twice', async () => {
+    // `formatHandoffContext` and `lastRound` describe the same delivery; printing both made the brief
+    // claim two previous rounds and spend context repeating itself.
+    const svc = service()
+    const task = recurring(svc)
+    await round(svc, task.id, 'w1', { total: 1 }, '第一轮')
+
+    const brief = formatTaskBrief(svc.get(task.id)!, { reason: 'cron:* * * * *' })
+    expect((brief.match(/Previous round/g) ?? []).length).toBe(1)
+    expect(brief).not.toContain('Hand-off context')
+  })
+
   it('prints the payload in the next round brief, not just the prose', async () => {
     const svc = service();
     const task = recurring(svc);

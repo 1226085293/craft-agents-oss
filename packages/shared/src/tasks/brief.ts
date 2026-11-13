@@ -320,7 +320,14 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
     sections.push(`## Acceptance list\n${bullet(lines)}\n\nEach one must actually be verified; put the commands you ran into verify.ran when you deliver.`);
   }
 
-  const handoffBlock = formatHandoffContext(task);
+  /**
+   * One statement of 「what the previous round did」, not two.
+   *
+   * `lastRound` is the round's delivery (kept when the round closed, and it carries the payload).
+   * The hand-off context says the same thing about the same hand-off, in older words — printing both
+   * made the brief claim two previous rounds and spend context repeating itself.
+   */
+  const handoffBlock = task.stats?.lastRound ? undefined : formatHandoffContext(task);
   if (handoffBlock) sections.push(handoffBlock);
 
   sections.push(

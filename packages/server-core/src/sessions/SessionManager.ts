@@ -1978,7 +1978,23 @@ function scopeFieldFor(
 }
 
 /** Why a supervisor is interrupting the user; mirrors the report_to_user enum. */
-type UserReportKind = 'completed' | 'decision' | 'blocked';
+/** What a supervisor may say to the person. `notice` says it without asking anything. */
+export type UserReportKind = 'notice' | 'completed' | 'decision' | 'blocked';
+
+/**
+ * Whether this kind belongs in the conversation the person reads.
+ *
+ * Pulled out of `deliverToUserLane` because the guard is the thing that decides whether a message
+ * reaches the person at all, and it was the one place a new kind could be silently swallowed: when
+ * `notice` was added to the tool, this list still had three entries, so every scheduled message was
+ * written back into the supervisor's own hidden session.
+ *
+ * Narration stays out — that is what the guard is for. A notice is the opposite case: it has nowhere
+ * else to go.
+ */
+export function userLaneAccepts(kind: string): kind is UserReportKind {
+  return kind === 'notice' || kind === 'completed' || kind === 'decision' || kind === 'blocked';
+}
 
 function managedToSession(m: ManagedSession, overrides?: Partial<Session>): Session {
   return {
@@ -9323,7 +9339,16 @@ ${request.prompt}`;
     // Everything else is progress, and progress has a lane already — the task one.
     // The enum on the tool is what enforces this; the check here keeps a stale
     // client (or an older prompt) from sneaking narration through.
-    if (kind !== 'completed' && kind !== 'decision' && kind !== 'blocked') {
+    /**
+     * `notice` is a statement for the person, not narration.
+     *
+     * This guard exists to keep progress out of the conversation the person reads — the failure it
+     * was written for was a supervisor narrating 「正在派活」 into it. A scheduled message is the
+     * opposite case: it has nobody else to go to. When `notice` was added to the tool and not here,
+     * every 「你好+N」 was written back into the supervisor's own hidden session — the exact
+     * 「user never receives it」 that the channel was added to fix.
+     */
+    if (!userLaneAccepts(kind)) {
       sessionLog.info('[supervisor] progress report kept off the user lane', { kind })
       await this.appendSyntheticMessage(managed, text)
       return

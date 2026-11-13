@@ -765,8 +765,26 @@ export class TaskService {
       updatedAt: now,
     }));
 
+    /**
+     * The payload lives on the round, not on every hand-off.
+     *
+     * `handoffs` keeps the history of attempts; a recurring task adds one per round, so carrying the
+     * payload on each of them grew the record by the whole dataset every round (5 rounds ≈ 22 KB in
+     * one measured run) while only the latest is ever read. `lastRound.result.data` is that latest
+     * copy — the same decision as 「只保留最新一轮」, applied to the payload.
+     */
+    const trimmedHandoffs = (task.handoffs ?? []).map((handoff) =>
+      handoff.roundResult === undefined
+        ? handoff
+        : (() => {
+            const { roundResult: _dropped, ...rest } = handoff;
+            return rest as typeof handoff;
+          })(),
+    );
+
     const closed: Task = {
       ...task,
+      handoffs: trimmedHandoffs,
       spec: task.spec ? { ...task.spec, plan: resetPlan } : task.spec,
       stats: {
         ...stats,

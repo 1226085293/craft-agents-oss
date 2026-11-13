@@ -154,7 +154,7 @@ export function TaskDetailPanel({
           }).tasksRun?.(workspaceId, id)
         }}
         agents={agents}
-        onUpdateTrigger={(id, trigger) => {
+        onUpdateTrigger={(id, triggers) => {
           /**
            * The write goes through the same RPC the tool uses, and reports what it returned.
            *
@@ -166,11 +166,12 @@ export function TaskDetailPanel({
             tasksUpdateTrigger?: (
               workspaceId: string,
               id: string,
-              trigger: unknown,
+              /** The whole list: a task may hold a cron rule and an event rule at once. */
+              triggers: unknown,
             ) => Promise<unknown>
           }
           if (!api.tasksUpdateTrigger) throw new Error('这个版本不支持修改触发方式')
-          return api.tasksUpdateTrigger(workspaceId, id, trigger).then(() => undefined)
+          return api.tasksUpdateTrigger(workspaceId, id, triggers).then(() => undefined)
         }}
         onAnswer={(id, text, decisionId) => {
           /**

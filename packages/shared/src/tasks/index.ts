@@ -113,8 +113,7 @@ export {
 
 export {
   normalizeSpec,
-  normalizeTrigger,
-} from './normalize.ts';
+  normalizeTrigger, normalizeTriggers, primaryTrigger } from './normalize.ts';
 
 export {
   describeTrigger,

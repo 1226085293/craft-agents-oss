@@ -54,7 +54,7 @@ export interface AgentToolBindingsDeps {
    * analyse the words; with one it hands them over as a follow-up. See the implementation in
    * SessionManager for why this replaced `send_agent_message`.
    */
-  createTaskFromUser?: (payload: { request: string; taskId?: string }) => Promise<{
+  createTaskFromUser?: (payload: { request: string; taskId?: string; triggers?: unknown[] }) => Promise<{
     taskId?: string;
     message: string;
   }>;

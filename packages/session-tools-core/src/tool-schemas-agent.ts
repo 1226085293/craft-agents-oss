@@ -212,6 +212,35 @@ export type ListQuestionsInput = z.infer<typeof ListQuestionsSchema>;
  * This tool takes the person's own words verbatim and does the relaying itself. The task lane
  * then reads the words and draws scope / directive / plan out of them.
  */
+/**
+ * How a task may start, one entry per rule.
+ *
+ * A list because the domain has more than one answer: 「every weekday at nine」 and 「when a github
+ * issue arrives」 can both be true of the same checklist. The single slot this replaces forced a
+ * choice the person never made, and left the scheduler able to evaluate only one rule per task.
+ */
+export const TaskTriggerSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('cron'),
+    expr: z
+      .string()
+      .min(1)
+      .describe('Five-field cron expression, minute resolution, e.g. "0 9 * * 1-5" for 09:00 on weekdays.'),
+    timezone: z.string().optional().describe('IANA zone, e.g. "Asia/Shanghai". Defaults to the machine zone.'),
+    enabled: z.boolean().optional().describe('Defaults to true.'),
+  }),
+  z.object({
+    kind: z.literal('event'),
+    source: z.string().min(1).describe('Event source slug to listen on, e.g. "github" or "mail".'),
+    types: z.array(z.string()).optional().describe('Only these event types; omit for every type from the source.'),
+    textMatch: z
+      .string()
+      .optional()
+      .describe('Case-insensitive substring, or alternatives separated by |.'),
+    enabled: z.boolean().optional().describe('Defaults to true.'),
+  }),
+]);
+
 export const CreateTaskSchema = z.object({
   /**
    * The person's request, verbatim — not a summary, not a rewording.
@@ -234,6 +263,18 @@ export const CreateTaskSchema = z.object({
     .string()
     .optional()
     .describe('Omit to create a new task from the request. Give an existing task id (e.g. "T-3") when the request is a follow-up to that task.'),
+  /**
+   * How the task may start, when the person asked for something other than 「run it now」.
+   *
+   * 「每分钟发一次你好」 is a cron rule and 「每次有人提 issue 就处理」 is an event rule; without this
+   * the relay could register the words but the task could only ever run once, by hand.
+   */
+  triggers: z
+    .array(TaskTriggerSchema)
+    .optional()
+    .describe(
+      'How this task starts. Omit for a task a person runs by hand. One entry per rule: a task may be both scheduled and event-driven.',
+    ),
 });
 
 export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
@@ -320,6 +361,16 @@ export const TaskUpdateSchema = z.object({
     .optional()
     .describe('Reassign to this role id. An id that is not a real profile silently falls back to the workspace default, so use one from the roster.'),
   error: z.string().optional(),
+  /**
+   * Replace the task's triggers. An empty array turns them all off.
+   *
+   * Nothing could change a trigger after creation except the board's own editor, so a supervisor
+   * that created a task from 「每分钟发一次」 had no way to stop it when the person said 「停了」.
+   */
+  triggers: z
+    .array(TaskTriggerSchema)
+    .optional()
+    .describe('Replace every trigger on the task. [] removes them all — the task then runs only when asked.'),
   /**
    * Replace the task's scope, i.e. widen or move the boundary.
    *

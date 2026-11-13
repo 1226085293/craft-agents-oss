@@ -36,6 +36,7 @@ import {
   type TaskTrigger,
 } from './types.ts';
 import { applyDerivedStatuses, normalizePlan } from './plan.ts';
+import { normalizeTriggers, primaryTrigger } from './normalize.ts';
 
 export function getTasksDir(workspaceRoot: string): string {
   return join(workspaceRoot, 'tasks');
@@ -99,13 +100,15 @@ export function normalizeTask(task: Task): Task {
   const plan = task.spec?.plan
     ? (applyDerivedStatuses(normalizePlan(task.spec.plan) ?? []) as typeof task.spec.plan)
     : undefined;
+  const triggers = normalizeTriggers(task.triggers ?? (task.trigger ? [task.trigger] : []));
   return {
     ...task,
     ...(task.spec && plan ? { spec: { ...task.spec, plan } } : {}),
     dependsOn: task.dependsOn ?? [],
     handoffs: task.handoffs ?? [],
     sessionIds: task.sessionIds ?? [],
-    trigger: task.trigger ?? { kind: 'manual' },
+    triggers,
+    trigger: primaryTrigger(triggers),
     stats,
     /**
      * Six fields are defaulted on read; this was not one of them.
@@ -251,12 +254,16 @@ export interface CreateTaskInput {
   priority?: Task['priority'];
   deadline?: number | null;
   spec?: TaskSpec;
+  /** One task can be due for more than one reason; the list is the source of truth. */
+  triggers?: TaskTrigger[];
+  /** The old single slot. Still accepted, folded into `triggers`. */
   trigger?: TaskTrigger;
   now?: number;
 }
 
 export function createTask(input: CreateTaskInput): Task {
   const now = input.now ?? Date.now();
+  const triggers = normalizeTriggers([...(input.triggers ?? []), ...(input.trigger ? [input.trigger] : [])]);
   return {
     id: input.id,
     name: input.name,
@@ -282,7 +289,8 @@ export function createTask(input: CreateTaskInput): Task {
     lifecycle: { errorCount: 0, consecutiveFailures: 0 },
     origin: { supervisorSessionId: input.supervisorSessionId, toolCallId: input.toolCallId },
     spec: input.spec,
-    trigger: input.trigger ?? { kind: 'manual' },
+    triggers,
+    trigger: primaryTrigger(triggers),
     stats: { runs: 0, activeMs: 0 },
     heartbeatIntervalMin: DEFAULT_HEARTBEAT_MINUTES,
     createdAt: now,

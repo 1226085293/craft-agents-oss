@@ -118,14 +118,18 @@ export interface TaskDetailPanelViewProps {
    */
   onUpdateTrigger?: (
     id: string,
-    trigger:
-      | { kind: 'manual' }
-      | { kind: 'cron'; expr: string; timezone?: string; enabled: boolean }
-      | { kind: 'event'; source: string; types?: string[]; enabled: boolean },
+    /** The whole list: a task may be scheduled and event-driven at the same time. */
+    triggers: TaskTriggerValue[],
   ) => void | Promise<void>
 }
 
 /** Full-width task detail for the content panel, with an optional navigator back action. */
+/** One rule on a task. The list may hold a cron rule and an event rule at once. */
+type TaskTriggerValue =
+  | { kind: 'manual' }
+  | { kind: 'cron'; expr: string; timezone?: string; enabled: boolean }
+  | { kind: 'event'; source: string; types?: string[]; enabled: boolean }
+
 export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onAnswer, onOpenSession, planJumps, onJumpToStep, agents, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
 
@@ -427,7 +431,20 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
    */
   const isStartable = (detail.status === 'backlog' || isPaused) && !detail.willRetry
   const trigger = detail.trigger
+  /**
+   * Every rule on the task, not just the mirrored one.
+   *
+   * The single `trigger` above is what the board prints; editing has to work on the list, or
+   * saving from this page would silently drop the second rule (T-1 「每晚九点」 + 「github issue」).
+   */
+  const triggerList: TaskTriggerValue[] = (() => {
+    const fromRecord = (detail as unknown as { triggers?: TaskTriggerValue[] }).triggers
+    if (Array.isArray(fromRecord)) return fromRecord.filter((entry) => entry.kind !== 'manual')
+    return trigger && trigger.kind !== 'manual' ? [trigger as TaskTriggerValue] : []
+  })()
   const [editingTrigger, setEditingTrigger] = React.useState(false)
+  /** Which entry the form is standing in for; -1 = adding a new rule. */
+  const [editingIndex, setEditingIndex] = React.useState(-1)
   const [triggerKind, setTriggerKind] = React.useState<'manual' | 'cron' | 'event'>(
     trigger?.kind === 'cron' ? 'cron' : trigger?.kind === 'event' ? 'event' : 'manual',
   )
@@ -472,24 +489,32 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
     }
     setTriggerSaving(true)
     try {
-      await onUpdateTrigger(
-        detail.id,
+      /**
+       * The edited rule replaces the one being edited, and the others stay.
+       *
+       * The page used to send exactly one rule, so opening it on a two-rule task and pressing save
+       * would have deleted the other one — a destructive edit nobody asked for. `editingIndex`
+       * names which entry this form is standing in for; `-1` means 「add a rule」.
+       */
+      const edited =
         triggerKind === 'manual'
-          ? { kind: 'manual' }
+          ? null
           : triggerKind === 'cron'
             ? {
-                kind: 'cron',
+                kind: 'cron' as const,
                 expr: cronExpr.trim(),
                 ...(cronTimezone.trim() ? { timezone: cronTimezone.trim() } : {}),
                 enabled: triggerEnabled,
               }
             : {
-                kind: 'event',
+                kind: 'event' as const,
                 source: eventSource.trim(),
                 ...(types.length ? { types } : {}),
                 enabled: triggerEnabled,
-              },
-      )
+              }
+      const rest = triggerList.filter((_, index) => index !== editingIndex)
+      const next = edited ? [...rest, edited] : rest
+      await onUpdateTrigger(detail.id, next)
       setEditingTrigger(false)
     } catch (error) {
       setTriggerError(error instanceof Error ? error.message : String(error))
@@ -498,11 +523,24 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
     }
   }
   const triggerOff = detail.trigger?.enabled === false && detail.trigger.kind !== 'manual'
-  const triggerLabel = (detail.trigger?.kind === 'cron'
-    ? `定时 · ${detail.trigger.expr}${detail.trigger.timezone ? ` (${detail.trigger.timezone})` : ''}`
-    : detail.trigger?.kind === 'event'
-      ? `事件 · ${detail.trigger.source ?? ''}${detail.trigger.types?.length ? `/${detail.trigger.types.join(',')}` : ''}`
-      : '手动') + (triggerOff ? '（已停用）' : '')
+  /** One rule, as a short fact: 「定时 · 0 9 * * *」 / 「事件 · github/issues」. */
+  const describeRule = (rule: TaskTriggerValue): string => {
+    if (rule.kind === 'cron') {
+      return `定时 · ${rule.expr}${rule.timezone ? ` (${rule.timezone})` : ''}${rule.enabled === false ? '（已停用）' : ''}`
+    }
+    if (rule.kind === 'event') {
+      const types = rule.types?.length ? `/${rule.types.join(',')}` : ''
+      return `事件 · ${rule.source}${types}${rule.enabled === false ? '（已停用）' : ''}`
+    }
+    return '手动'
+  }
+  /**
+   * The whole picture on the meta line: 手动 when nothing fires it, otherwise every rule joined.
+   *
+   * A task can be scheduled and event-driven at once, and printing only the mirrored rule hid the
+   * second one — the page then looked like the task had one way to start when it had two.
+   */
+  const triggerLabel = (triggerList.length ? triggerList.map(describeRule).join(' · ') : '手动') + (triggerOff ? '（已停用）' : '')
   // Placeholders hold the run lock before a session exists; they are not sessions.
   const realSessions = detail.sessionIds.filter((id) => !id.startsWith('pending:'))
   /**
@@ -595,7 +633,10 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
               <button
                 type="button"
                 className="rounded px-1 text-muted-foreground underline decoration-dotted underline-offset-2 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                onClick={() => setEditingTrigger((open) => !open)}
+                onClick={() => {
+                  setEditingIndex(triggerList.length ? 0 : -1)
+                  setEditingTrigger((open) => !open)
+                }}
                 aria-expanded={editingTrigger}
               >
                 触发方式 {triggerLabel}
@@ -606,6 +647,67 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
           </p>
           {editingTrigger && onUpdateTrigger ? (
             <div className="mt-3 rounded-lg border border-border/70 bg-foreground/[0.03] p-3">
+              {/*
+                * Which rule this form is editing.
+                *
+                * Without this the page could only ever hold one rule: opening it on a two-rule task
+                * and pressing save replaced the list with whatever the single form said. The strip
+                * names the others so they are visibly still there, and 「再加一条」 starts a new one
+                * instead of overwriting the first.
+                */}
+              {triggerList.length ? (
+                <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                  {triggerList.map((rule, index) => (
+                    <span
+                      key={`${rule.kind}-${index}`}
+                      className={
+                        index === editingIndex
+                          ? 'rounded-md border border-primary/60 bg-primary/15 px-2 py-0.5 text-[11px] text-foreground'
+                          : 'rounded-md border border-border/70 px-2 py-0.5 text-[11px] text-muted-foreground'
+                      }
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingIndex(index)
+                          setTriggerKind(rule.kind === 'cron' ? 'cron' : rule.kind === 'event' ? 'event' : 'cron')
+                          setCronExpr(rule.kind === 'cron' ? rule.expr : '')
+                          setCronTimezone(rule.kind === 'cron' ? (rule.timezone ?? '') : '')
+                          setEventSource(rule.kind === 'event' ? rule.source : '')
+                          setEventTypes(rule.kind === 'event' ? (rule.types ?? []).join(', ') : '')
+                          setTriggerEnabled(rule.kind === 'manual' ? true : rule.enabled !== false)
+                        }}
+                        className="underline decoration-dotted underline-offset-2"
+                      >
+                        {describeRule(rule)}
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`删除 ${describeRule(rule)}`}
+                        className="ml-1.5 text-muted-foreground hover:text-foreground"
+                        onClick={() => void onUpdateTrigger(detail.id, triggerList.filter((_, i) => i !== index))}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  <button
+                    type="button"
+                    className="rounded-md border border-dashed border-border/70 px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                    onClick={() => {
+                      setEditingIndex(-1)
+                      setTriggerKind('cron')
+                      setCronExpr('')
+                      setCronTimezone('')
+                      setEventSource('')
+                      setEventTypes('')
+                      setTriggerEnabled(true)
+                    }}
+                  >
+                    再加一条
+                  </button>
+                </div>
+              ) : null}
               <div className="flex flex-wrap items-center gap-2">
                 {(
                   [

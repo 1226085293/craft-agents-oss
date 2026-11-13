@@ -346,6 +346,7 @@ export async function handleCreateTask(
     const { taskId, message } = await ctx.agentTools.createTaskFromUser({
       request: args.request.trim(),
       ...(args.taskId?.trim() ? { taskId: args.taskId.trim() } : {}),
+      ...(args.triggers?.length ? { triggers: args.triggers } : {}),
     });
     return successResponse(taskId ? `Task ${taskId} registered. ${message}` : message);
   } catch (error) {
@@ -401,6 +402,7 @@ export async function handleTaskUpdate(
     directive?: string;
     agents?: string[];
     acceptance?: Array<{ id?: string; check: string; command?: string }>;
+    triggers?: unknown[];
   },
 ): Promise<ToolResult> {
   if (!ctx.taskTools?.update) return errorResponse('task_update is only available to a supervisor session.');
@@ -415,6 +417,7 @@ export async function handleTaskUpdate(
       ...(args.name?.trim() ? { name: args.name.trim() } : {}),
       ...(args.directive?.trim() ? { directive: args.directive.trim() } : {}),
       ...(args.acceptance?.length ? { acceptance: args.acceptance } : {}),
+      ...(args.triggers ? { triggers: args.triggers } : {}),
     });
     /**
      * Say what was written AND whether the status moved.

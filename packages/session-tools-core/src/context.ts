@@ -399,6 +399,8 @@ export interface SessionToolContext {
       request: string;
       /** Omit to create a new task; give an id to hand the words to that task as a follow-up. */
       taskId?: string;
+      /** How the task may start. Omitted = a task a person runs by hand. */
+      triggers?: unknown[];
     }): Promise<{ taskId?: string; message: string }>;
   };
 
@@ -435,6 +437,8 @@ export interface SessionToolContext {
         name?: string;
         /** Replace the acceptance list (see TaskUpdatePatch). */
         acceptance?: Array<{ id?: string; check: string; command?: string }>;
+        /** Replace every trigger; [] removes them all (see TaskUpdatePatch). */
+        triggers?: unknown[];
       },
     ): Promise<{ status: string; previousStatus: string }>;
     handoff(

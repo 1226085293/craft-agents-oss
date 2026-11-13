@@ -14,7 +14,7 @@ import type { TaskService } from '../../tasks/task-service';
 import { readJournal } from '@craft-agent/shared/tasks';
 import {
   normalizeSpec,
-  normalizeTrigger,
+  normalizeTriggers,
   processLostRetryDue,
   formatDecisionAnswerLine,
   formatDecisionAnswersLine,
@@ -170,9 +170,16 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
     RPC_CHANNELS.taskboard.UPDATE_TRIGGER,
     async (_ctx, workspaceId: string, id: string, trigger: unknown) => {
       const service = tasksFor(deps, workspaceId)
-      const task = service.updateTrigger(id, normalizeTrigger(trigger))
+      /**
+       * A list now, because one task can be due for more than one reason.
+       *
+       * The old signature took a single rule; it is still accepted (a bare object is one entry)
+       * so an editor that has not been updated cannot silently turn a two-rule task into a
+       * one-rule task.
+       */
+      const task = service.updateTriggers(id, normalizeTriggers(trigger))
       broadcast(workspaceId)
-      return { id: task.id, trigger: task.trigger }
+      return { id: task.id, trigger: task.trigger, triggers: task.triggers }
     },
   );
 

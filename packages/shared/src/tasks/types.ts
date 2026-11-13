@@ -534,6 +534,19 @@ export interface Task {
   /** Structured execution contract (see TaskSpec). */
   spec?: TaskSpec;
   /** What starts this task. Missing = manual. */
+  /**
+   * Every way this task can start, as a list.
+   *
+   * One task can be due for more than one reason — 「every morning at nine」 and 「whenever a
+   * github issue arrives」 are not alternatives; a person may want both on the same checklist.
+   * A single slot forced a choice that the domain does not make, and the scheduler could only
+   * ever evaluate one rule per task.
+   *
+   * `trigger` below stays as the derived single value every existing reader uses (brief, board,
+   * run gate). It is written by `normalizeTask` from this list, never the other way round.
+   */
+  triggers?: TaskTrigger[];
+  /** Derived mirror of `triggers`: the first non-manual entry, else `{ kind: 'manual' }`. */
   trigger?: TaskTrigger;
   /** Pending user decision, when pauseReason is `needs_decision`. */
   decision?: TaskDecision;

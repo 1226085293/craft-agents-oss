@@ -37,7 +37,7 @@ import {
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
 import type { Task } from '@craft-agent/shared/tasks'
-import { checkAgreedPlanAppend, readJournal, appendJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatPauseBrief, formatUnreportedBrief, formatDispatchTaskContext, stepParent, normalizeSpec, normalizeTrigger, undeliveredQuestions, allDecisions } from '@craft-agent/shared/tasks'
+import { checkAgreedPlanAppend, readJournal, appendJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatPauseBrief, formatUnreportedBrief, formatDispatchTaskContext, stepParent, normalizeSpec, normalizeTrigger, normalizeTriggers, undeliveredQuestions, allDecisions } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -75,6 +75,14 @@ export interface TaskUpdatePatch {
    * rejections tripped the failure fuse, and the only way out was to abandon the task.
    */
   acceptance?: Array<{ id?: string; check: string; command?: string }>;
+  /**
+   * Replace every trigger, in the person's own terms.
+   *
+   * Nothing but the board could change a trigger once a task existed, so a task registered from
+   * 「每分钟发一次」 kept firing after 「停了」 — the lane had the words and no way to act on them.
+   * `[]` removes them all, which is what 「停了」 means for a scheduled task.
+   */
+  triggers?: unknown[];
 }
 
 /**
@@ -6222,11 +6230,21 @@ export class SessionManager implements ISessionManager {
             // The name is a placeholder the task lane may refine via its own reads; the
             // instruction is the person's words and stays.
             const shortName = request.length > 40 ? `${request.slice(0, 40)}…` : request
+            /**
+             * Triggers come from the person's own words, through the lane that relayed them.
+             *
+             * 「每分钟给我发一次你好」 could be registered before this and never scheduled: the tool
+             * took only the words, and a trigger was settable from the board's editor alone. The
+             * relay now carries the shape of the request — one entry per rule, because a task may
+             * be due for a scheduled reason and an event reason at the same time.
+             */
+            const triggers = normalizeTriggers(payload.triggers ?? [])
             const task = tasks.create({
               name: shortName,
               instruction: request,
               supervisorSessionId: taskLaneId,
               toolCallId: randomUUID(),
+              ...(triggers.length ? { triggers } : {}),
             })
             this.markRelayedTaskUnclaimed(taskLaneId, task.id)
             /**
@@ -8456,6 +8474,10 @@ ${request.prompt}`;
     }
     if (patch.acceptance?.length) {
       this.getTasks(workspaceId).setAcceptance(identifier, patch.acceptance)
+    }
+    if (patch.triggers) {
+      // Present-but-empty is a real instruction (「no longer scheduled」); absent is 「leave it」.
+      this.getTasks(workspaceId).updateTriggers(identifier, normalizeTriggers(patch.triggers))
     }
     if (patch.scope?.trim()) {
       const service = this.getTasks(workspaceId)

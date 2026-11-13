@@ -108,6 +108,32 @@ export function normalizeSpec(raw: unknown): TaskSpec | undefined {
 }
 
 /** Coerce an untrusted trigger; unknown kinds fall back to manual. */
+/**
+ * The task's triggers, as a list, from whatever shape the record has.
+ *
+ * Records written before the list existed carry one `trigger`; new ones carry `triggers`. Reading
+ * both is what makes the change invisible to the scheduler and to every task file already on disk.
+ * A `manual` entry is dropped when there is anything else, because "no rule" is the absence of a
+ * trigger rather than another rule — keeping it would make an idle task look scheduled.
+ */
+export function normalizeTriggers(raw: unknown): TaskTrigger[] {
+  const list = Array.isArray(raw) ? raw : raw === undefined || raw === null ? [] : [raw]
+  const triggers = list.map(normalizeTrigger).filter((t) => t.kind !== 'manual')
+  // Dedupe: the same rule twice would make one task fire twice per pass.
+  const seen = new Set<string>()
+  return triggers.filter((t) => {
+    const key = JSON.stringify(t)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+/** The single value every existing reader uses: the first real rule, else manual. */
+export function primaryTrigger(triggers: TaskTrigger[]): TaskTrigger {
+  return triggers[0] ?? { kind: 'manual' }
+}
+
 export function normalizeTrigger(raw: unknown): TaskTrigger {
   if (!raw || typeof raw !== 'object') return { kind: 'manual' };
   const v = raw as Record<string, unknown>;

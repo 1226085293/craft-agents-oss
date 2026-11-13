@@ -46,6 +46,7 @@ import {
   answeredWithoutProgress,
   decisionMirror,
   openDecisions,
+  primaryTrigger,
   unownedSubSteps,
   type PlanStepStatus,
   type ArtifactProbe,
@@ -1570,10 +1571,24 @@ export class TaskService {
   }
 
   updateTrigger(id: string, trigger: TaskTrigger): Task {
+    return this.updateTriggers(id, trigger.kind === 'manual' ? [] : [trigger]);
+  }
+
+  /**
+   * Replace the task's triggers.
+   *
+   * The write is a whole-list replacement, because that is what the caller knows: the person said
+   * 「每晚九点」 and then 「再盯着 github」 — the second sentence adds a rule, and 「停了」 removes
+   * them. Patching one entry at a time would need names these rules do not have.
+   *
+   * `trigger` (the single mirror every existing reader uses) is written from the list by
+   * `normalizeTask`, so it cannot drift.
+   */
+  updateTriggers(id: string, triggers: TaskTrigger[]): Task {
     const task = this.require(id);
-    const next: Task = { ...task, trigger, updatedAt: this.now() };
+    const next: Task = { ...task, triggers, trigger: primaryTrigger(triggers), updatedAt: this.now() };
     this.save(next);
-    appendJournal(this.root, id, { type: 'trigger_updated', at: this.now(), data: { trigger } });
+    appendJournal(this.root, id, { type: 'trigger_updated', at: this.now(), data: { triggers } });
     return next;
   }
 

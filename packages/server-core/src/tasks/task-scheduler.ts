@@ -11,7 +11,7 @@
  */
 
 import { createLogger } from '@craft-agent/shared/utils';
-import { eventTriggerMatches, matchesCron, type Task } from '@craft-agent/shared/tasks';
+import { eventTriggerMatches, matchesCron, type Task, type TaskTrigger } from '@craft-agent/shared/tasks';
 import type { TaskService } from './task-service.ts';
 
 const log = createLogger('task-scheduler');
@@ -29,16 +29,29 @@ export interface TaskRunnerDeps {
   now?: () => number;
 }
 
+/** The task's triggers as a list, tolerating records that still carry only the single slot. */
+function taskTriggers(task: Task): TaskTrigger[] {
+  return task.triggers ?? (task.trigger ? [task.trigger] : []);
+}
+
 /** One cron pass. `at` is the minute boundary being evaluated. */
 export async function runCronPass(deps: TaskRunnerDeps, at: Date): Promise<number> {
   let started = 0;
   for (const task of deps.listTasks()) {
-    const trigger = task.trigger;
-    if (!trigger || trigger.kind !== 'cron' || !trigger.enabled) continue;
     if (task.status === 'completed' || task.status === 'canceled') continue;
-    if (!matchesCron(trigger.expr, trigger.timezone, at)) continue;
-
-    if (await startTask(deps, task, `cron:${trigger.expr}`)) started += 1;
+    /**
+     * Every cron rule on the task, not just the first.
+     *
+     * One task can be due for more than one reason, so the list is what the scheduler reads;
+     * `startTask` claims the lock, so a second matching rule in the same minute finds the run
+     * already taken and does not start a duplicate.
+     */
+    for (const trigger of taskTriggers(task)) {
+      if (trigger.kind !== 'cron' || !trigger.enabled) continue;
+      if (!matchesCron(trigger.expr, trigger.timezone, at)) continue;
+      if (await startTask(deps, task, `cron:${trigger.expr}`)) started += 1;
+      break;
+    }
   }
   return started;
 }
@@ -51,7 +64,8 @@ export async function runEventPass(
   let started = 0;
   for (const task of deps.listTasks()) {
     if (task.status === 'completed' || task.status === 'canceled') continue;
-    if (!eventTriggerMatches(task.trigger, event)) continue;
+    // Any of the task's event rules may match: the same task can listen to two sources.
+    if (!taskTriggers(task).some((trigger) => eventTriggerMatches(trigger, event))) continue;
 
     if (await startTask(deps, task, `event:${event.source}/${event.type}`)) started += 1;
   }
@@ -117,8 +131,8 @@ export function recordMissedCronRuns(deps: TaskRunnerDeps, now: Date): number {
   const currentMinuteStart = Math.floor(nowMs / 60_000) * 60_000;
 
   for (const task of deps.listTasks()) {
-    const trigger = task.trigger;
-    if (!trigger || trigger.kind !== 'cron' || !trigger.enabled) continue;
+    const trigger = taskTriggers(task).find((entry) => entry.kind === 'cron' && entry.enabled);
+    if (!trigger || trigger.kind !== 'cron') continue;
     if (task.status === 'completed' || task.status === 'canceled') continue;
 
     const last = task.stats?.lastTriggeredAt;

@@ -2959,16 +2959,18 @@ function DecisionRequestCard({
   const [draft, setDraft] = React.useState('')
   const [error, setError] = React.useState<string | null>(null)
   /**
-   * The key is the QUESTION, shared with the task page.
+   * Which question this card is — the task together with the decision's own id.
    *
    * Both surfaces draw the same decision. Keying on this card's own request id meant the
    * task page never learned that this one had been answered, so it kept offering its
-   * buttons and a second reply could be sent; the task id plus `askedAt` is what both
-   * sides can derive from the same decision.
+   * buttons and a second reply could be sent. The decision's id is what both sides derive
+   * from the same question — the timestamp alone does not: two questions asked in one turn
+   * are stamped at the same moment (the task holds one mirrored `askedAt`), so keying on it
+   * made the second card show the first one's answer.
    */
   const answerKey = request.taskIdentifier
-  // The decision's own timestamp when the server sent one: that is the key the task page
-  // derives, and matching it is what makes one answer settle both cards.
+  // Only the fallback key when the server could not name the decision. It stands in for the
+  // id, it is not merged with it.
   const askedAt = request.decisionAskedAt ?? request.askedAt
 
   /**
@@ -2979,19 +2981,19 @@ function DecisionRequestCard({
    * outside React is what makes 「已答复」 durable.
    */
   const [sent, setSentState] = React.useState<string | null>(() =>
-    answerKey ? readDecisionAnswer(answerKey, askedAt) : null,
+    answerKey ? readDecisionAnswer(answerKey, askedAt, request.decisionId) : null,
   )
   React.useEffect(() => {
     if (!answerKey) return
     // The task page answered it: this card must stop asking.
     return subscribeDecisionAnswers(() => {
-      const shared = readDecisionAnswer(answerKey, askedAt)
+      const shared = readDecisionAnswer(answerKey, askedAt, request.decisionId)
       if (shared) setSentState(shared)
     })
-  }, [answerKey, askedAt])
+  }, [answerKey, askedAt, request.decisionId])
   const setSent = (value: string) => {
     setSentState(value)
-    if (answerKey) rememberDecisionAnswer(answerKey, askedAt, value)
+    if (answerKey) rememberDecisionAnswer(answerKey, askedAt, value, request.decisionId)
   }
 
   const answer = React.useCallback(

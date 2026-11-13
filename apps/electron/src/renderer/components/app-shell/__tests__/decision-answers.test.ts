@@ -44,6 +44,33 @@ describe('one answer, one question', () => {
     expect(readDecisionAnswer('T-1', 1_700_000_003_000)).toBeNull()
   })
 
+  /**
+   * Two questions asked in one turn are two questions.
+   *
+   * This is the case that shipped broken: the supervisor asked 「第 2 节怎么处理？」 and
+   * 「3.1 的核对范围多大？」 in one `ask_user` call, the person answered only the first, and the
+   * second card — a different question about a different step — came back 「已答复」 carrying
+   * the first one's words, its own buttons dead.
+   *
+   * The cause was the key. Both cards derived their timestamp from the task's single mirrored
+   * `decision`, so `askedAt` was identical, and one answer satisfied both. The decision id is
+   * per question, so it separates them.
+   */
+  it('does not let one answer close the other question asked in the same turn', () => {
+    const askedAt = 1_700_000_000_000
+    rememberDecisionAnswer('T-2', askedAt, '跳过 2.1，直接做 3.1 收尾', 'q-skip')
+
+    expect(readDecisionAnswer('T-2', askedAt, 'q-scope')).toBeNull()
+    expect(readDecisionAnswer('T-2', askedAt, 'q-skip')).toBe('跳过 2.1，直接做 3.1 收尾')
+  })
+
+  it('still settles both surfaces, which name the same question the same way', () => {
+    const askedAt = 1_700_000_000_000
+    // The conversation card and the task page both carry the decision's id.
+    rememberDecisionAnswer('T-2', askedAt, '放行', 'q-skip')
+    expect(readDecisionAnswer('T-2', askedAt, 'q-skip')).toBe('放行')
+  })
+
   it('tells the other card as soon as one answers', () => {
     let notified = 0
     const off = subscribeDecisionAnswers(() => {

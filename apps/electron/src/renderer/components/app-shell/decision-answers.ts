@@ -46,27 +46,43 @@ function store(): Storage | null {
  * question was asked belongs to a previous one.
  */
 /**
- * Keyed by the question, not by the task.
+ * Keyed by the question's own id when there is one, and by the task plus `askedAt` when not.
  *
- * Keying on the task made every answer belong to the task forever, and the time comparison
- * meant to guard that was a two-minute window — so a new question asked shortly after a reply
- * (which is exactly when it happens: the answer resumes the task, the task stops again) showed
- * the previous answer as if it were this one. The decision's own `askedAt` identifies the
- * question; two questions on one task are two keys.
+ * `askedAt` was the key until two questions were asked in one turn. Then it stopped
+ * identifying a question at all: the conversation card took its timestamp from the task's
+ * single mirrored `decision`, so both cards were handed the SAME `askedAt`, and the record
+ * flush stamped both rows in the same millisecond. Answering the first wrote under that key
+ * and the second — a different question, about a different step — came back 「已答复」 with
+ * an answer it never received.
+ *
+ * `decisionId` is the identity the record already gives each question (`TaskDecision.id`, and
+ * `openDecisionIdFor` matches it by wording), so it is what the two cards can agree on without
+ * also agreeing with every other question asked at the same moment.
+ *
+ * The `askedAt` form stays for cards that have no id to offer — a question whose task could
+ * not be read. It is not merged with the id form: reading one question's key must never find
+ * another's answer, which is the whole defect here.
  */
-function keyFor(taskId: string, askedAt: number | undefined): string {
-  return `${KEY_PREFIX}task:${taskId}:${askedAt ?? 0}`
+function keyFor(taskId: string, askedAt: number | undefined, decisionId?: string): string {
+  return decisionId
+    ? `${KEY_PREFIX}decision:${taskId}:${decisionId}`
+    : `${KEY_PREFIX}task:${taskId}:${askedAt ?? 0}`
 }
 
 /**
  * The answer for this question, if this reader already gave one.
  *
- * `askedAt` guards the re-ask case: a task can legitimately stop for a decision more than
- * once, and the second question must not inherit the first one's answer.
+ * `decisionId` identifies the question; `askedAt` is the weaker key used only when no id is
+ * available. Deliberately no fallback from one to the other: a stale answer found under the
+ * other shape is exactly the wrong answer shown as this question's.
  */
-export function readDecisionAnswer(taskId: string, askedAt: number | undefined): string | null {
+export function readDecisionAnswer(
+  taskId: string,
+  askedAt: number | undefined,
+  decisionId?: string,
+): string | null {
   try {
-    const raw = store()?.getItem(keyFor(taskId, askedAt))
+    const raw = store()?.getItem(keyFor(taskId, askedAt, decisionId))
     if (!raw) return null
     const parsed = JSON.parse(raw) as StoredAnswer
     if (typeof parsed?.text !== 'string') return null
@@ -81,10 +97,15 @@ export function readDecisionAnswer(taskId: string, askedAt: number | undefined):
 
 const listeners = new Set<() => void>()
 
-export function rememberDecisionAnswer(taskId: string, askedAt: number | undefined, answer: string): void {
+export function rememberDecisionAnswer(
+  taskId: string,
+  askedAt: number | undefined,
+  answer: string,
+  decisionId?: string,
+): void {
   try {
     const payload: StoredAnswer = { text: answer, at: Date.now() }
-    store()?.setItem(keyFor(taskId, askedAt), JSON.stringify(payload))
+    store()?.setItem(keyFor(taskId, askedAt, decisionId), JSON.stringify(payload))
   } catch {
     // A full or unavailable store must not break answering.
   }

@@ -200,6 +200,8 @@ function TaskDecisionAnswer({
   const [draft, setDraft] = React.useState('')
   const [error, setError] = React.useState<string | null>(null)
   const askedAt = detail.decision?.askedAt
+  /** The question's own identity — see the note on `keyFor`; the timestamp is shared by a batch. */
+  const decisionId = detail.decision?.id
 
   /**
    * The answer, from whichever record knows first.
@@ -209,19 +211,19 @@ function TaskDecisionAnswer({
    * asks the same question, and answering it there must lock this one too.
    */
   const [sent, setSentState] = React.useState<string | null>(
-    detail.decision?.answer?.text ?? readDecisionAnswer(detail.id, askedAt),
+    detail.decision?.answer?.text ?? readDecisionAnswer(detail.id, askedAt, decisionId),
   )
   React.useEffect(() => {
     // Another surface answered the same question: take its answer rather than offering
     // the buttons again. Keyed on the question, so a re-ask stays answerable.
     return subscribeDecisionAnswers(() => {
-      const shared = readDecisionAnswer(detail.id, askedAt)
+      const shared = readDecisionAnswer(detail.id, askedAt, decisionId)
       if (shared) setSentState(shared)
     })
-  }, [detail.id, askedAt])
+  }, [detail.id, askedAt, decisionId])
   const setSent = (value: string) => {
     setSentState(value)
-    rememberDecisionAnswer(detail.id, askedAt, value)
+    rememberDecisionAnswer(detail.id, askedAt, value, decisionId)
   }
 
   /**

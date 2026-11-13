@@ -82,6 +82,24 @@ describe('a fired trigger wakes the supervisor', () => {
     expect(readJournal(root, task.id).some((entry) => entry.type === 'trigger_accumulated')).toBe(true);
   });
 
+
+  it('records instead of claiming while the supervisor is mid-turn', async () => {
+    // Live: the supervisor was stuck mid-turn (`isProcessing` true after its last message was a user
+    // row). Every tick claimed the round, held the notice, expired three minutes later, and claimed
+    // again — so the task held a lock nobody used and produced no rounds at all.
+    const svc = service();
+    const task = recurring(svc);
+    const woken: string[] = [];
+
+    await runCronPass(deps(svc, woken, true), new Date('2026-11-13T10:05:00Z'));
+
+    const after = svc.get(task.id)!;
+    expect(woken).toEqual([]);
+    // Recorded, not claimed: no lock, and the trigger is on the record for the next turn.
+    expect(after.stats?.lockSessionId).toBeUndefined();
+    expect(after.stats?.pendingTriggers?.length).toBe(1);
+  });
+
   it("accumulates while a person is deciding, because that question is not a timer's to answer", async () => {
     const svc = service();
     const task = recurring(svc);

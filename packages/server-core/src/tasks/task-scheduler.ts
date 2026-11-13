@@ -106,6 +106,21 @@ export async function runEventPass(
  */
 async function startTask(deps: TaskRunnerDeps, task: Task, reason: string): Promise<boolean> {
   const kind: 'cron' | 'event' = reason.startsWith('event:') ? 'event' : 'cron';
+  /**
+   * A supervisor that is already working cannot take this round.
+   *
+   * Claiming first and waking second looked safe because the wake cannot be lost — it is queued on
+   * the session. But a supervisor stuck mid-turn (its last message a `user` row with no reply) leaves
+   * `isProcessing` true, so the notice was held, the claim expired three minutes later, the next tick
+   * claimed again, and the cycle repeated: the task held a lock nobody was using and produced no
+   * rounds at all. Recording the trigger instead costs nothing and the supervisor sees it the moment
+   * it finishes.
+   */
+  if (deps.isBusy(task.supervisorSessionId ?? '')) {
+    log.info(`[task-scheduler] ${task.id} supervisor busy; trigger recorded`);
+    deps.tasks.recordTrigger(task.id, { kind, at: deps.now?.() ?? Date.now(), detail: reason });
+    return false;
+  }
   const claimed = deps.tasks.claimTrigger(task.id, { kind, at: (deps.now?.() ?? Date.now()), detail: reason });
   if (!claimed) {
     // Running, paused, or out of budget: the trigger is on the record and the supervisor will see
@@ -275,6 +290,14 @@ export function startTaskScheduler(deps: TaskRunnerDeps, intervalMs = TASK_SCHED
     // A slow tick must not double-fire the same minute.
     if (minute === lastMinute) return;
     lastMinute = minute;
+    /**
+     * One line a minute, so 「is the loop alive」 is answerable.
+     *
+     * Nothing else here logs on success — a claim that works is silent by design — which meant a
+     * stalled loop and an idle one looked identical in the log. This is the cheapest way to tell
+     * them apart, and it is one line.
+     */
+    log.debug(`[task-scheduler] tick ${minute}`);
     void runCronPass(deps, now).catch((error) => {
       log.warn('[task-scheduler] cron pass failed', { error });
     });

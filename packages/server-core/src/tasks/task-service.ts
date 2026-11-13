@@ -954,6 +954,30 @@ export class TaskService {
     return this.startGate(task, now) === null;
   }
 
+  /**
+   * Record a fired trigger without claiming the round.
+   *
+   * For the case the scheduler can see but the task cannot: the supervisor is mid-turn, so a claim
+   * would sit unused until it expired while the trigger that caused it was never answered. Recording
+   * keeps the fact (the person's minute did fire) and leaves the round to the supervisor's next turn.
+   */
+  recordTrigger(id: string, trigger: PendingTrigger): void {
+    const task = this.require(id);
+    if (task.status === 'completed' || task.status === 'canceled') return;
+    const now = this.now();
+    this.save(
+      {
+        ...task,
+        stats: {
+          ...(task.stats ?? { runs: 0, activeMs: 0 }),
+          pendingTriggers: [...(task.stats?.pendingTriggers ?? []), trigger],
+        },
+      },
+      { silentTerminal: true },
+    );
+    appendJournal(this.root, id, { type: 'trigger_accumulated', at: now, data: trigger });
+  }
+
   /** Push a pending claim's deadline out, for a supervisor turn that is still working. */
   extendTriggerClaim(id: string, deadline: number): void {
     const task = this.require(id);

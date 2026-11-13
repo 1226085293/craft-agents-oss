@@ -219,17 +219,16 @@ export interface TaskStats {
   /**
    * Rounds a recurring task has closed: accepted ones, and ones that failed.
    *
-   * A round is one trigger-driven execution, not one session: 「每分钟一次」 produces a round a
-   * minute while the worker session is reused across them. Kept apart from `runs` because `runs`
-   * counts executions including retries, while this is the count a person reads.
+   * A round is one whole execution of the task, from its first step to its last — 「每分钟一次」 is a
+   * round a minute once each one is delivered. Kept apart from `runs`, which counts executions
+   * including retries: this is the number a person reads.
    */
   rounds?: { ok: number; failed: number };
   /**
-   * The last round only.
+   * The last round's delivery, kept so the next round can continue from it.
    *
-   * Earlier rounds live in the journal (`round_reset`), which is why this is a single slot: a
-   * record that grows a list per round is a record that grows forever, and the supervisor only
-   * ever reasons about the latest one.
+   * Earlier rounds live in the journal (`round_reset`); a record that grows a list per round is a
+   * record that grows forever, and only the latest is ever read.
    */
   lastRound?: {
     round: number;
@@ -239,10 +238,9 @@ export interface TaskStats {
     /**
      * What the round delivered, kept for the next one.
      *
-     * A recurring task repeats the same work, and the work often carries state forward — 「你好+N」
-     * with N incrementing is the simplest case, and it is the one that failed: the number lived only
-     * in the supervisor's context, so a lost turn restarted the count. The record now holds what the
-     * round produced, and the next round's brief reads it.
+     * A recurring task repeats the same work, and the work usually carries state — 「你好+N」 with N
+     * incrementing is the simplest case, and it is the one that failed: the number lived only in the
+     * supervisor's context, so a lost turn restarted the count.
      */
     result?: {
       artifacts?: string[];
@@ -255,8 +253,8 @@ export interface TaskStats {
    * Triggers that fired while the task could not start, in order.
    *
    * Delivered to the supervisor as one summary once the run ends, then cleared. On the record
-   * rather than in memory: the app restarts, and a trigger that fired while it was closed must
-   * not silently disappear.
+   * rather than in memory: the app restarts, and a trigger that fired while it was closed must not
+   * silently disappear.
    */
   pendingTriggers?: PendingTrigger[];
   /**
@@ -271,35 +269,19 @@ export interface TaskStats {
   /**
    * Consecutive wakes where the supervisor's turn produced no final reply.
    *
-   * A turn that only calls tools and dies leaves the trigger still owed an answer. Three in a row
-   * is not a flake, so the person is told instead of the loop continuing silently.
+   * A turn that only calls tools and dies leaves the trigger still owed an answer. Three in a row is
+   * not a flake, so the person is told instead of the loop continuing silently.
    */
   wakeFailures?: number;
-  /**
-   * The plan a recurring task's round always starts from.
-   *
-   * Written the first time a round is claimed and never widened: steps a round adds while it runs are
-   * dropped when the next round starts, so 「每分钟一轮」 cannot turn into a plan that grows by one
-   * outline per round. Observed live: rounds two and three arrived as new steps (`2`, `2.1`, `3`,
-   * `3.1`) beside the first, so the plan never finished, no round could be delivered, and the task
-   * grew a step a minute until it was stopped by hand.
-   *
-   * Titles and owners only — ids are what the worker advances, and keeping the agent means the next
-   * round runs as the same executor.
-   */
-  roundPlan?: Array<{ id: string; title: string; agent?: string }>;
   /**
    * When this task's trigger backlog was last put in front of the supervisor.
    *
    * 「Accumulated」 and 「delivered」 are different facts, and a turn that ends settles only what it
-   * was actually shown. Without this, a supervisor turn woken by task A's report cleared task B's
-   * backlog too — B's triggers were never read and never asked again, so a per-minute task silently
-   * stopped being asked about while its record still listed the triggers.
+   * was actually shown.
    */
   triggersDeliveredAt?: number;
 }
 
-/** One trigger that fired and is waiting to be handled. */
 export interface PendingTrigger {
   kind: 'manual' | 'cron' | 'event';
   /** When it fired (epoch ms). */

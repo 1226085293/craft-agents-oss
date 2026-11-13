@@ -60,6 +60,13 @@ function depsWith(tasks: Task[], service: TaskService, started: string[]): TaskR
       started.push(task.id);
       return { sessionId: `sess-${task.id}` };
     },
+    // A trigger wakes the supervisor now; `started` records that it was asked, not that a worker
+    // session appeared. What used to be "spawned a run" is now "asked a question".
+    triggerTask: async (task) => {
+      started.push(task.id);
+      return { ok: true };
+    },
+    isBusy: () => false,
   };
 }
 

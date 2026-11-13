@@ -64,7 +64,7 @@ import { getSupervisorSystemPrompt } from '../prompts/supervisor-prompt.ts'
 import { getSystemPrompt } from '../prompts/system.ts';
 import { buildEventsBlock } from '../events/prompt.ts';
 import { buildAgentRosterBlock } from '../agents/prompt.ts';
-import { getCoAuthorPreference } from '../config/appearance.ts';
+import { getCoAuthorPreference, getPreferredLanguageName } from '../config/appearance.ts';
 import { loadProjectById, getProjectAssetsPath, listProjectAssets, getProjectMemoryPath, loadProjectMemory } from '../projects/storage.ts';
 import type { ProjectPromptContext } from '../projects/types.ts';
 
@@ -4014,6 +4014,15 @@ ${agentSnapshot.persona.trim()}
             ...(this.config.session?.supervisorLane
               ? { lane: this.config.session.supervisorLane }
               : {}),
+            /**
+             * The language the person reads, not the language of this prompt.
+             *
+             * The supervisor prompt is English; without this the model kept that habit and
+             * answered a Chinese user in English — every report and every `ask_user` card.
+             * Read on each build rather than cached, so changing Appearance > Language takes
+             * effect on the next turn instead of the next restart.
+             */
+            replyLanguage: getPreferredLanguageName(),
           })
         : getSystemPrompt(
             undefined, // pinnedPreferencesPrompt

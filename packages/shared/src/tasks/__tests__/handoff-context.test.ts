@@ -40,9 +40,9 @@ describe('hand-off context', () => {
       ] as Task['handoffs'],
     })
     const block = formatHandoffContext(t)!
-    expect(block).toContain('上一轮结论：接口改完，handler 已接上')
+    expect(block).toContain('Previous round')
     expect(block).toContain('缓存层未动')
-    expect(block).toContain('下一步：补回归用例')
+    expect(block).toContain('Next step: 补回归用例')
     expect(block).toContain('src/api/handler.ts')
   })
 
@@ -72,8 +72,8 @@ describe('hand-off context', () => {
       ] as Task['handoffs'],
     })
     const brief = formatResumeBrief(t, 'manual')
-    expect(brief).toContain('恢复')
-    expect(brief).toContain('上一轮结论：接口改完')
-    expect(brief).toContain('下一步：补回归用例')
+    expect(brief).toContain('resumed')
+    expect(brief).toContain('Previous round')
+    expect(brief).toContain('Next step: 补回归用例')
   })
 })

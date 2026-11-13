@@ -76,13 +76,13 @@ export function formatAgentRosterSection(
     const hint = (entry.gist ?? entry.dispatchHint ?? entry.persona ?? '').split('\n')[0]!.trim();
     const name = entry.name?.trim();
     const who = name && name !== entry.id ? `${name}（\`${entry.id}\`）` : `\`${entry.id}\``;
-    return `- ${who}${hint ? ` — ${hint.slice(0, 160)}` : ''}${entry.isDefault ? '（未指派的活默认走这里）' : ''}`;
+    return `- ${who}${hint ? ` — ${hint.slice(0, 160)}` : ''}${entry.isDefault ? '(unassigned work defaults here)' : ''}`;
   });
   return [
-    '## 可用分工',
+    '## Available owners',
     ...lines,
     '',
-    '写小节时从这里选人：把 `agent` 填成上面括号里的 id。按这一小节实际要做的事，对照每个人后面的说明来选；不要自己编名字，也不要把什么都填成默认。',
+    'Pick the owner when you write a sub-step: put the id from the brackets above into `agent`. Choose by what this sub-step actually needs, against what each entry says it takes on; do not invent names, and do not default everything to the workspace default.',
   ].join('\n');
 }
 
@@ -101,20 +101,20 @@ export function formatPlanRuleBlock(options: { planExists?: boolean } = {}): str
    * advance it, and a rule that invites fresh outline-writing every turn guarantees drift.
    */
   const ruleOne = options.planExists
-    ? '1. 计划已经约定好了，**不要重写**。步骤只在两种情况下改动：计划本身写错了（某一步实际不成立），或者漏了一步必须做的事。开工不是改计划的理由——正常情况下你只需要推进状态。'
-    : '1. 计划还没有。先用 **一次** `task_plan({ steps: [...] })` 写下大纲：3–7 条，id 用 `1`、`2`、`3`。写下去之后它就是记录，不是草稿。它和 `report_result` 都在 `tools_agent` 分类下——分层模式下先展开它。';
+    ? '1. The plan is already agreed — **do not rewrite it**. Steps change for exactly two reasons: the plan was wrong (a step does not actually hold), or something that must be done is missing. Starting is not a reason to change the plan; normally all you do is advance status.'
+    : '1. There is no plan yet. Write the outline in **one** `task_plan({ steps: [...] })`: 3-7 items, ids `1`, `2`, `3`. Once written it is a record, not a draft. It and `report_result` live under the **`tools_agent`** category — in layered mode unfold it first.';
 
   return [
-    '## 怎么推进',
+    '## How to keep it moving',
     '',
     ruleOne,
-    '2. **大纲只说这一阶段要达到什么，不是一件可做的事**。真正的任务是它下面的小节（`1.1`、`1.2`）：按大纲的目标去读代码，把这一节拆成能执行、能验收的小节，然后逐条做。小节在开工前才写，不要预设没做过的部分的细节。',
-    '2b. **开始一条大纲之前，先检查它**：对比前面几节实际做出来的东西，这条大纲还成立吗？它的小节对不对、缺不缺、多不多？大纲成立就改小节并开工（缺/多/错都用 `task_plan` 直接改）；大纲本身不成立就用 `task_plan` 的 `restructure` 重排这条及其之后还没开工的大纲，然后只拆这一条的小节。检查的结论要落在计划里，不要只在对话里说。',
-    '3. **大纲的状态不用你写**，它由小节派生：有小节开工就是进行中，小节全完成就是完成。想推进就标小节——标大纲的状态会被拒绝，因为没有东西可以标。',
-    '3b. 一条小节都不许在大纲还没拆开时开工：先把大纲拆成小节。',
-    '4. 已完成的和**开工过的**小节是记录：不能删、不能改回、不能改名。开工过却做不下去，就把状态改成 `blocked` 并写明原因（卡在哪、为什么放弃、下一步靠什么接上）——后面接手的人得知道这里发生过什么。要换方向就在后面加大纲。',
-    '5. 写新步骤之前，先对照当前计划里已有的步骤：**同一件事只能有一个 id**。已经有“读回确认”了，就不能再列一条“读回确认”；已经存在的动作（无论做完没做完）继续用它的 id 推进状态，而不是换个名字重开一条。',
-    '6. **写小节之前先读「可用分工」，每条小节都要带 `agent`**。这一步不能跳：小节是派活的单位，没有负责人的小节等于没有派出去。先看这一小节实际要做什么，再对照分工里每个人适合做什么，把 id 填进 `agent`；不要自己编名字，也不要先建好再补——缺 `agent` 的小节会被直接拒绝。',
+    '2. **An outline item says what this stage achieves; it is not something you can do.** The real work is its sub-steps (`1.1`, `1.2`): read the code against what the item sets out to achieve, split it into sub-steps that can be executed and accepted, then do them one by one. Write sub-steps just before starting them; do not pre-decide details of work you have not done.',
+    '2b. **Check an outline item before starting it**: given what the earlier sections actually produced, does it still hold? Are its sub-steps right, missing, too many? If it holds, fix the sub-steps and start (missing, extra or wrong are all edits through `task_plan`); if the item itself no longer holds, use `task_plan` with `restructure` to re-lay this item and the unstarted ones after it, then split only this one. The conclusion of that check belongs in the plan, not only in the conversation.',
+    "3. **You do not write an outline item's status**; it is derived from its sub-steps: in progress once one starts, done when all are done. To move forward, mark sub-steps — writing a section status is refused, because there is nothing to write it to.",
+    '3b. No sub-step may start before its outline item is split: split the item into sub-steps first.',
+    '4. Finished and **started** sub-steps are records: they cannot be deleted, reverted or renamed. If a started one cannot continue, set it to `blocked` and say why (where it is stuck, why it was abandoned, what would unblock it) — whoever picks this up has to know what happened here. To change direction, add an outline item after it.',
+    '5. Before writing a new step, compare it against the steps the plan already has: **one thing, one id**. If 「read back and confirm」 already exists, do not list a second one; an existing action (done or not) keeps its id and its status is advanced, instead of being reopened under a new name.',
+    '6. **Read 「Available owners」 before writing sub-steps, and name an `agent` on every one**. This step cannot be skipped: a sub-step is the unit of dispatch, and one without an owner was never dispatched. Look at what this sub-step actually needs, compare it against what each owner takes on, and put that id in `agent`; do not invent names, and do not create it first and fill it in later — a sub-step without `agent` is refused outright.',
     '',
   ].join('\n');
 }
@@ -131,14 +131,15 @@ export function formatPlanRuleBlock(options: { planExists?: boolean } = {}): str
  */
 export function formatExecutionRuleBlock(): string {
   return [
-    '## 执行规则',
+    '## Execution rules',
     '',
-    '- 每做完一个小节，**立刻**用 `task_plan` 把它标成 done。计划是记录：没标状态的步骤，读的人只能认为它没做。这两个工具都在 **`tools_agent`** 分类下：分层模式下先展开 `tools_agent`，再 `call_tool` 调 `task_plan` / `report_result`，不要去 `misc`、`workspace` 里找。',
-    '- 交接时必须带 `stepId`（例如 `"1.2"`），写明这份报告覆盖的是哪一个小节。下一个小节要换会话执行时，系统只认「覆盖上一节的报告」——不带 stepId 的报告无法被对上，下一节会被拦下等你补交。',
-    '- 分给你的部分做完了、计划里还剩没授权的步骤 → `report_result`，`outcome` 用 **handoff**。任务会交给后续会话继续，不会关闭；**不要**把剩下的步骤删掉，也不要替人决定它们是否还要做。',
-    '- 整个计划都做完了 → 同样 `report_result`，`outcome` 用 **delivered**（这一版到此收尾）。别用 handoff，那会把一个已经完成的任务再挂到下一个会话头上。',
-    '- 还没做完 → 继续做完，然后照样 `report_result` 交接。不要停在半路等人来问，也不要用沉默结束回合：没有交接记录的回合，对任务来说等于什么都没发生。',
-    '- 只有真的需要人拍板时（删数据、停服、花钱、对外发消息、改方向、动密钥）才用 **needs_decision**，并在 `options` 里给出候选答案。能自己判断的不要往上交。',
+    '- The moment a sub-step is finished, mark it done with `task_plan`. The plan is a record: a step with no status reads as not done. Both tools live under **`tools_agent`** — in layered mode unfold `tools_agent` first, then `call_tool` `task_plan` / `report_result`; do not look under `misc` or `workspace`.',
+    '- A hand-off must carry `stepId` (e.g. `"1.2"`), naming the sub-step this report covers. When the next sub-step runs in another session, the system only accepts a report that covers the previous one — a report without stepId cannot be matched, and the next step waits for you to file it.',
+    "- Your part is finished and the plan still has steps you were not authorised for → `report_result` with `outcome: **handoff**`. The task continues in a later session and does not close; **do not** delete the remaining steps, and do not decide on the person's behalf whether they are still wanted.",
+    '- The whole plan is finished → also `report_result`, with `outcome: **delivered**` (this version ends here). Do not use handoff: that hangs a completed task on yet another session.',
+    '- **Cannot do it as instructed** (missing tool, no permission, needs the supervisor to send something on your behalf) → use `handoff`, and say in `summary` what is missing and who has to do it. This step is not done — the supervisor either does it or sends someone else.\n  **Do not use `delivered`** — `delivered` means the step really is done, and the supervisor reads it as 「no further action needed」.',
+    '- Not finished yet → finish it, then file `report_result` as usual. Do not stop halfway and wait to be asked, and do not end a turn in silence: a turn with no hand-off record did not happen as far as the task is concerned.',
+    '- Use **needs_decision** only when a person really must decide (deleting data, stopping a service, spending money, sending something outwards, changing direction, touching credentials), and give the candidate answers in `options`. Anything you can judge yourself stays with you.',
     '',
   ].join('\n');
 }
@@ -159,7 +160,7 @@ export function formatDispatchTaskContext(
   const hasPlan = Boolean(plan?.length);
   const sections: string[] = [];
   if (hasPlan) {
-    sections.push(['## 当前执行计划', ...formatPlan(plan)].join('\n'));
+    sections.push(['## Current plan', ...formatPlan(plan)].join('\n'));
   }
   sections.push(formatPlanRuleBlock({ planExists: hasPlan }));
   // Same reason the plan rules are here: dispatch is how a worker is actually
@@ -172,21 +173,21 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
   const sections: string[] = [];
   const id = task.id;
 
-  sections.push(`# 任务 ${id}：${task.name}`);
+  sections.push(`# Task ${id}: ${task.name}`);
 
-  if (options.reason) sections.push(`触发方式：${options.reason}`);
+  if (options.reason) sections.push(`Triggered by: ${options.reason}`);
 
-  sections.push(`## 要求\n${task.instruction}`);
+  sections.push(`## Request\n${task.instruction}`);
 
   const spec = task.spec;
   const contract: string[] = [];
-  if (spec?.cwd) contract.push(`工作目录：${spec.cwd}`);
-  if (spec?.sources?.length) contract.push(`可用数据源：${spec.sources.join('、')}`);
-  if (spec?.skills?.length) contract.push(`绑定技能：${spec.skills.join('、')}`);
-  if (spec?.baseline) contract.push(`对照对象：${spec.baseline}`);
+  if (spec?.cwd) contract.push(`Working directory: ${spec.cwd}`);
+  if (spec?.sources?.length) contract.push(`Sources available: ${spec.sources.join(', ')}`);
+  if (spec?.skills?.length) contract.push(`Skills attached: ${spec.skills.join(', ')}`);
+  if (spec?.baseline) contract.push(`Compare against: ${spec.baseline}`);
   if (spec?.plan?.length) {
     const progress = spec.plan.filter((step) => step.status === 'done').length;
-    contract.push(`计划进度：${progress}/${spec.plan.length}`);
+    contract.push(`Plan progress: ${progress}/${spec.plan.length}`);
   }
   /**
    * `scope` says what this task covers — nothing more.
@@ -196,7 +197,7 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
    * the wrong one. The boundary is `directive` now, and this is what it always was: the extent of
    * the work, for whoever has to divide it up.
    */
-  if (spec?.scope) contract.push(`任务范围：${spec.scope}`);
+  if (spec?.scope) contract.push(`Scope: ${spec.scope}`);
   /**
    * What the person's last reply meant, in the words of whoever read it.
    *
@@ -208,9 +209,9 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
    * reader decides how they meet.
    */
   if (spec?.directive?.text) {
-    contract.push(`本次指令（用户最近一次答复的意思，以此为准）：${spec.directive.text}`);
+    contract.push(`This instruction (what the person's latest answer meant; it governs): ${spec.directive.text}`);
   }
-  if (contract.length) sections.push(`## 执行边界\n${bullet(contract)}`);
+  if (contract.length) sections.push(`## Boundary\n${bullet(contract)}`);
 
   //
   // The plan rule belongs wherever a session is told to start work — the brief,
@@ -234,21 +235,21 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
   if (spec?.plan?.length) {
     sections.push(
       [
-        '## 当前执行计划',
+        '## Current plan',
         ...formatPlan(spec.plan),
         '',
-        '这就是已有的全部步骤。开工前先对照一遍：同一件事只能有一个 id，已经存在的动作（包括已完成、未完成、被跳过的）**继续用它的 id 推进状态**，不要换个名字再列一条。',
-        ...(spec.planAgreed ? ['大纲的标题与顺序由用户约定，不要改动或插队；需要时可以在末尾追加。'] : []),
+        'These are all the steps there are. Compare against them before starting: one thing, one id — an existing action (done, open, or skipped) **keeps its id and its status is advanced**, never reopened under a new name.',
+        ...(spec.planAgreed ? ["The outline's titles and order were agreed with the person: do not change them or insert in between; append at the end if needed."] : []),
       ].join('\n'),
     );
   } else {
     sections.push(
       [
-        '## 当前执行计划',
+        '## Current plan',
         '',
-        '（空 —— 还没有任何步骤）',
+        '(empty — no steps yet)',
         '',
-        '写大纲之前先看任务要求：里面已经点明的阶段只能用一次，之后的会话也会看到同一份计划。',
+        'Read the task requirements before writing the outline: a stage the requirements already name may appear only once, and later sessions see this same plan.',
       ].join('\n'),
     );
   }
@@ -262,17 +263,17 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
     const lines = spec.deliverables.map((d) => {
       const where = d.path ? ` → ${d.path}` : '';
       const note = d.note ? `（${d.note}）` : '';
-      return `${d.kind}${where}${note}${d.required === false ? '（可选）' : ''}`;
+      return `${d.kind}${where}${note}${d.required === false ? '(optional)' : ''}`;
     });
-    sections.push(`## 交付物\n${bullet(lines)}`);
+    sections.push(`## Deliverables\n${bullet(lines)}`);
   }
 
   const acceptance = spec?.acceptance ?? [];
   if (acceptance.length) {
     const lines = acceptance.map((item) =>
-      item.command ? `${item.id}：${item.check}（自检命令：${item.command}）` : `${item.id}：${item.check}`,
+      item.command ? `${item.id}: ${item.check} (check command: ${item.command})` : `${item.id}: ${item.check}`,
     );
-    sections.push(`## 验收清单\n${bullet(lines)}\n\n每条都要真正验证过；交付时把跑过的命令写进 verify.ran。`);
+    sections.push(`## Acceptance list\n${bullet(lines)}\n\nEach one must actually be verified; put the commands you ran into verify.ran when you deliver.`);
   }
 
   const handoffBlock = formatHandoffContext(task);
@@ -280,13 +281,13 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
 
   sections.push(
     [
-      '## 交作业',
-      '做完后调用 report_result：',
-      '- outcome：delivered（最终答案给用户）/ handoff（还要别人接着做）/ needs_decision（必须人拍板）',
-      '- summary：≤200 字，说清做了什么、结论是什么',
-      '- artifacts：交付物的真实路径（必须存在且非空）',
-      '- verify：跑过的命令列表 + 是否通过',
-      '不要在没有产物或没跑过验证的情况下报 delivered —— 规则门会拒绝。',
+      '## Handing in',
+      'When you are done, call report_result:',
+      '- outcome: delivered (final answer to the person) / handoff (someone else must continue) / needs_decision (a person must decide)',
+      '- summary: ≤200 words, what you did and what the conclusion is',
+      '- artifacts: the real paths of what you produced (must exist and be non-empty)',
+      '- verify: the commands you ran, and whether they passed',
+      'Do not report delivered without artefacts or without having run any verification — the rule gate refuses it.',
     ].join('\n'),
   );
 
@@ -296,9 +297,9 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
 /** One-line description of a trigger, for the UI and the journal. */
 export function describeTrigger(task: Task): string {
   const trigger = task.trigger;
-  if (!trigger || trigger.kind === 'manual') return '手动';
-  if (trigger.kind === 'cron') return `定时 ${trigger.expr}${trigger.timezone ? ` (${trigger.timezone})` : ''}`;
-  return `事件 ${trigger.source}${trigger.types?.length ? `/${trigger.types.join(',')}` : ''}`;
+  if (!trigger || trigger.kind === 'manual') return 'manual';
+  if (trigger.kind === 'cron') return `cron ${trigger.expr}${trigger.timezone ? ` (${trigger.timezone})` : ''}`;
+  return `event ${trigger.source}${trigger.types?.length ? `/${trigger.types.join(',')}` : ''}`;
 }
 
 /**
@@ -341,28 +342,28 @@ export function formatFrontierLine(task: Task): string {
   const answeredAt = task.decision?.answer?.at ?? 0
   if (answeredAt > 0 && (task.spec?.directive?.at ?? 0) <= answeredAt) {
     return (
-      '你已答复，但还没有人把这句话翻译成指令——所以这里不给下一步。' +
-      '等督导写下 `directive`（把答复的意思写成一句话）或结束任务；' +
-      '在那之前不要开工、不要标完成、不要移除步骤。'
+      'You answered, but nobody has turned that answer into a directive yet — so there is no next step here. ' +
+      'Wait for the supervisor to write a `directive` (the answer expressed as one sentence) or to end the task; ' +
+      'until then do not start, do not mark done, do not remove steps.'
     );
   }
   const leg = nextLeg(task.spec?.plan);
   if (!leg) {
     const anyOpen = openSteps(task.spec?.plan).length > 0;
     return anyOpen
-      ? '计划里还有没完成的内容，但都缺小节、暂时执行不了：检查大纲和它的小节是否还成立。'
-      : '计划已全部完成。用 `report_result`，outcome 用 **delivered**。';
+      ? 'The plan still has unfinished work, but it has no sub-steps and cannot be executed yet: check whether the outline items and their sub-steps still hold.'
+      : 'The plan is finished. Use `report_result` with `outcome: **delivered**`.';
   }
   if (leg.kind === 'step') {
-    return `接着做 ${leg.step.id}「${leg.step.title}」（属于大纲 ${leg.outline.id}）。`;
+    return `Continue with ${leg.step.id}「${leg.step.title}」 (part of outline item ${leg.outline.id}).`;
   }
   const { outline } = leg;
   return [
-    `下一条大纲 **${outline.id}「${outline.title}」还没有小节**，现在没有可执行的步骤——先判断它，再拆：`,
-    `1. 大纲 ${outline.id} 成立、但小节缺/多/错 → 用 \`task_plan\` 把 ${outline.id}.1、${outline.id}.2 写成对的，然后开始第一个；`,
-    `2. 大纲 ${outline.id} 本身已经不成立（前面做出来的东西让它没意义，或者漏了一条大纲）→ 用 \`task_plan\` 的 \`restructure\` 重排 ${outline.id} 及之后的大纲，再只拆 ${outline.id} 的小节；`,
-    '3. 大纲和小节都对 → 直接开始第一个小节。',
-    '只能重排还没拆过的大纲：已完成、正在做、已经拆出小节的都不能动。',
+    `The next outline item **${outline.id}「${outline.title}」 has no sub-steps**, so nothing is executable right now — judge it, then split it:`,
+    `1. Item ${outline.id} holds but its sub-steps are missing, extra or wrong → use \`task_plan\` to write ${outline.id}.1, ${outline.id}.2 correctly, then start the first;`,
+    `2. Item ${outline.id} itself no longer holds (what earlier sections produced made it pointless, or an outline item is missing) → use \`task_plan\` with \`restructure\` to re-lay ${outline.id} and the items after it, then split only ${outline.id};`,
+    '3. Item and sub-steps are both right → just start the first sub-step.',
+    'Only re-lay items that have not been split: done ones, ones in progress, and ones with sub-steps cannot be touched.',
   ].join('\n');
 }
 
@@ -371,8 +372,8 @@ export function formatResumeBrief(task: Task, reason = 'manual'): string {
     ? planProgress(task.spec.plan)
     : undefined;
   const state = progress
-    ? `计划进度 ${progress.done}/${progress.total}，${progress.doing > 0 ? '有一条正在进行' : '当前没有进行中的小节'}`
-    : '这条任务还没有计划';
+    ? `Plan progress ${progress.done}/${progress.total}, ${progress.doing > 0 ? 'one sub-step is in progress' : 'nothing is in progress right now'}`
+    : 'this task has no plan yet';
 
   // The hand-off goes in even though this session has its own transcript: after a
   // long pause the transcript may have been compacted, and the hand-off is the
@@ -380,13 +381,13 @@ export function formatResumeBrief(task: Task, reason = 'manual'): string {
   const handoffBlock = formatHandoffContext(task);
 
   return [
-    `继续任务 ${task.id}（${task.name}）。`,
+    `Continuing task ${task.id} (${task.name}).`,
     '',
-    `任务刚刚被暂停，现在恢复（原因：${reason}）。`,
-    `当前状态：${state}。`,
+    `The task was paused and is now resumed (reason: ${reason}).`,
+    `Current state: ${state}.`,
     ...(handoffBlock ? ['', handoffBlock] : []),
     '',
-    '不要从头再来，也不要重新规划已经完成的部分——那些已经冻结。',
+    'Do not start over, and do not replan what is already finished — that part is frozen.',
     /**
      * Where to resume is the boundary, not the next unfinished step.
      *
@@ -409,7 +410,7 @@ export function formatResumeBrief(task: Task, reason = 'manual'): string {
      * addressed the worker as the one who replied, which reads as though it had answered its own
      * question — the exact confusion this whole feature exists to prevent.
      */
-    ...(task.decision?.answer?.text ? [`用户的答复是：${task.decision.answer.text}`] : []),
+    ...(task.decision?.answer?.text ? [`The person answered: ${task.decision.answer.text}`] : []),
     /**
      * One line: what to do next, read from the plan.
      *
@@ -449,8 +450,8 @@ export function formatHandoffContext(task: Task): string | undefined {
    * second one and finished work that had just been excluded.
    */
   const directive = task.spec?.directive?.text;
-  const prior: string[] = [`上一轮结论：${last.summary}`];
-  if (last.keyFindings?.length) prior.push(`已知事实：\n${bullet(last.keyFindings)}`);
+  const prior: string[] = [`Previous round: ${last.summary}`];
+  if (last.keyFindings?.length) prior.push(`Known facts:\n${bullet(last.keyFindings)}`);
   if (last.nextAction) {
     /**
      * The hand-off's next action is still passed on, marked as subordinate.
@@ -463,12 +464,12 @@ export function formatHandoffContext(task: Task): string | undefined {
      */
     prior.push(
       directive
-        ? `下一步（上一轮留下的，若与本次指令冲突以指令为准）：${last.nextAction}`
-        : `下一步：${last.nextAction}`,
+        ? `Next step (left by the previous round; if it conflicts with this instruction, the instruction wins): ${last.nextAction}`
+        : `Next step: ${last.nextAction}`,
     );
   }
-  if (last.artifacts?.length) prior.push(`已有产物：\n${bullet(last.artifacts.map((a) => a.path))}`);
-  return `## 交接上下文\n${prior.join('\n\n')}`;
+  if (last.artifacts?.length) prior.push(`Artefacts so far:\n${bullet(last.artifacts.map((a) => a.path))}`);
+  return `## Hand-off context\n${prior.join('\n\n')}`;
 }
 
 /**
@@ -481,20 +482,20 @@ export function formatHandoffContext(task: Task): string | undefined {
  * that already has a plan.
  */
 export function formatNextLegBrief(task: Task, step: { id: string; title: string; note?: string }): string {
-  const owner = step.note ? `验收要点：${step.note}` : undefined;
+  const owner = step.note ? `Acceptance point: ${step.note}` : undefined;
   return [
-    `接手任务 ${task.id}（${task.name}）的下一步：**${step.id} ${step.title}**。`,
+    `Next step for task ${task.id} (${task.name}): **${step.id} ${step.title}**.`,
     '',
-    `任务整体：${task.instruction}`,
-    ...(task.spec?.scope ? [`任务范围：${task.spec.scope}`] : []),
+    `Task as a whole: ${task.instruction}`,
+    ...(task.spec?.scope ? [`Scope: ${task.spec.scope}`] : []),
     ...(owner ? [owner] : []),
     '',
     formatHandoffContext(task) ?? '',
     '',
-    '## 你现在要做的',
+    '## What you do now',
     '',
-    `只做 ${step.id}：${step.title}。完成后用 task_plan 把这一步标成 done 并在 note 里写清凭什么算完成，再用 report_result 交接。`,
-    '计划里其它小节不归你，不要改它们。',
+    `Only ${step.id}: ${step.title}. When it is done, mark it done with task_plan and write in note why that counts as done, then hand off with report_result.`,
+    'The other sub-steps are not yours; do not change them.',
   ]
     .filter((line) => line !== '')
     .join('\n');
@@ -520,25 +521,25 @@ export function formatNextLegBrief(task: Task, step: { id: string; title: string
 export function formatPauseBrief(task: Task): string {
   const remaining = openSteps(task.spec?.plan);
   const lines = [
-    `任务 ${task.id}（${task.name}）已经暂停，等你把结论告诉用户。`,
+    `Task ${task.id} (${task.name}) is paused and waiting for you to tell the person the conclusion.`,
     '',
-    `任务目标：${task.instruction}`,
+    `Task goal: ${task.instruction}`,
   ];
   const directive = task.spec?.directive?.text?.trim();
-  if (directive) lines.push('', `用户当时给的授权边界：${directive}`);
+  if (directive) lines.push('', `The boundary the person gave: ${directive}`);
   if (remaining.length > 0) {
     lines.push(
       '',
-      '计划里还没做的步骤（现在不要做）：',
+      'Steps still open in the plan (do not do them now):',
       ...remaining.slice(0, 12).map((step) => `- ${step.id} ${step.title}（${step.status}）`),
     );
   }
   lines.push(
     '',
-    '## 你现在要做的',
+    '## What you do now',
     '',
-    '用 `report_to_user` 告诉用户：这一段做完了、按他的指示停在这里、还差哪些步骤、要不要放行。',
-    '**不要派活，不要继续执行，也不要用 ask_user 再问一遍已经问过的事** —— 这一轮只负责说明。',
+    'Use `report_to_user` to tell the person: this slice is finished, you stopped here on their instruction, what is still missing, and whether to release it.',
+    '**Do not dispatch, do not keep executing, and do not use ask_user to re-ask what was already asked** — this turn only explains.',
   );
   return lines.join('\n');
 }
@@ -546,25 +547,25 @@ export function formatPauseBrief(task: Task): string {
 export function formatIdleWakeBrief(task: Task): string {
   const remaining = openSteps(task.spec?.plan);
   const lines = [
-    `继续任务 ${task.id}（${task.name}）：上个回合结束了，但任务还没完成。`,
+    `Continuing task ${task.id} (${task.name}): the last turn ended but the task is not finished.`,
     '',
-    `任务目标：${task.instruction}`,
+    `Task goal: ${task.instruction}`,
   ];
   if (remaining.length > 0) {
     lines.push(
       '',
-      '执行计划里还没完成的步骤：',
+      'Steps still open in the plan:',
       ...remaining.slice(0, 12).map((step) => `- ${step.id} ${step.title}（${step.status}）`),
     );
   } else if (task.spec?.plan?.length) {
-    lines.push('', '执行计划看起来已经全部完成 —— 如果是，请直接用 report_result 交接，不要重做。');
+    lines.push('', 'The plan looks finished — if it is, hand off with report_result directly, do not redo it.');
   }
   lines.push(
     '',
-    '## 你现在要做的',
+    '## What you do now',
     '',
-    '从上一次中断的地方继续，不要从头重做已经完成的部分。',
-    '如果任务其实已经完成，直接 report_result 交接；如果需要人拍板，用 report_result 报 needs_decision。',
+    'Continue from where it stopped; do not redo what is finished.',
+    'If the task is actually finished, hand off with report_result; if a person must decide, report needs_decision with report_result.',
   );
   return lines.join('\n');
 }
@@ -595,35 +596,35 @@ export function formatUnreportedBrief(task: Task): string {
 
   if (planFinished) {
     return [
-      `任务 ${task.id}（${task.name}）的执行计划已经全部完成，但系统没有收到你的交付记录。`,
+      `Task ${task.id} (${task.name}) has its whole plan finished, but no delivery record arrived.`,
       '',
-      `已完成 ${done.length} 个步骤。`,
+      `${done.length} steps are done.`,
       '',
-      '## 你现在要做的',
+      '## What you do now',
       '',
-      '不要再做新步骤，也不要改计划。直接调用 `report_result` 交付：',
-      '- outcome：任务目标达成就用 delivered；还需要别人接手才用 handoff；确实需要人拍板才用 needs_decision',
-      '- summary：说清做完了什么',
-      '- artifacts：交付物真实路径（必须存在且非空）',
-      '- verify：跑过的命令 + 是否通过',
+      'Do not do new steps and do not change the plan. Call `report_result` to deliver:',
+      '- outcome: delivered when the task goal is met; handoff only when someone else must continue; needs_decision only when a person really must decide',
+      '- summary: what you finished',
+      '- artifacts: real paths of what you produced (must exist and be non-empty)',
+      '- verify: the commands you ran, and whether they passed',
       '',
-      '规则门会检查这些内容；没有产物或没跑过验证会被拒绝，那就补上再交，而不是继续加步骤。',
+      'The rule gate checks all of this; no artefacts or no verification is refused — fill that in and hand in again, rather than adding more steps.',
     ].join('\n');
   }
 
   return [
-    `任务 ${task.id}（${task.name}）的回合已经结束，但系统没有收到你的交接记录。`,
+    `The turn for task ${task.id} (${task.name}) ended, but no hand-off record arrived.`,
     '',
-    `计划里还有 ${open.length} 步没完成：${open.map((step) => `${step.id} ${step.title}`).join('；')}。`,
+    `${open.length} steps in the plan are still open: ${open.map((step) => `${step.id} ${step.title}`).join('; ')}.`,
     '',
-    '## 你现在要做的',
+    '## What you do now',
     '',
-    '判断你手上这一步：',
-    '- 已经做完了 → 调用 `report_result`，outcome 用 handoff（任务会交给后续会话继续，不会关闭），不要移除剩下的步骤',
-    '- 还没做完 → 继续做完，然后同样用 `report_result` 交接',
+    'Judge the step in your hands:',
+    '- Already finished → call `report_result` with outcome handoff (the task continues in a later session and does not close); do not remove the remaining steps',
+    '- Not finished → finish it, then hand off with `report_result` as well',
     '',
-    '在对话里写总结不算交接——任务会一直停在「进行中」，督导收不到任何消息。',
+    'A summary written in the conversation is not a hand-off — the task sits in progress and the supervisor receives nothing.',
     '',
-    '`report_result` 需要：summary（做完了什么）、artifacts（真实路径，必须存在且非空）、verify（跑过的命令 + 是否通过）。',
+    '`report_result` needs: summary (what you finished), artifacts (real paths, must exist and be non-empty), verify (the commands you ran, and whether they passed).',
   ].join('\n');
 }

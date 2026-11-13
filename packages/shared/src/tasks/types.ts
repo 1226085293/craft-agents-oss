@@ -216,6 +216,69 @@ export interface TaskStats {
    * is recorded rather than silently forgotten.
    */
   lastTriggeredAt?: number;
+  /**
+   * Rounds a recurring task has closed: accepted ones, and ones that failed.
+   *
+   * A round is one trigger-driven execution, not one session: 「每分钟一次」 produces a round a
+   * minute while the worker session is reused across them. Kept apart from `runs` because `runs`
+   * counts executions including retries, while this is the count a person reads.
+   */
+  rounds?: { ok: number; failed: number };
+  /**
+   * The last round only.
+   *
+   * Earlier rounds live in the journal (`round_reset`), which is why this is a single slot: a
+   * record that grows a list per round is a record that grows forever, and the supervisor only
+   * ever reasons about the latest one.
+   */
+  lastRound?: {
+    round: number;
+    finishedAt: number;
+    outcome: 'delivered' | 'handoff' | 'needs_decision';
+    summary: string;
+  };
+  /**
+   * Triggers that fired while the task could not start, in order.
+   *
+   * Delivered to the supervisor as one summary once the run ends, then cleared. On the record
+   * rather than in memory: the app restarts, and a trigger that fired while it was closed must
+   * not silently disappear.
+   */
+  pendingTriggers?: PendingTrigger[];
+  /**
+   * When the pending claim expires (epoch ms).
+   *
+   * A trigger claims the run lock so two ticks cannot both start a round, but nothing is running
+   * yet — the supervisor decides. Without a deadline, a supervisor turn that died after claiming
+   * would hold the lock forever. The watchdog deliberately skips `pending:` claims (there is no
+   * session to inspect), so this field, not a session, is what expiry is based on.
+   */
+  lockDeadlineAt?: number;
+  /**
+   * Consecutive wakes where the supervisor's turn produced no final reply.
+   *
+   * A turn that only calls tools and dies leaves the trigger still owed an answer. Three in a row
+   * is not a flake, so the person is told instead of the loop continuing silently.
+   */
+  wakeFailures?: number;
+  /**
+   * When this task's trigger backlog was last put in front of the supervisor.
+   *
+   * 「Accumulated」 and 「delivered」 are different facts, and a turn that ends settles only what it
+   * was actually shown. Without this, a supervisor turn woken by task A's report cleared task B's
+   * backlog too — B's triggers were never read and never asked again, so a per-minute task silently
+   * stopped being asked about while its record still listed the triggers.
+   */
+  triggersDeliveredAt?: number;
+}
+
+/** One trigger that fired and is waiting to be handled. */
+export interface PendingTrigger {
+  kind: 'manual' | 'cron' | 'event';
+  /** When it fired (epoch ms). */
+  at: number;
+  /** The cron expression or event source that fired it, for the summary. */
+  detail?: string;
 }
 
 /** Why a task is currently paused (null while running/backlog). */

@@ -236,6 +236,19 @@ export function setDiffViewerSettings(settings: DiffViewerPreferences): void {
  * i18n setting (Appearance > Language). Returns an empty string if no
  * system info can be resolved.
  */
+/**
+ * The language the person reads, as a name a prompt can use: 「简体中文」, 「English」, …
+ *
+ * Split out of `formatUserContextForPrompt` because the supervisor prompt needs the value without
+ * the timezone/country block: the model writes in the person's language but does not need to know
+ * where they are. Reading it from the same source keeps the two from disagreeing — the Setting
+ * under Appearance > Language is the only answer either of them gives.
+ */
+export function getPreferredLanguageName(): string {
+  const langCode = (i18n.resolvedLanguage ?? 'en') as LanguageCode;
+  return LOCALE_REGISTRY[langCode]?.nativeName ?? 'English';
+}
+
 export function formatUserContextForPrompt(): string {
   // Derive language from the app's i18n setting (Appearance > Language).
   const langCode = (i18n.resolvedLanguage ?? 'en') as LanguageCode;

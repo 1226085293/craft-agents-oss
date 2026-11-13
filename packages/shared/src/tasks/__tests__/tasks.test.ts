@@ -153,10 +153,17 @@ describe('budget and fuse', () => {
     expect(checkBudget(budget, { sessions: 2, runs: 2, activeMinutes: 10 }, 0).exceeded).toBe(false);
   });
 
-  it('fails past any limit', () => {
+  it('fails past the session limit', () => {
     expect(checkBudget(budget, { sessions: 3, runs: 0, activeMinutes: 0 }, 0).exceeded).toBe(true);
-    expect(checkBudget(budget, { sessions: 0, runs: 3, activeMinutes: 0 }, 0).exceeded).toBe(true);
-    expect(checkBudget(budget, { sessions: 0, runs: 0, activeMinutes: 11 }, 0).exceeded).toBe(true);
+  });
+
+  it('does not treat runs or active minutes as a limit any more', () => {
+    // A recurring task blows through both by design: 「每分钟一次」 reaches 12 runs in twelve
+    // minutes. Those numbers were a round cap wearing a budget's name, and they paused a task the
+    // person had explicitly asked to loop.
+    expect(checkBudget(budget, { sessions: 0, runs: 3, activeMinutes: 0 }, 0).exceeded).toBe(false);
+    expect(checkBudget(budget, { sessions: 0, runs: 0, activeMinutes: 11 }, 0).exceeded).toBe(false);
+    expect(checkBudget(budget, { sessions: 0, runs: 500, activeMinutes: 10_000 }, 0).exceeded).toBe(false);
   });
 
   it('fails a passed deadline', () => {

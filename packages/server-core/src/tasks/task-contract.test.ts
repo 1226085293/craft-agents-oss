@@ -220,16 +220,20 @@ describe('run lifecycle', () => {
     expect(svc.startRun(task.id, 'sess_b').ok).toBe(true);
   });
 
-  it('counts runs so maxRuns actually trips', () => {
+  it('keeps starting after the old run budget would have stopped it', () => {
+    // `maxRuns` used to pause a task at 12 runs, which for a per-minute schedule is twelve minutes
+    // of work followed by a silent stop. Only the session budget remains.
     const { svc } = service();
     const task = create(svc);
+    // One session reused across runs, which is what a recurring task does; a fresh session per run
+    // would hit the session budget instead, and that limit still applies on purpose.
     for (let i = 0; i < 12; i += 1) {
-      svc.startRun(task.id, `sess_${i}`);
+      svc.startRun(task.id, 'sess_1');
       svc.endRun(task.id, { ok: true });
     }
-    const paused = svc.setStatus(task.id, 'running');
-    expect(paused.status).toBe('paused');
-    expect(paused.pauseReason).toBe('budget');
+    const resumed = svc.setStatus(task.id, 'running');
+    expect(resumed.status).toBe('running');
+    expect(resumed.pauseReason ?? null).toBeNull();
   });
 
   it('ignores a heartbeat when no run is in flight, and stamps it when one is', () => {

@@ -13,6 +13,7 @@
 import { createLogger } from '@craft-agent/shared/utils';
 import { eventTriggerMatches, matchesCron, type Task, type TaskTrigger } from '@craft-agent/shared/tasks';
 import type { TaskService } from './task-service.ts';
+import { TRIGGER_CLAIM_MS } from './task-service.ts';
 
 const log = createLogger('task-scheduler');
 
@@ -22,10 +23,27 @@ export interface TaskRunnerDeps {
   /** The service that owns the run lock and the journal. */
   tasks: TaskService;
   /**
-   * Spawn the worker for a claimed run. Must return the created session id.
-   * Called only after the lock is held, so it may assume exclusivity.
+   * Spawn the worker for a claimed run.
+   *
+   * No longer used for triggers — a trigger wakes the supervisor, which dispatches. Kept for the
+   * recovery paths (`recoverAfterRestart`) that must resume a round nobody is deciding about.
    */
   spawnRun: (task: Task, reason: string) => Promise<{ sessionId: string } | null>;
+  /**
+   * Ask the supervisor what to do about a fired trigger.
+   *
+   * This is the one place where a cheap scheduler tick is allowed to cost a model turn, and it is
+   * deliberate: 「是否停止/完成」 is a judgement, and the scheduler has no standing to make it.
+   */
+  triggerTask: (task: Task, reason: string) => Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * Whether the session holding a claim is still working.
+   *
+   * The expiry pass asks this before releasing a claim: a supervisor turn that is still running gets
+   * its deadline pushed out, because pulling the lock out from under a turn that is about to dispatch
+   * would let a second turn start on the same round.
+   */
+  isBusy: (sessionId: string) => boolean;
   now?: () => number;
 }
 
@@ -73,37 +91,76 @@ export async function runEventPass(
 }
 
 /**
- * Claim and spawn one run.
+ * Hand a fired trigger to the supervisor.
  *
- * A failed gate is not an error: a task that is already running, waiting on a
- * dependency or out of budget is simply skipped, and the reason is in the
- * journal written by the service.
+ * It used to spawn the worker directly (`spawnRun` → `spawnTaskRun` → a worker session with the
+ * task brief), which made the scheduler the only thing that decided when a task ran. That is how
+ * 「每分钟发一次你好」 ran once and stopped: the worker reported `delivered`, the record closed, and
+ * no supervisor ever saw the round to ask 「and minute two?」.
+ *
+ * So a trigger now does two things: it backs the record with a lock (so two ticks cannot both start
+ * a round), and it asks the supervisor to decide. A task that is already running, paused or budget-
+ * blocked only accumulates the trigger — the decision belongs to the turn that is already in flight.
+ *
+ * Returns true when the supervisor was asked, which is what the callers count.
  */
 async function startTask(deps: TaskRunnerDeps, task: Task, reason: string): Promise<boolean> {
-  // Two triggers can fire for the same task in one pass; the lock is claimed
-  // before spawning, so the second attempt sees it and stops.
-  const claim = deps.tasks.startRun(task.id, `pending:${reason}`);
-  if (!claim.ok) {
-    log.info(`[task-scheduler] ${task.id} not started: ${claim.reason}`);
+  const kind: 'cron' | 'event' = reason.startsWith('event:') ? 'event' : 'cron';
+  const claimed = deps.tasks.claimTrigger(task.id, { kind, at: (deps.now?.() ?? Date.now()), detail: reason });
+  if (!claimed) {
+    // Running, paused, or out of budget: the trigger is on the record and the supervisor will see
+    // it in the report that ends the current round.
+    log.info(`[task-scheduler] ${task.id} trigger accumulated: ${reason}`);
     return false;
   }
 
   try {
-    const spawned = await deps.spawnRun(claim.task, reason);
-    if (!spawned) {
-      // Nothing was created: release the lock so the next tick can retry.
-      deps.tasks.endRun(task.id, { ok: false, error: 'spawn failed' });
+    const woken = await deps.triggerTask(claimed, reason);
+    if (!woken.ok) {
+      // Nothing was asked. Keep the backlog (the trigger is real) but release the claim so the
+      // next tick can try again instead of waiting out the deadline.
+      log.warn(`[task-scheduler] ${task.id} not woken: ${woken.reason ?? 'unknown'}`);
+      deps.tasks.releaseTriggerClaim(task.id, woken.reason ?? 'wake failed');
       return false;
     }
-    deps.tasks.attachSession(task.id, spawned.sessionId);
-    deps.tasks.startRun(task.id, spawned.sessionId);
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    log.warn(`[task-scheduler] failed to spawn ${task.id}`, { error: message });
-    deps.tasks.endRun(task.id, { ok: false, error: message });
+    log.warn(`[task-scheduler] failed to wake for ${task.id}`, { error: message });
+    deps.tasks.releaseTriggerClaim(task.id, message);
     return false;
   }
+}
+
+/**
+ * Expire claims whose supervisor turn never started.
+ *
+ * A trigger claims the lock before anything exists, so a turn that died after claiming would hold
+ * it forever. The watchdog deliberately skips `pending:` claims — there is no session to inspect —
+ * which is why expiry is driven by `lockDeadlineAt` rather than by liveness.
+ *
+ * A supervisor that is still processing gets its deadline pushed back instead of losing the lock:
+ * expiring it out from under a turn that is about to dispatch would let a second turn start on the
+ * same round.
+ */
+export function expireTriggerClaims(
+  deps: TaskRunnerDeps,
+  now: number,
+  options: { busy: (task: Task) => boolean; claimMs: number },
+): number {
+  let expired = 0;
+  for (const task of deps.listTasks()) {
+    const deadline = task.stats?.lockDeadlineAt;
+    if (!deadline || !task.stats?.lockSessionId?.startsWith('pending:')) continue;
+    if (deadline > now) continue;
+    if (options.busy(task)) {
+      deps.tasks.extendTriggerClaim(task.id, now + options.claimMs);
+      continue;
+    }
+    deps.tasks.expireTriggerClaim(task.id, now);
+    expired += 1;
+  }
+  return expired;
 }
 
 /** Default cadence: cron has minute resolution, so check once a minute. */
@@ -192,6 +249,29 @@ export function startTaskScheduler(deps: TaskRunnerDeps, intervalMs = TASK_SCHED
   const timer = setInterval(() => {
     const now = new Date();
     const minute = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${now.getHours()}-${now.getMinutes()}`;
+    /**
+     * Claim expiry runs every tick, not once a minute.
+     *
+     * A claim that expired 40 seconds into a minute should not hold the round for the other 20 —
+     * the next trigger may arrive inside that window. It is also the only guard on the window
+     * between 「claimed」 and 「a supervisor turn exists」, and that window is where a turn can die.
+     */
+    try {
+      const expired = expireTriggerClaims(deps, now.getTime(), {
+        busy: (task) => {
+          // The lock holder here is a `pending:` placeholder, which is not a session — asking
+          // `isBusy` about it always answers 「no」, so the turn that is still working lost its
+          // claim 3 minutes in. The supervisor is the session that matters.
+          const supervisor = task.supervisorSessionId;
+          return Boolean(supervisor && deps.isBusy(supervisor));
+        },
+        claimMs: TRIGGER_CLAIM_MS,
+      });
+      if (expired > 0) log.info(`[task-scheduler] expired ${expired} stale trigger claim(s)`);
+    } catch (error) {
+      log.warn('[task-scheduler] claim expiry failed', { error });
+    }
+
     // A slow tick must not double-fire the same minute.
     if (minute === lastMinute) return;
     lastMinute = minute;

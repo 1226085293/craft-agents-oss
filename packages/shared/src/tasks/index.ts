@@ -49,6 +49,7 @@ export {
   isHeartbeatMissing,
   isHeartbeatStalled,
   isNewRevision,
+  isRecurring,
   isRunLocked,
   lastActivityOf,
   MAX_PROCESS_LOST_RETRIES,
@@ -149,6 +150,7 @@ export {
   saveTask,
   tasksByStatus,
 } from './store.ts';
+export type { PendingTrigger } from './types.ts'
 export * from './completion-claim.ts'
 export * from './resume-decision.ts'
 export * from './answer-line.ts'

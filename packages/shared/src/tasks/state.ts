@@ -33,8 +33,15 @@ import { openSteps } from './plan.ts';
 const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   // A backlog task can be paused before it ever runs (dependency blocked,
   // budget pre-check) and can fail outright if its setup is invalid.
-  backlog: ['running', 'paused', 'failed', 'canceled'],
-  running: ['running', 'paused', 'completed', 'failed', 'canceled'],
+  //
+  // `completed` is reachable from here because a recurring task returns to `backlog` after every
+  // round: the supervisor reads the round's report and decides 「not needed any more」. Without this
+  // edge that decision had nowhere to go — the task would have to be reopened just to be closed.
+  backlog: ['running', 'paused', 'failed', 'canceled', 'completed'],
+  // `backlog` is reachable from `running` for the same reason: one round of a recurring task has
+  // finished and the task is waiting for the next trigger. Staying `running` would claim a live
+  // run that nobody is holding.
+  running: ['running', 'backlog', 'paused', 'completed', 'failed', 'canceled'],
   paused: ['running', 'canceled', 'failed'],
   completed: [],
   failed: ['backlog', 'running', 'canceled'],
@@ -116,6 +123,15 @@ export type TransitionResult = {
  */
 function assertPlanSettled(task: Task, to: TaskStatus): void {
   if (to !== 'completed') return;
+  /**
+   * A recurring task's plan describes a round, not a deliverable.
+   *
+   * Every round resets it to `todo` before the next trigger, so 「still open」 is the normal resting
+   * state of a recurring task that has been working — including right after it delivered. Holding
+   * `completed` hostage to that would make 「不再需要了」 impossible to record without reopening the
+   * task and pretending to do it again, which is the opposite of what the guard is for.
+   */
+  if (isRecurring(task)) return;
   const open = openSteps(task.spec?.plan);
   if (open.length === 0) return;
   throw new Error(
@@ -481,14 +497,19 @@ export interface BudgetUsage {
 export type BudgetVerdict = { exceeded: false } | { exceeded: true; reason: string };
 
 export function checkBudget(budget: TaskBudget, usage: BudgetUsage, now: number): BudgetVerdict {
+  /**
+   * Sessions only.
+   *
+   * `maxRuns` and `activeMinutes` were lifetime limits, and for anything that runs on a schedule
+   * they were quietly a round cap: 「每分钟一次」 blew through 12 runs in twelve minutes and then paused
+   * for budget, while the person had asked for a loop. Neither number ever expressed what the person
+   * wanted; the only budget that still means something is how many sessions one task may use, and
+   * that stops a task that spawns a session per step from doing so forever.
+   *
+   * `deadline` stays: that one is set by a person and means what it says.
+   */
   if (usage.sessions > budget.maxSessions) {
     return { exceeded: true, reason: `会话数 ${usage.sessions}/${budget.maxSessions}` };
-  }
-  if (usage.runs > budget.maxRuns) {
-    return { exceeded: true, reason: `运行次数 ${usage.runs}/${budget.maxRuns}` };
-  }
-  if (usage.activeMinutes > budget.activeMinutes) {
-    return { exceeded: true, reason: `活跃时长 ${usage.activeMinutes}/${budget.activeMinutes} 分钟` };
   }
   if (budget.deadline && now > budget.deadline) {
     return { exceeded: true, reason: '已过截止时间' };
@@ -576,6 +597,23 @@ export function isHeartbeatMissing(task: Task, now: number): boolean {
   if (typeof last === 'number') return isHeartbeatStalled(task, now);
   const startedAt = task.stats?.runStartedAt ?? task.updatedAt;
   return now - startedAt > task.heartbeatIntervalMin * 60_000 * 2;
+}
+
+/**
+ * Whether this task is meant to run more than once.
+ *
+ * Derived from the triggers rather than from a flag a caller has to set: an enabled cron or event
+ * trigger *is* the statement 「this runs again」. A separate boolean would be a second place to
+disagree with it — the shape that produced a task whose triggers kept firing after the record had
+ * been closed as finished.
+ *
+ * `trigger` (singular) is the legacy slot; records written before `triggers[]` still carry it.
+ */
+export function isRecurring(task: Pick<Task, 'triggers' | 'trigger'>): boolean {
+  const triggers = task.triggers ?? (task.trigger ? [task.trigger] : []);
+  return triggers.some((trigger) =>
+    trigger.kind === 'cron' || trigger.kind === 'event' ? trigger.enabled : false,
+  );
 }
 
 /**

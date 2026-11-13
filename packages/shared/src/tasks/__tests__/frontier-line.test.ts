@@ -41,11 +41,11 @@ describe('the brief says what the plan implies', () => {
       { id: '2', title: '收尾', status: 'todo' },
     ]))
     expect(line).toContain('2')
-    expect(line).toContain('还没有小节')
+    expect(line).toContain('has no sub-steps')
     // The three outcomes of the check, all present: the worker has nothing to interpret.
-    expect(line).toContain('成立、但小节缺')
+    expect(line).toContain('holds but its sub-steps are missing')
     expect(line).toContain('restructure')
-    expect(line).toContain('直接开始第一个小节')
+    expect(line).toContain('just start the first sub-step')
   })
 
   it('does not pretend an unexpanded plan is finished', () => {

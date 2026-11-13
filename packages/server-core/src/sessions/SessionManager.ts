@@ -2227,6 +2227,60 @@ export class SessionManager implements ISessionManager {
     await this.sendMessage(sessionId, text, undefined, undefined, { midStreamBehavior: 'queue' })
   }
 
+  /**
+   * Settle every task this supervisor lane holds a trigger backlog for.
+   *
+   * Called once per supervisor turn with the one fact that matters: did the turn produce a final
+   * reply. `sendMessage` succeeding was never that fact — the turn can die after receiving the
+   * message, and a backlog cleared on send would lose the triggers it was supposed to deliver.
+   *
+   * A turn with no final reply keeps the backlog owed and counts the failure. Three in a row is not
+   * a flake: the person is told, because a supervisor that stops answering leaves every recurring
+   * task silently doing nothing while its record still says it is registered.
+   */
+  private async settleTaskTriggers(managed: ManagedSession, replied: boolean): Promise<void> {
+    try {
+      const service = this.getTasks(managed.workspace.id)
+      const pending = service
+        .list()
+        .filter(
+          (task) =>
+            task.supervisorSessionId === managed.id &&
+            (task.stats?.pendingTriggers?.length ?? 0) > 0 &&
+            // Only what this lane was actually shown. A turn woken by task A's report used to clear
+            // task B's backlog as well, and B was never asked about again.
+            (task.stats?.triggersDeliveredAt ?? 0) > 0,
+        )
+      if (pending.length === 0) return
+
+      for (const task of pending) {
+        if (replied) {
+          service.clearTriggers(task.id)
+          continue
+        }
+        const failures = service.noteWakeWithoutReply(task.id)
+        if (failures < 3) continue
+
+        // The wording lives in the locale files, not here: this sentence is read by the person, and
+        // the app already knows which language that is (Appearance > Language).
+        /**
+         * `i18n` is initialized by the host app. In a headless or test host it may not be, and
+         * `t()` then returns the key itself — which would put 「tasks.supervisorInterrupted」 in front
+         * of the person as if it were a message. The Chinese string is the fallback because this
+         * sentence only exists for a person to read.
+         */
+        const key = 'tasks.supervisorInterrupted'
+        const text = i18n.isInitialized ? i18n.t(key) : '任务督导中断，请检查'
+        const lane = await this.ensureSupervisorSession(managed.workspace.id, 'user')
+        if (lane) this.notifySupervisor(lane.id, `task-fault:${task.id}`, text)
+        service.setStatus(task.id, 'paused', { pauseReason: 'process_lost' })
+        sessionLog.warn('supervisor stopped answering a task trigger', { taskId: task.id, failures })
+      }
+    } catch (error) {
+      sessionLog.warn('failed to settle task triggers', { error })
+    }
+  }
+
   private notifySupervisor(sessionId: string, key: string, text: string): void {
     const managed = this.sessions.get(sessionId)
     if (!managed) return
@@ -7958,6 +8012,25 @@ ${request.prompt}`;
     const service = new TaskService({
       workspaceRoot: workspace.rootPath,
       onChanged: () => this.broadcastTaskChanged(workspace.id),
+      /**
+       * Archive the workers a finished task used.
+       *
+       * A recurring task reuses one worker across rounds — archiving per round would break that —
+       * but once the task is over the conversation is just clutter in a list the person reads. The
+       * record is terminal, so nothing will reuse it again.
+       */
+      onTaskTerminal: (task) => {
+        for (const sessionId of task.sessionIds ?? []) {
+          const managed = this.sessions.get(sessionId)
+          if (!managed || managed.isArchived) continue
+          // A task can reach a terminal state while its worker is still finishing a turn (a failed
+          // task does exactly that). Archiving under it would tear down a live conversation.
+          if (managed.isProcessing) continue
+          void this.moveSessionToScope(sessionId, managed.projectId ?? null, managed.folderId ?? null, true).catch((error) => {
+            sessionLog.warn('failed to archive a finished task worker', { sessionId, error })
+          })
+        }
+      },
       sessionExists: (sessionId) => this.sessions.has(sessionId),
       wakeSupervisor: (sessionId, text, key) => {
         // The supervisor cannot see who spoke. Every system nudge therefore names
@@ -8264,6 +8337,38 @@ ${request.prompt}`;
         tasks: service,
         listTasks: () => service.list(),
         spawnRun: (task, reason) => this.spawnTaskRun(workspaceId, task, reason),
+        /**
+         * A fired trigger becomes a question to the supervisor, not a session.
+         *
+         * The scheduler used to spawn the worker itself, so nobody who could decide 「这一轮要不要
+         * 跑 / 是不是不再需要了」 ever saw the round. 「每分钟发一次你好」 ran once and closed for exactly
+         * that reason.
+         */
+        isBusy: (sessionId) => this.sessions.get(sessionId)?.isProcessing === true,
+        triggerTask: async (task, reason) => {
+          try {
+            const lane = await this.ensureSupervisorSession(workspaceId, 'task')
+            if (!lane) return { ok: false, reason: 'no task-lane supervisor' }
+            const summary = service.triggerSummary(task.id)
+            const last = task.stats?.lastRound
+            const text = [
+              `【触发】${task.id}「${task.name}」本轮被触发（${reason}）。`,
+              summary ? `\n累计待处理：\n${summary}` : '',
+              last
+                ? `\n上一轮：第 ${last.round} 轮已交接（${last.outcome}）：${last.summary}`
+                : '',
+              '\n请决定：dispatch 派一节，或直接回复说明这一轮不派；不再需要这个任务就 task_update 置 completed。',
+            ]
+              .filter(Boolean)
+              .join('\n')
+            this.notifySupervisor(lane.id, `trigger:${task.id}`, text)
+            // Recorded so a turn that ends can settle exactly the tasks it was shown — and only those.
+            service.markTriggersDelivered(task.id)
+            return { ok: true }
+          } catch (error) {
+            return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+          }
+        },
       })
       this.workspaceScopes.open(workspaceId).effect(() => stop)
     } catch (error) {
@@ -8749,6 +8854,9 @@ ${request.prompt}`;
           role: managed.role === 'supervisor' ? 'supervisor' : 'worker',
           spawnDepth: managed.spawnDepth ?? 0,
           agentId: managed.agentId,
+          // A dispatch reuses this session across rounds, so 「archived」 has to be visible here:
+          // otherwise a closed worker keeps receiving new rounds.
+          ...(managed.isArchived ? { archived: true } : {}),
           // Read from the live managed session: `getSessions()` is a projection
           // that does not carry the task binding.
           ...(managed.taskId ? { taskId: managed.taskId } : {}),
@@ -12822,6 +12930,21 @@ ${request.prompt}`;
     const isViewing = this.isSessionBeingViewed(sessionId, managed.workspace.id)
     const currentFinalMessageId = this.getLastFinalAssistantMessageId(managed.messages)
     const didReceiveNewFinalMessage = !!currentFinalMessageId && currentFinalMessageId !== turnStartFinalMessageId
+
+    /**
+     * Settle the trigger backlog against whether the turn actually answered.
+     *
+     * A trigger is delivered by waking this lane, and 「delivered」 must mean the supervisor read it.
+     * `sendMessage` succeeding proves nothing — the turn can die after receiving it. The record's own
+     * answer to 「did this turn say anything」 is whether a new final message exists, which is the same
+     * fact the unread badge uses, so the two cannot disagree.
+     *
+     * No final reply counts as a failure, and three in a row is reported to the person instead of the
+     * loop continuing silently: a supervisor that stops answering is a fault, not a slow turn.
+     */
+    if (managed.role === 'supervisor' && (managed.supervisorLane ?? 'task') === 'task') {
+      await this.settleTaskTriggers(managed, didReceiveNewFinalMessage)
+    }
 
     if (reason === 'complete' && didReceiveNewFinalMessage) {
       if (isViewing || managed.mobileEngaged) {

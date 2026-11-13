@@ -60,6 +60,13 @@ export interface SupervisorSessionInfo {
    */
   taskId?: string;
   /**
+   * Whether this session was archived.
+   *
+   * A dispatch reuses the worker it opened, round after round; archiving closes it without deleting
+   * it, so without this flag a closed session kept being handed new rounds.
+   */
+  archived?: boolean;
+  /**
    * Sections of that task this session is responsible for.
    *
    * Read when choosing an executor: a session opened for 1.1 can take a later section when the
@@ -670,7 +677,21 @@ export class SupervisorRuntime {
       // the same task's journal, and a board that could not say who owned it.
       // The instruction is a follow-up to recorded work, so it goes to that
       // session; only an absent or dead session means "start a new run".
-      const live = task.currentSessionId ? this.deps.getSession(task.currentSessionId) : null;
+      /**
+       * Reuse only a session this task created, and only while it is still live.
+       *
+       * Two holes in 「the session exists」:
+       *  - it did not have to be this task's session. A stale `currentSessionId` that pointed at
+       *    anything — another task's worker, or the supervisor itself — was reused, and the work was
+       *    handed to a session with no binding to the record that dispatched it.
+       *  - it did not have to be live. Archiving a session keeps it on disk, so an archived worker
+       *    was still 「live」 and each round fed the same closed session instead of starting clean.
+       *
+       * Recurring tasks lean on this: they reuse one worker across rounds, so the identity check is
+       * what keeps 「同一轮」 from meaning 「任意一个叫这个名字的会话」.
+       */
+      const candidate = task.currentSessionId ? this.deps.getSession(task.currentSessionId) : null;
+      const live = candidate && candidate.taskId === task.id && !candidate.archived ? candidate : null;
       existingSessionId = live ? task.currentSessionId : undefined;
       if (task.currentSessionId && !live) {
         this.deps.logDispatch?.(`${task.id}: previous session ${task.currentSessionId} is gone; starting a new run`);

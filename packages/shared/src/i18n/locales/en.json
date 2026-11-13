@@ -1523,6 +1523,7 @@
   "taskboard.close": "Close",
   "taskboard.empty": "No tasks yet. The supervisor creates one when work spans sessions.",
   "taskboard.title": "Tasks",
+  "tasks.supervisorInterrupted": "The task supervisor stopped responding. Please check.",
   "terminal.copyCommand": "Copy command",
   "terminal.copyOutput": "Copy output",
   "terminal.output": "Output",

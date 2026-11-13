@@ -543,7 +543,15 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'list_questions', description: TOOL_DESCRIPTIONS.list_questions, inputSchema: ListQuestionsSchema, executionMode: 'registry', safeMode: 'allow', handler: handleListQuestions },
   { name: 'ask_user', description: TOOL_DESCRIPTIONS.ask_user, inputSchema: AskUserSchema, executionMode: 'registry', safeMode: 'block', handler: handleAskUser },
   { name: 'task_create', description: TOOL_DESCRIPTIONS.task_create, inputSchema: TaskCreateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskCreate },
-  { name: 'create_task', description: TOOL_DESCRIPTIONS.create_task, inputSchema: CreateTaskSchema, executionMode: 'registry', safeMode: 'block', handler: handleCreateTask },
+  //
+  // `roles: ['supervisor']` is load-bearing, not decoration.
+  //
+  // The lane filter below only runs for `role === 'supervisor'`, so the user lane
+  // restriction alone left this tool visible to every worker — a worker could open a task
+  // through the human's door (`create_task`) while its own lane has `task_create`. Observed
+  // in the lane audit: `getSessionToolDefs({ role: 'worker' })` returned `create_task`.
+  //
+  { name: 'create_task', description: TOOL_DESCRIPTIONS.create_task, inputSchema: CreateTaskSchema, executionMode: 'registry', safeMode: 'block', roles: ['supervisor'], handler: handleCreateTask },
   { name: 'task_list', description: TOOL_DESCRIPTIONS.task_list, inputSchema: TaskListSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskList },
   { name: 'task_get', description: TOOL_DESCRIPTIONS.task_get, inputSchema: TaskGetSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskGet },
   { name: 'task_update', description: TOOL_DESCRIPTIONS.task_update, inputSchema: TaskUpdateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskUpdate },

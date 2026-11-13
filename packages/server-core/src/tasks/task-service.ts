@@ -28,6 +28,7 @@ import {
   nextLeg,
   restructurePlan,
   currentStep,
+  isRecurring,
   recordRunResult,
   resumeRefusal,
   saveTask,
@@ -51,6 +52,7 @@ import {
   type PlanStepStatus,
   type ArtifactProbe,
   type Handoff,
+  type PendingTrigger,
   type Task,
   type TaskAcceptanceVerdict,
   type TaskDecision,
@@ -123,6 +125,14 @@ export interface TaskServiceDeps {
    * queueing a second pass, so a burst of writes costs one pass.
    */
   pokeWatchdog?: () => void;
+  /**
+   * The task reached a terminal state (completed / canceled / failed).
+   *
+   * Lives here rather than in the renderer because the worker session belongs to the runtime, not to
+   * the record: a task that is over leaves behind sessions nobody will reuse, and the record cannot
+   * archive them. Called once per transition into a terminal state, not on every write.
+   */
+  onTaskTerminal?: (task: Task) => void;
   now?: () => number;
   /** Id generator (tests inject a stable one). */
   newId?: () => string;
@@ -161,6 +171,15 @@ export function isSpinningInPlace(task: Task): boolean {
 
 /** Context use above which the next run starts cold. */
 export const ROTATE_CONTEXT_THRESHOLD = 0.7;
+
+/**
+ * How long a fired trigger holds the round before it expires.
+ *
+ * Longer than a supervisor turn by design (those run on a ~90 second budget), so a normal turn never
+ * races its own lock. Short enough that a turn which died after claiming does not block the task
+ * until somebody notices.
+ */
+export const TRIGGER_CLAIM_MS = 3 * 60 * 1000;
 
 export interface CreateTaskRequest {
   name: string;
@@ -478,12 +497,18 @@ export class TaskService {
         ? task.sessionIds
         : [...task.sessionIds, sessionId],
       stats: {
+        // Spread first: this literal is rebuilt on every start, so any field it did not name was
+        // silently erased — `rounds` was reset to nothing on the second round of a recurring task,
+        // which made every round look like the first one.
+        ...task.stats,
         runs: (task.stats?.runs ?? 0) + (isBind ? 0 : 1),
         activeMs: task.stats?.activeMs ?? 0,
         lastHeartbeatAt: now,
         lockSessionId: sessionId,
         runStartedAt: now,
         lastTriggeredAt: now,
+        // A real claim is not pending any more; the deadline only guards the placeholder.
+        lockDeadlineAt: undefined,
       },
       updatedAt: now,
     };
@@ -693,6 +718,60 @@ export class TaskService {
   }
 
   /**
+   * Close one round of a recurring task and leave it ready for the next trigger.
+   *
+   * Three things have to happen together, and each one was a bug on its own before:
+   *
+   *  1. The plan is snapshotted to the journal, then reset to `todo`. Without the reset the second
+   *     round cannot be dispatched at all — `dispatch` refuses a step already recorded as done
+   *     (`supervisor-runtime.ts:484`) and refuses a task whose plan is fully done (`:587`), so a
+   *     round that ended with 1.1 done made minute two unreachable in both directions.
+   *  2. The snapshot keeps the round readable. A reset that only erased the status would answer
+   *     「so what did that round do」 with nothing, and the board would show an untouched plan on a
+   *     task that just worked.
+   *  3. The record goes back to `backlog`, which is 「registered, not running」. `completed` is
+   *     where triggers stop; `running` would claim a lock nobody holds.
+   *
+   * The supervisor decides whether the task is still wanted — that decision is a `task_update`,
+   * not a side effect of a round succeeding.
+   */
+  private closeRound(task: Task, options: { now: number; summary: string }): Task {
+    const { now, summary } = options;
+    const plan = task.spec?.plan ?? [];
+    const stats = task.stats ?? { runs: 0, activeMs: 0 };
+    const round = (stats.rounds?.ok ?? 0) + (stats.rounds?.failed ?? 0) + 1;
+
+    const snapshot = plan.map((step) => ({ id: step.id, title: step.title, status: step.status }));
+    appendJournal(this.root, task.id, {
+      type: 'round_reset',
+      at: now,
+      data: { round, outcome: 'delivered', summary, plan: snapshot },
+    });
+
+    const resetPlan = plan.map((step) => ({
+      ...step,
+      status: 'todo' as const,
+      // `note` survives: it is the evidence for why the step counted as done last time (「跑过 pnpm
+      // test，12 passed」), and the next round starts from the same instruction. Clearing it threw away
+      // the only on-record reason anything was believed, leaving just the journal.
+      executedBy: undefined,
+      updatedAt: now,
+    }));
+
+    const closed: Task = {
+      ...task,
+      spec: task.spec ? { ...task.spec, plan: resetPlan } : task.spec,
+      stats: {
+        ...stats,
+        rounds: { ok: (stats.rounds?.ok ?? 0) + 1, failed: stats.rounds?.failed ?? 0 },
+        lastRound: { round, finishedAt: now, outcome: 'delivered', summary },
+      },
+    };
+
+    return applyTransition(closed, 'backlog', { now }).task;
+  }
+
+  /**
    * The one shape of "the run is over": release the lock, bank the active time.
    *
    * Pure on the record — the side effects (stopping the session, disposing the
@@ -725,6 +804,186 @@ export class TaskService {
    * go through `reportHandoff`, which composes this with the hand-off bookkeeping;
    * a failed spawn or a lost leg ends here.
    */
+  /**
+   * Record a fired trigger and, if nothing is running, claim the round for the supervisor.
+   *
+   * Returns the task when the claim succeeded (the caller then wakes the supervisor), or null when
+   * the trigger was only accumulated. Accumulation is not an error: a task that is running, waiting
+   * for a person, or out of budget must not be restarted underneath itself — and the trigger still
+   * happened, so dropping it would lose the fact that minute 17 fired at all.
+   */
+  claimTrigger(id: string, trigger: PendingTrigger): Task | null {
+    const task = this.require(id);
+    const now = this.now();
+    const accumulated = [...(task.stats?.pendingTriggers ?? []), trigger];
+
+    if (task.status === 'completed' || task.status === 'canceled') return null;
+
+    /**
+     * A paused task accumulates and nothing else.
+     *
+     * The pause that matters is 「有人在回答一个问题」, and waking the supervisor there would ask it
+     * to dispatch around a decision the person has not given yet — the directive gate would refuse
+     * the dispatch, so all it buys is a wasted turn and a supervisor reading 「继续吗」 about a
+     * question it already asked. Whatever the trigger wanted is still owed, so it is recorded.
+     *
+     * Deliberately not derived from the lock: a pause written by the service releases the run lock
+     * (the run is over), so 「lock still held」 cannot be the test for 「waiting for a person」.
+     */
+    if (task.status === 'paused') {
+      const next: Task = {
+        ...task,
+        stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), pendingTriggers: accumulated },
+      };
+      this.save(next);
+      appendJournal(this.root, id, { type: 'trigger_accumulated', at: now, data: trigger });
+      return null;
+    }
+
+    /**
+     * A live run keeps the round.
+     */
+    const held = task.stats?.lockSessionId;
+    if (held) {
+      const next: Task = { ...task, stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), pendingTriggers: accumulated } };
+      this.save(next);
+      appendJournal(this.root, id, { type: 'trigger_accumulated', at: now, data: trigger });
+      return null;
+    }
+
+    const claim = this.startRun(id, `pending:${trigger.detail ?? trigger.kind}`);
+    if (!claim.ok) {
+      const next: Task = { ...task, stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), pendingTriggers: accumulated } };
+      this.save(next);
+      appendJournal(this.root, id, { type: 'trigger_accumulated', at: now, data: { ...trigger, refused: claim.reason } });
+      return null;
+    }
+
+    const claimed: Task = {
+      ...claim.task,
+      stats: {
+        ...(claim.task.stats ?? { runs: 0, activeMs: 0 }),
+        pendingTriggers: accumulated,
+        lockDeadlineAt: now + TRIGGER_CLAIM_MS,
+      },
+    };
+    this.save(claimed);
+    appendJournal(this.root, id, { type: 'trigger_claimed', at: now, data: trigger });
+    return claimed;
+  }
+
+  /** Push a pending claim's deadline out, for a supervisor turn that is still working. */
+  extendTriggerClaim(id: string, deadline: number): void {
+    const task = this.require(id);
+    this.save({ ...task, stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), lockDeadlineAt: deadline } });
+  }
+
+  /** Give the claim back without a verdict; the backlog stays so the trigger is not lost. */
+  releaseTriggerClaim(id: string, reason: string): void {
+    const task = this.require(id);
+    const now = this.now();
+    this.save(this.endTriggerClaim(task, now), { silentTerminal: true });
+    this.disposeRun(id, 'ended');
+    appendJournal(this.root, id, { type: 'trigger_claim_released', at: now, data: { reason } });
+  }
+
+  /**
+   * The claim is over and nothing ran.
+   *
+   * Only a `pending:` claim is owned by this path. A real run lock belongs to the worker: releasing
+   * it here would free a round that is still executing, which is the exact concurrency the lock
+   * exists to prevent — and the caller that clears a backlog runs right after a supervisor turn that
+   * may have just dispatched.
+   */
+  private endTriggerClaim(task: Task, now: number): Task {
+    const held = task.stats?.lockSessionId;
+    if (held && !held.startsWith('pending:')) return task;
+
+    const released = this.releaseRunRecord(task, now);
+    const cleared: Task = {
+      ...released,
+      stats: { ...(released.stats ?? { runs: 0, activeMs: 0 }), lockDeadlineAt: undefined },
+    };
+    return released.status === 'running' ? applyTransition(cleared, 'backlog', { now }).task : cleared;
+  }
+
+  expireTriggerClaim(id: string, now: number): void {
+    const task = this.require(id);
+    const released = this.endTriggerClaim(task, now);
+    const failures = (task.stats?.wakeFailures ?? 0) + 1;
+    this.save({ ...released, stats: { ...(released.stats ?? { runs: 0, activeMs: 0 }), wakeFailures: failures } }, { silentTerminal: true });
+    this.disposeRun(id, 'ended');
+    appendJournal(this.root, id, { type: 'wake_failed', at: now, data: { wakeFailures: failures } });
+  }
+
+  /** The trigger backlog, as the one paragraph the supervisor reads. */
+  triggerSummary(id: string): string {
+    const stats = this.require(id).stats;
+    const pending = stats?.pendingTriggers ?? [];
+    if (pending.length === 0) return '';
+    const group = (kind: PendingTrigger['kind']) => pending.filter((entry) => entry.kind === kind);
+    const clock = (at: number) => new Date(at).toTimeString().slice(0, 5);
+    const lines: string[] = [];
+    for (const [kind, label] of [['cron', '定时'], ['event', '事件'], ['manual', '手动']] as const) {
+      const items = group(kind);
+      if (items.length === 0) continue;
+      const detail = kind === 'cron' ? `（${items[0]!.detail ?? ''}）` : '';
+      lines.push(`- ${label}：${items.length} 次（${clock(items[0]!.at)}–${clock(items[items.length - 1]!.at)}）${detail}`);
+    }
+    return lines.join('\n');
+  }
+
+  /**
+   * The supervisor read the backlog. Clear it — and give the claim back.
+   *
+   * Clearing the list alone left the pending claim behind with its deadline erased, so nothing could
+   * expire it either: a supervisor that answered 「这一轮不派」 held the task's round forever and no
+   * later trigger could start one. The reply is an answer, so the claim it answered ends here.
+   */
+  /**
+   * The backlog went out in a message the supervisor will read.
+   *
+   * Called by both delivery paths — the trigger wake and the end-of-round report — so settling later
+   * can tell 「this turn was shown these」 from 「these were only recorded」.
+   */
+  markTriggersDelivered(id: string, now = this.now()): void {
+    const task = this.require(id);
+    if (!task.stats?.pendingTriggers?.length) return;
+    this.save(
+      { ...task, stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), triggersDeliveredAt: now } },
+      { silentTerminal: true },
+    );
+  }
+
+  clearTriggers(id: string, now = this.now()): void {
+    const task = this.require(id);
+    if (!task.stats?.pendingTriggers?.length) return;
+    const cleared = this.endTriggerClaim(task, now);
+    this.save(
+      {
+        ...cleared,
+        stats: {
+          ...(cleared.stats ?? { runs: 0, activeMs: 0 }),
+          pendingTriggers: [],
+          wakeFailures: 0,
+          // Reset with the list it describes: a stale mark made the NEXT round's backlog look
+          // already-delivered, so a turn that never saw it could settle it.
+          triggersDeliveredAt: undefined,
+        },
+      },
+      { silentTerminal: true },
+    );
+    appendJournal(this.root, id, { type: 'trigger_delivered', at: now, data: { cleared: 1 } });
+  }
+  /** A turn with no final reply leaves the backlog owed; three in a row is a fault. */
+  noteWakeWithoutReply(id: string, now = this.now()): number {
+    const task = this.require(id);
+    const failures = (task.stats?.wakeFailures ?? 0) + 1;
+    this.save({ ...task, stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), wakeFailures: failures } });
+    appendJournal(this.root, id, { type: 'wake_without_reply', at: now, data: { wakeFailures: failures } });
+    return failures;
+  }
+
   endRun(id: string, outcome: { ok: boolean; error?: string; sessionId?: string }): Task {
     const task = this.require(id);
     const now = this.now();
@@ -734,8 +993,21 @@ export class TaskService {
     const next: Task = {
       ...released,
       lifecycle: recordRunResult(task.lifecycle, outcome.ok, now, outcome.error),
+      /**
+       * A round that failed is a fact the person can use.
+       *
+       * `rounds.ok` is written when a round closes, so without this half the counter only ever said
+       * 「worked twice」 on a task that also died twice — and the failure counter stayed zero on every
+       * task that had only ever failed.
+       */
+      stats: {
+        ...(released.stats ?? { runs: 0, activeMs: 0 }),
+        ...(outcome.ok
+          ? {}
+          : { rounds: { ok: stats.rounds?.ok ?? 0, failed: (stats.rounds?.failed ?? 0) + 1 } }),
+      },
     };
-    this.save(next);
+    this.save(next, { silentTerminal: true });
     this.disposeRun(id, 'ended');
     appendJournal(this.root, id, {
       type: 'run_ended',
@@ -1875,7 +2147,20 @@ export class TaskService {
         });
       }
     } else if (accepted && handoff.outcome === 'delivered') {
-      next = applyTransition(next, 'completed', { now }).task;
+      /**
+       * A recurring task finished a *round*, not the task.
+       *
+       * 「每分钟发一次你好」 ran once and closed: `delivered` wrote `completed`, and `completed` is
+       * where every trigger stops (the scheduler skips completed/canceled), so minute two never
+       * happened. The person asked for a loop and received one item.
+       *
+       * So the record is reset and returned to `backlog` — 「registered, not running」 — and the
+       * supervisor, which already receives this report, decides whether the task is still wanted.
+       * Closing it is a decision, not an automatic consequence of one round succeeding.
+       */
+      next = isRecurring(next)
+        ? this.closeRound(next, { now, summary: handoff.summary })
+        : applyTransition(next, 'completed', { now }).task;
     } else if (verifyLimitReached) {
       // The acceptance cap is a decision for a person, not another judge round.
       next = applyTransition(next, 'paused', { now, pauseReason: 'verify_exhausted' }).task;
@@ -2083,6 +2368,19 @@ export class TaskService {
       const nextHint = suggestedStep
         ? `。计划还剩 ${openSteps.length} 步，下一步 ${suggestedStep.step.id}（${suggestedStep.agent ?? '未指定 owner'}）——除非用户的话把边界划在这里，否则直接 dispatch 派发它；只有用户的边界已到、或必须他拍板时才问他。`
         : ''
+      /**
+       * Triggers that fired during the round ride along with the report.
+       *
+       * The point of accumulating them is that this turn is where the supervisor can act on them:
+       * the round is over, the lock is free, and the answer 「not this one, but keep going」 belongs
+       * here. Deferring them to the next tick would ask the same question a minute later with the
+       * person waiting in between.
+       */
+      const triggerBacklog = this.triggerSummary(id)
+      if (triggerBacklog) this.markTriggersDelivered(id, now)
+      const triggerHint = triggerBacklog
+        ? `。\n\n本轮期间累计的触发：\n${triggerBacklog}\n要接着跑就 dispatch；不跑也没关系，下一轮到点会再问你。`
+        : ''
       this.deps.wakeSupervisor(
         next.supervisorSessionId,
         verifyLimitReached
@@ -2090,8 +2388,8 @@ export class TaskService {
           : pending
             ? `${id} 现在需要用户拍板（${pending.label}）：${pending.reason} 请用 report_to_user 带 kind=decision 告知用户。`
             : accepted
-              ? `${id} 交接通过：${handoff.summary}${nextHint}`
-              : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
+              ? `${id} 交接通过：${handoff.summary}${nextHint}${triggerHint}`
+              : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}${triggerHint}`,
         // One subject per task and outcome: a second failure notice about the same task is the same
         // fact restated, and a queue that stacks them makes the supervisor act twice.
         `${id}:${verifyLimitReached ? 'verify-limit' : pending ? 'decision' : accepted ? 'handoff-pass' : 'handoff-fail'}`,
@@ -2299,6 +2597,18 @@ export class TaskService {
       if (task.status !== 'running') continue;
       const lockId = task.stats?.lockSessionId ?? task.currentSessionId;
       /**
+       * A trigger claim is not a run that died.
+       *
+       * `pending:…` is a placeholder for a round the supervisor has not started yet — it never had a
+       * session, so `sessionExists` is false by construction. Sweeping it up as `process_lost` paused
+       * the task at startup, and a paused task only accumulates triggers: the round the person was
+       * waiting for became a pause nobody would release. The same misread cost a live run on the
+       * watchdog side; this is the startup copy of it.
+       *
+       * Left alone, the claim expires on its own deadline and the next tick asks again.
+       */
+      if (lockId?.startsWith('pending:')) continue;
+      /**
        * A recovered run re-enters the registry: it is as much a run as a fresh
        * one, and its disposers (including the session stop on a later pause) are
        * owed the same as a run claimed by `startRun`.
@@ -2358,7 +2668,10 @@ export class TaskService {
    * record, and the record is what gets stored. Callers still see the derived value because they
    * are handed the same object they saved — see the `save` result threading below.
    */
-  private save(task: Task, options?: { poke?: boolean }): Task {
+  /** Task ids whose terminal state has already been announced to the host. */
+  private readonly terminalAnnounced = new Set<string>();
+
+  private save(task: Task, options?: { poke?: boolean; silentTerminal?: boolean }): Task {
     const derived = this.classifyPauseReason(syncDecisionMirror(task));
     saveTask(this.root, derived);
     this.notifyChanged();
@@ -2379,6 +2692,30 @@ export class TaskService {
      * is the only event that can invalidate another task's reason, and it happens once.
      */
     if (derived.status === 'completed') this.releaseDependents(derived.id);
+    /**
+     * A finished task leaves nothing to reuse.
+     *
+     * The worker session outlives the round — that is the point of reusing it — but not the task:
+     * once the record is terminal, every further round is impossible and the session is just a
+     * closed conversation still listed as active. The record cannot archive it, so it asks the host
+     * that owns sessions.
+     */
+    /**
+     * Announce a terminal state once, not on every write.
+     *
+     * `save` is the only write path, so a condition on 「is terminal」 alone fired on every heartbeat,
+     * every plan edit and every watchdog bookkeeping write on a finished task — the host then re-ran
+     * its archiving each time. The transition is what the host cares about; the flag is cleared as
+     * soon as the task leaves the terminal set, so a reopened task can be announced again.
+     */
+    if (TERMINAL_STATUSES.includes(derived.status) && !options?.silentTerminal) {
+      if (!this.terminalAnnounced.has(derived.id)) {
+        this.terminalAnnounced.add(derived.id);
+        this.deps.onTaskTerminal?.(derived);
+      }
+    } else {
+      this.terminalAnnounced.delete(derived.id);
+    }
     return derived;
   }
 

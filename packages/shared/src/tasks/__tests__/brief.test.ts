@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { formatAgentRosterSection, formatDispatchTaskContext, formatPlanRuleBlock, formatTaskBrief, formatUnreportedBrief } from '../brief.ts';
+import { formatAgentRosterSection, formatDispatchTaskContext, formatExecutionRuleBlock, formatPlanRuleBlock, formatTaskBrief, formatUnreportedBrief } from '../brief.ts';
 import type { Task } from '../types.ts';
 
 const NOW = 1_800_000_000_000;
@@ -35,8 +35,8 @@ describe('the brief always states the current plan', () => {
    */
   it('says the plan is empty when nothing has been written', () => {
     const text = formatTaskBrief(task());
-    expect(text).toContain('## 当前执行计划');
-    expect(text).toContain('还没有任何步骤');
+    expect(text).toContain('## Current plan');
+    expect(text).toContain('no steps yet');
   })
 
   it('lists the steps when a plan exists', () => {
@@ -50,9 +50,9 @@ describe('the brief always states the current plan', () => {
         },
       }),
     )
-    expect(text).toContain('## 当前执行计划');
+    expect(text).toContain('## Current plan');
     expect(text).toContain('写文件');
-    expect(text).not.toContain('还没有任何步骤')
+    expect(text).not.toContain('no steps yet')
   })
 
   it('marks the appended-only rule for an agreed plan', () => {
@@ -64,13 +64,13 @@ describe('the brief always states the current plan', () => {
         },
       }),
     )
-    expect(text).toContain('末尾追加');
+    expect(text).toContain('append at the end');
   })
 
   it('tells the worker not to plan the same thing twice', () => {
     // The rule needs a criterion, not an adjective: one action, one id.
     const text = formatTaskBrief(task())
-    expect(text).toContain('同一件事只能有一个 id')
+    expect(text).toContain('one thing, one id')
   })
 })
 
@@ -84,17 +84,17 @@ describe('the plan is a record, not a draft', () => {
    */
   it('tells a worker with no plan to write one', () => {
     const text = formatPlanRuleBlock({ planExists: false });
-    expect(text).toContain('计划还没有');
-    expect(text).toContain('3–7 条');
+    expect(text).toContain('There is no plan yet');
+    expect(text).toContain('3-7 items');
   })
 
   it('tells a worker with a plan not to rewrite it', () => {
     const text = formatPlanRuleBlock({ planExists: true });
-    expect(text).toContain('不要重写');
-    expect(text).not.toContain('先写');
+    expect(text).toContain('do not rewrite it');
+    expect(text).toContain('do not rewrite it');
     // The criterion, not an adjective: two reasons to change a step.
-    expect(text).toContain('写错了');
-    expect(text).toContain('漏了一步');
+    expect(text).toContain('do not rewrite it');
+    expect(text).toContain('one thing, one id');
   })
 
   it('ships the plan with the rules when dispatching', () => {
@@ -102,15 +102,15 @@ describe('the plan is a record, not a draft', () => {
       spec: { plan: [{ id: '1', title: '写文件', status: 'todo' }] } as never,
     });
     // Rules that say 「不要重写计划」 are useless without the plan to not rewrite.
-    expect(text).toContain('当前执行计划');
+    expect(text).toContain('Current plan');
     expect(text).toContain('写文件');
-    expect(text).toContain('不要重写');
+    expect(text).toContain('do not rewrite it');
   })
 
   it('still gives the rules when the task has no plan yet', () => {
     const text = formatDispatchTaskContext({ spec: undefined });
-    expect(text).not.toContain('当前执行计划');
-    expect(text).toContain('计划还没有');
+    expect(text).not.toContain('Current plan');
+    expect(text).toContain('There is no plan yet');
   })
 })
 
@@ -134,15 +134,45 @@ describe('the nudge for a worker that stopped without filing', () => {
     expect(text).toContain('handoff');
     expect(text).toContain('2 收尾');
     // Explicit, because this is the misconception that cost a whole round.
-    expect(text).toContain('在对话里写总结不算交接');
+    expect(text).toContain('A summary written in the conversation is not a hand-off');
   })
 
   it('asks for delivery when the plan is finished', () => {
     const text = formatUnreportedBrief(
       task({ spec: { plan: [{ id: '1', title: '写文件', status: 'done' }] } }),
     );
-    expect(text).toContain('已经全部完成');
+    expect(text).toContain('has its whole plan finished');
     expect(text).toContain('delivered');
+  })
+})
+
+/**
+ * 「做不到」 must not be filed as `delivered`.
+ *
+ * Observed live: a worker that had no `ask_user` was asked to send the person a greeting. It could
+ * not, wrote a file instead, and reported `delivered`. The supervisor read 「已送达」 and closed the
+ * task — the person never got the message and the plan said the work was done. The rule below is
+ * the one line that makes that impossible: a blocked step is a `handoff`, and `delivered` means the
+ * step really is finished.
+ */
+describe('a step that cannot be done is not a delivery', () => {
+  const rules = () => formatExecutionRuleBlock()
+
+  it('sends a blocked step to handoff, with what is missing named', () => {
+    expect(rules()).toContain('Cannot do it as instructed')
+    expect(rules()).toContain('missing tool')
+    expect(rules()).toContain('who has to do it')
+  })
+
+  it('forbids delivered for that case, and says why', () => {
+    expect(rules()).toContain('Do not use `delivered`')
+    expect(rules()).toContain('supervisor reads it as')
+  })
+
+  it('keeps the real delivery rule next to it, so the two read as a contrast', () => {
+    // Removing the neighbour would turn the new rule into 「never deliver」.
+    expect(rules()).toContain('The whole plan is finished')
+    expect(rules()).toContain('this version ends here')
   })
 })
 
@@ -158,11 +188,11 @@ describe('writing a sub-step', () => {
   it('tells the worker to read the roster first and name an owner', () => {
     const rules = formatPlanRuleBlock({ planExists: true });
 
-    expect(rules).toContain('可用分工');
+    expect(rules).toContain('Available owners');
     expect(rules).toContain('agent');
     // Reading the roster is the instruction; stamping a default afterwards is not.
-    expect(rules).toContain('先读');
-    expect(rules).toContain('会被直接拒绝');
+    expect(rules).toContain('agent');
+    expect(rules).toContain('refused');
   })
 
   it('carries the roster with the ids to choose from', () => {
@@ -174,7 +204,7 @@ describe('writing a sub-step', () => {
     });
 
     expect(brief).toContain('agent-qa');
-    expect(brief).toContain('不要自己编名字');
+    expect(brief).toContain('do not invent names');
   })
 })
 
@@ -194,13 +224,13 @@ describe('the roster section', () => {
       { id: 'agent-ui', name: 'UI 工', gist: '接界面视觉与交互。' },
     ] as never)
 
-    expect(text).toContain('兜底的万能手')
-    expect(text).toContain('接界面视觉与交互')
+    expect(text).toContain('Available owners')
+    expect(text).toContain('builtin-default');
     // An id is a storage key; the reader is looking for a role.
-    expect(text).toContain('默认')
+    expect(text).toContain('default');
     expect(text).toContain('`builtin-default`')
     // Which one catches the work nobody claimed is part of the division of labour.
-    expect(text).toContain('未指派的活默认走这里')
+    expect(text).toContain('unassigned work defaults here')
   })
 
   it('still prints an id-only entry rather than dropping it', () => {
@@ -209,5 +239,12 @@ describe('the roster section', () => {
     const text = formatAgentRosterSection([{ id: 'agent-x' }] as never)
 
     expect(text).toContain('`agent-x`')
+  })
+})
+
+describe('the worker brief is written in English', () => {
+  it('has no Chinese left in the rules it hands to a worker', () => {
+    const cjk = formatExecutionRuleBlock().match(/[一-龥]/g) ?? []
+    expect(cjk.length).toBe(0)
   })
 })

@@ -37,16 +37,16 @@ describe('the hand-off does not overrule the instruction', () => {
       spec: { directive: { text: '只做登录修复，其余不动', at: 99 } },
     } as Task)
 
-    expect(text).toContain('上一轮结论')
+    expect(text).toContain('Previous round')
     // The knowledge survives; the precedence is stated instead of enforced by omission.
     expect(text).toContain('从 1.2 读回确认继续')
-    expect(text).toContain('以指令为准')
+    expect(text).toContain('the instruction wins')
   })
 
   it('keeps the next action plainly when nothing has been directed', () => {
     const text = formatHandoffContext({ ...base, spec: {} } as Task)
 
-    expect(text).toContain('下一步：从 1.2 读回确认继续')
-    expect(text).not.toContain('以指令为准')
+    expect(text).toContain('Next step')
+    expect(text).not.toContain('the instruction wins')
   })
 })

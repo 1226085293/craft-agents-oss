@@ -119,5 +119,17 @@ describe('supervisor lanes', () => {
     // Supervisor-only tools stay out regardless of lane.
     expect(withLane.has('dispatch')).toBe(false)
     expect(withLane.has('report_to_user')).toBe(false)
+    /**
+     * The human's door is not a worker's door.
+     *
+     * `create_task` is the relay that replaces paraphrasing: it takes the person's words
+     * verbatim and lets the system route them. The lane filter never runs for a worker, so the
+     * only thing keeping it out of a worker's table is `roles: ['supervisor']` on the def — and
+     * while that was missing, `getSessionToolNames({ role: 'worker' })` returned it. A worker
+     * holding it can open a task inside the person's own conversation lane, bypassing the
+     * dispatch gate on its own task.
+     */
+    expect(plain.has('create_task')).toBe(false)
+    expect(withLane.has('create_task')).toBe(false)
   })
 })

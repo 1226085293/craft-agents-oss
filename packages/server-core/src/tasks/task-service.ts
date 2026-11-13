@@ -126,6 +126,16 @@ export interface TaskServiceDeps {
    */
   pokeWatchdog?: () => void;
   /**
+   * Run a scheduler pass now instead of at its next tick.
+   *
+   * The scheduler looks once a minute, which is right for 「is this cron due」 and wrong for 「a round
+   * just ended, the trigger that piled up behind it can start now」. Measured on a live per-minute
+   * task: the average wait between a round closing and the next claim was **66 seconds** — a full
+   * tick of pure idle per round, which is why the observed interval drifted to two minutes instead of
+   * the one that was asked for.
+   */
+  pokeScheduler?: () => void;
+  /**
    * The task reached a terminal state (completed / canceled / failed).
    *
    * Lives here rather than in the renderer because the worker session belongs to the runtime, not to
@@ -793,7 +803,10 @@ export class TaskService {
       },
     };
 
-    return applyTransition(closed, 'backlog', { now }).task;
+    const closedTask = applyTransition(closed, 'backlog', { now }).task;
+    // The round is over and the trigger backlog is not: let it start now rather than at the next tick.
+    this.deps.pokeScheduler?.();
+    return closedTask;
   }
 
   /**

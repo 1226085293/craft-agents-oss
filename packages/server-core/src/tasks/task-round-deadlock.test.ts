@@ -116,3 +116,41 @@ describe('a pause with nothing refusing it does not block the next round', () =>
     expect(svc.get(task.id)!.stats?.pendingTriggers?.length).toBe(1);
   })
 })
+
+describe('a closed round does not wait for the next tick', () => {
+  it('asks the scheduler to look now', async () => {
+    // Measured live: 66 seconds of idle per round between 「round closed」 and 「next claim」, because
+    // the scheduler only looks once a minute. That idle is the difference between the one-minute
+    // cadence the person set and the two-minute one they saw.
+    let poked = 0;
+    const svc = new TaskService({
+      workspaceRoot: root,
+      sessionExists: () => false,
+      wakeSupervisor: () => undefined,
+      pokeScheduler: () => {
+        poked += 1;
+      },
+    });
+    const task = recurring(svc);
+    const artifact = join(root, 'round.md');
+    writeFileSync(artifact, 'hello', 'utf-8');
+
+    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' });
+    svc.startRun(task.id, 'sess_w1');
+    svc.updatePlan(task.id, { id: '1.1', status: 'done' });
+    svc.updatePlan(task.id, { id: '1.2', status: 'done' });
+    await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'delivered',
+        summary: '本轮完成',
+        stepId: '1.2',
+        artifacts: [{ path: artifact }],
+        verify: { ran: ['cat round.md'], passed: true },
+      },
+      'sess_w1',
+    );
+
+    expect(poked).toBe(1);
+  })
+})

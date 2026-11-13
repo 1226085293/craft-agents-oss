@@ -109,7 +109,7 @@ function generateShortId(): string {
 }
 import { SupervisorNoticeQueue } from './supervisor-notices.ts'
 import { startWatchdog, type WatchdogLoop } from '../tasks/task-watchdog.ts'
-import { startTaskScheduler, runEventPass } from '../tasks/task-scheduler.ts'
+import { startTaskScheduler, runEventPass, runCronPass, type TaskRunnerDeps } from '../tasks/task-scheduler.ts'
 import { startPageRefreshScheduler } from '../pages/page-refresh-scheduler.ts'
 import { migrateAutomationCronTasks } from '../tasks/automation-migration.ts'
 import { buildJudgePrompt, parseJudgeVerdict } from '../tasks/task-judge.ts'
@@ -7880,6 +7880,9 @@ ${request.prompt}`;
 
   /** One task service per workspace (lazy; storage is file-based). */
   private readonly taskServices = new Map<string, TaskService>()
+  /** Per-workspace 「run a scheduler pass now」, registered when the loop starts. */
+  private readonly taskSchedulerPokers = new Map<string, () => void>()
+  private readonly taskSchedulerLastPass = new Map<string, number>()
   /** One supervisor runtime per workspace (holds the event backlog). */
   private readonly supervisorRuntimes = new Map<string, SupervisorRuntime>()
   /**
@@ -8019,6 +8022,20 @@ ${request.prompt}`;
     }
   }
 
+  /**
+   * Ask the scheduler to look now.
+   *
+   * Called when a round closes: the trigger that piled up behind it can start immediately instead of
+   * waiting for the next minute tick. Measured live: 66 seconds of idle per round from that wait
+   * alone — the gap between a one-minute cadence and the two-minute one the person saw.
+   *
+   * A workspace whose loop is not running has no poker, and that is not an error: the next tick
+   * still covers it.
+   */
+  private pokeTaskScheduler(workspaceId: string): void {
+    this.taskSchedulerPokers.get(workspaceId)?.()
+  }
+
   /** Task service for a workspace. */
   getTasks(workspaceId: string): TaskService {
     const cached = this.taskServices.get(workspaceId)
@@ -8048,6 +8065,14 @@ ${request.prompt}`;
         }
       },
       sessionExists: (sessionId) => this.sessions.has(sessionId),
+      /**
+       * A closed round does not wait for the next minute.
+       *
+       * Measured on a live per-minute task: 66 seconds of idle between 「round closed」 and 「next claim」,
+       * because the scheduler only looks once a minute. That idle is the difference between a
+       * one-minute cadence and the two-minute one the person actually saw.
+       */
+      pokeScheduler: () => this.pokeTaskScheduler(workspace.id),
       wakeSupervisor: (sessionId, text, key) => {
         // The supervisor cannot see who spoke. Every system nudge therefore names
         // its origin: a message that looks like the user talking is acted on as an
@@ -8349,7 +8374,7 @@ ${request.prompt}`;
       sessionLog.warn('task scheduler skipped: task service did not activate', { workspaceId })
     }
     if (watchdogReady) try {
-      const stop = startTaskScheduler({
+      const runner: TaskRunnerDeps = {
         tasks: service,
         listTasks: () => service.list(),
         spawnRun: (task, reason) => this.spawnTaskRun(workspaceId, task, reason),
@@ -8385,8 +8410,28 @@ ${request.prompt}`;
             return { ok: false, reason: error instanceof Error ? error.message : String(error) }
           }
         },
+      }
+      /**
+       * The pass a closed round asks for.
+       *
+       * Debounced to 1.5s so a burst of task writes costs one pass, and registered only once the
+       * runner exists — `getTasks` can be reached before the scheduler starts, and a poke with no
+       * runner must be a no-op rather than an exception.
+       */
+      this.taskSchedulerPokers.set(workspaceId, () => {
+        const at = Date.now()
+        if (at - (this.taskSchedulerLastPass.get(workspaceId) ?? 0) < 1500) return
+        this.taskSchedulerLastPass.set(workspaceId, at)
+        void runCronPass(runner, new Date()).catch((error) => {
+          sessionLog.warn('[task-scheduler] immediate pass failed', { error })
+        })
       })
-      this.workspaceScopes.open(workspaceId).effect(() => stop)
+      const stop = startTaskScheduler(runner)
+      this.workspaceScopes.open(workspaceId).effect(() => {
+        stop()
+        this.taskSchedulerPokers.delete(workspaceId)
+        this.taskSchedulerLastPass.delete(workspaceId)
+      })
     } catch (error) {
       sessionLog.warn('failed to start the task scheduler', { error })
     }

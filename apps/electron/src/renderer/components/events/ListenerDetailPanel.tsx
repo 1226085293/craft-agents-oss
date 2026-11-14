@@ -4,8 +4,9 @@
  * Layout is five blocks, top to bottom, one unified section container each
  * (block title + border rhythm):
  *
- *   1. Title bar — name + version + status light …… 停用/启用 button
- *   2. Segmented switch — 详情 / 进程日志 (two-way)
+ *   1. Title bar — icon + name, version right after it, then the status
+ *      light; the 停用/启用 button alone on the far right
+ *   2. Segmented switch — 详情 / 进程日志 (two-way, real tab semantics)
  *   3. 详情 tab:
  *      · 介绍 — description + README tail + errors
  *      · 配置 — schema-driven fields (string / number / boolean), required vs
@@ -13,13 +14,14 @@
  *        filled, expanded + highlighted when one is missing; a
  *        plugin-provided HTML config UI (manifest `ui`) renders in a
  *        sandboxed iframe that receives Craft's day/night mode + palette
- *      · 依赖 — declared deps (Craft probed) + plugin-reported deps,
- *        detection logic untouched, restyled into the new layout
+ *      · 依赖 — one region, two sources: what Craft probed from the manifest
+ *        (with install actions) and what the plugin reports through its own
+ *        control service. Detection logic untouched, layout only.
  *      · 内容 / 接收地址 — setup steps and the ingest endpoint
  *   4. 进程日志 tab — live log tail + process state (polled, probe-free)
  *
- * The status light is the same component + mapping as the plugin list, so
- * the two columns never disagree.
+ * The status light is the detail page's reading (the plugin list draws none),
+ * and colour is never the only cue: every instance carries its sentence.
  */
 
 import * as React from 'react'
@@ -73,7 +75,7 @@ function Section({
   children?: React.ReactNode
 }): React.ReactElement {
   return (
-    <section className="border-b border-border">
+    <section className="border-b border-border last:border-b-0">
       <div className="flex items-center gap-2 px-4 pt-3 pb-2">
         <div className="text-xs font-medium text-foreground/80 min-w-0 truncate">{title}</div>
         {aside != null && <div className="ml-auto flex items-center gap-1.5 shrink-0 min-w-0">{aside}</div>}
@@ -163,9 +165,9 @@ function DependencyRow({
  * Plugin-reported dependencies — the optional control service. Polls while
  * an action is running; a plugin without completion semantics just stays
  * clickable and the user re-checks via the refresh button. Detection logic
- * is untouched here — only the layout moved into the shared Section.
+ * is untouched here — this renders the second half of the 依赖 region.
  */
-function ReportedDepsSection({
+function ReportedDepsBody({
   workspaceId,
   listenerId,
   initial,
@@ -214,28 +216,25 @@ function ReportedDepsSection({
   const deps = state.control === true ? state.deps ?? [] : null
 
   return (
-    <Section
-      title="依赖状态（插件提供）"
-      aside={
-        <>
-          {state.control === false && state.reason && (
-            <span className="text-[11px] text-muted-foreground truncate">未提供（{state.reason}）</span>
-          )}
-          <button
-            type="button"
-            disabled={refreshing}
-            onClick={() => {
-              setRefreshing(true)
-              void refresh().finally(() => setRefreshing(false))
-            }}
-            className="h-5 px-1 inline-flex items-center rounded border border-border text-muted-foreground hover:text-foreground disabled:opacity-50"
-            title="刷新"
-          >
-            <RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />
-          </button>
-        </>
-      }
-    >
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-1.5">
+        <span className="text-[11px] text-foreground/70">插件上报</span>
+        {state.control === false && state.reason && (
+          <span className="text-[11px] text-muted-foreground truncate">未提供（{state.reason}）</span>
+        )}
+        <button
+          type="button"
+          disabled={refreshing}
+          onClick={() => {
+            setRefreshing(true)
+            void refresh().finally(() => setRefreshing(false))
+          }}
+          className="ml-auto h-5 px-1 inline-flex items-center rounded border border-border text-muted-foreground hover:text-foreground disabled:opacity-50"
+          title="刷新"
+        >
+          <RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
       {deps && deps.length > 0 && (
         <div className="divide-y divide-border/50">
           {deps.map((dep) => (
@@ -271,7 +270,7 @@ function ReportedDepsSection({
       {state.control === false && !state.reason && (
         <p className="text-[11px] text-muted-foreground">该插件未提供依赖状态服务。</p>
       )}
-    </Section>
+    </div>
   )
 }
 
@@ -288,10 +287,30 @@ export function ListenerDetailPanel({
   const [installLog, setInstallLog] = React.useState<string | null>(null)
   const [installingDep, setInstallingDep] = React.useState<string | null>(null)
   const [installingMcp, setInstallingMcp] = React.useState<string | null>(null)
-  const [depsOpen, setDepsOpen] = React.useState(false)
+  const [depsOpen, setDepsOpen] = React.useState(true)
   const [draft, setDraft] = React.useState<Record<string, unknown>>({})
   const [dirty, setDirty] = React.useState(false)
   const [tab, setTab] = React.useState<'details' | 'log'>('details')
+  // The switch is a real tablist: ←/→ (plus Home/End) move between the two
+  // views and focus follows selection, so the keyboard path matches the one
+  // the eye reads.
+  const tabRefs = React.useRef<Record<'details' | 'log', HTMLButtonElement | null>>({
+    details: null,
+    log: null,
+  })
+  const onTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const order: Array<'details' | 'log'> = ['details', 'log']
+    const index = order.indexOf(tab)
+    let next: 'details' | 'log' | null = null
+    if (event.key === 'ArrowRight') next = order[(index + 1) % order.length]
+    else if (event.key === 'ArrowLeft') next = order[(index - 1 + order.length) % order.length]
+    else if (event.key === 'Home') next = order[0]
+    else if (event.key === 'End') next = order[order.length - 1]
+    if (!next) return
+    event.preventDefault()
+    setTab(next)
+    tabRefs.current[next]?.focus()
+  }
   /** null = not yet resolved; the shared rule decides on first load. */
   const [configOpen, setConfigOpen] = React.useState<boolean | null>(null)
   const [uiDoc, setUiDoc] = React.useState<{ html: string | null; source?: 'file' | 'inline' } | null>(null)
@@ -306,7 +325,7 @@ export function ListenerDetailPanel({
     setUiDoc(null)
     setDraft({})
     setDirty(false)
-    setDepsOpen(false)
+    setDepsOpen(true)
   }, [listenerId])
 
   const load = React.useCallback(async () => {
@@ -497,19 +516,24 @@ export function ListenerDetailPanel({
 
   return (
     <div className={`flex flex-col h-full overflow-hidden ${className ?? ''}`}>
-      {/* Block 1 — title bar: name + version + light …… 停用/启用 (far right) */}
+      {/* Block 1 — title bar: icon + name, version right after it, then the
+          light; the enable/disable button owns the far right by itself. */}
       <div className="px-4 py-3 border-b border-border flex items-center gap-2">
         {/* The manifest's icon name, resolved the same way the list resolves it
             — one mapping, so a plugin cannot look like two different plugins. */}
         <PluginIcon name={listener.icon} className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <h2 className="text-sm font-medium min-w-0 flex-1 truncate">{listener.name}</h2>
-        <span className="text-[11px] font-mono text-muted-foreground shrink-0">v{listener.version}</span>
-        <ListenerStatusLight listener={listener} size="md" showLabel />
+        <div className="flex items-center gap-2 min-w-0">
+          <h2 className="text-sm font-medium min-w-0 truncate">{listener.name}</h2>
+          <span className="text-[11px] font-mono text-muted-foreground shrink-0 tabular-nums">
+            v{listener.version}
+          </span>
+          <ListenerStatusLight listener={listener} size="md" showLabel />
+        </div>
         <button
           type="button"
           disabled={busy || listener.errors.length > 0}
           onClick={() => void toggleEnabled()}
-          className={`h-7 px-2.5 shrink-0 inline-flex items-center gap-1.5 rounded-md text-xs transition-colors ${
+          className={`ml-auto h-7 px-2.5 shrink-0 inline-flex items-center gap-1.5 rounded-md text-xs transition-colors ${
             listener.enabled
               ? 'bg-muted text-foreground hover:bg-accent'
               : 'bg-primary text-primary-foreground hover:opacity-90'
@@ -520,13 +544,26 @@ export function ListenerDetailPanel({
         </button>
       </div>
 
-      {/* Block 2 — segmented switch: 详情 / 进程日志 */}
+      {/* Block 2 — segmented switch: 详情 / 进程日志. One control, real tab
+          semantics: each tab owns its panel (aria-controls) and ←/→/Home/End
+          move between them. */}
       <div className="px-4 py-2 border-b border-border">
-        <div className="inline-flex items-center gap-0.5 rounded-md border border-border p-0.5" role="tablist" aria-label="详情视图">
+        <div
+          className="inline-flex items-center gap-0.5 rounded-md border border-border p-0.5"
+          role="tablist"
+          aria-label="详情视图"
+          onKeyDown={onTabKeyDown}
+        >
           <button
+            ref={(node) => {
+              tabRefs.current.details = node
+            }}
             type="button"
             role="tab"
+            id="listener-tab-details"
+            aria-controls="listener-tabpanel-details"
             aria-selected={tab === 'details'}
+            tabIndex={tab === 'details' ? 0 : -1}
             onClick={() => setTab('details')}
             className={`h-6 px-2.5 inline-flex items-center gap-1.5 rounded text-[11px] transition-colors ${
               tab === 'details' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'
@@ -536,9 +573,15 @@ export function ListenerDetailPanel({
             详情
           </button>
           <button
+            ref={(node) => {
+              tabRefs.current.log = node
+            }}
             type="button"
             role="tab"
+            id="listener-tab-log"
+            aria-controls="listener-tabpanel-log"
             aria-selected={tab === 'log'}
+            tabIndex={tab === 'log' ? 0 : -1}
             onClick={() => setTab('log')}
             className={`h-6 px-2.5 inline-flex items-center gap-1.5 rounded text-[11px] transition-colors ${
               tab === 'log' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'
@@ -552,7 +595,12 @@ export function ListenerDetailPanel({
 
       <div className="flex-1 overflow-y-auto">
         {tab === 'details' ? (
-          <>
+          <div
+            role="tabpanel"
+            id="listener-tabpanel-details"
+            aria-labelledby="listener-tab-details"
+            className="focus:outline-none"
+          >
             {/* Block 3 — 介绍: description + README tail + errors */}
             <Section title="介绍">
               <div className="space-y-2">
@@ -716,9 +764,10 @@ export function ListenerDetailPanel({
               </Section>
             )}
 
-            {/* Block 5 — 依赖: Craft-probed declared deps, restyled into the
-                Section; detection logic untouched. */}
-            {listener.dependencies.length > 0 && (
+            {/* Block 5 — 依赖: one region for both sources — what Craft probed
+                from the manifest (install actions) and what the plugin reports
+                through its own control service. Detection logic untouched. */}
+            {(listener.dependencies.length > 0 || Boolean(listener.controlDeps)) && (
               <Section
                 title={
                   <button
@@ -731,38 +780,50 @@ export function ListenerDetailPanel({
                   </button>
                 }
                 aside={
-                  <span className="text-[11px] text-muted-foreground shrink-0">
-                    {listener.dependencies.length} 项
-                    {blocking > 0 && <span className="text-destructive"> · {blocking} 未满足</span>}
-                  </span>
+                  listener.dependencies.length > 0 ? (
+                    <span className="text-[11px] text-muted-foreground shrink-0">
+                      {listener.dependencies.length} 项
+                      {blocking > 0 && <span className="text-destructive"> · {blocking} 未满足</span>}
+                    </span>
+                  ) : null
                 }
               >
                 {depsOpen && (
-                  <div>
-                    <div className="divide-y divide-border/50">
-                      {listener.dependencies.map((dep) => (
-                        <DependencyRow
-                          key={dep.label}
-                          dep={dep}
-                          installing={installingDep === dep.label}
-                          installingMcp={installingMcp === dep.label}
-                          onInstall={(target) => void install(target)}
-                          onInstallMcp={(target) => void installMcp(target)}
-                        />
-                      ))}
-                    </div>
-                    {installLog && (
-                      <pre className="mt-2 text-[11px] font-mono whitespace-pre-wrap break-all bg-muted/40 rounded p-2 max-h-40 overflow-auto">
-                        {installLog}
-                      </pre>
+                  <div className="space-y-2">
+                    {listener.dependencies.length > 0 && (
+                      <div>
+                        {listener.controlDeps && (
+                          <div className="text-[11px] text-foreground/70 mb-1">Craft 检测</div>
+                        )}
+                        <div className="divide-y divide-border/50">
+                          {listener.dependencies.map((dep) => (
+                            <DependencyRow
+                              key={dep.label}
+                              dep={dep}
+                              installing={installingDep === dep.label}
+                              installingMcp={installingMcp === dep.label}
+                              onInstall={(target) => void install(target)}
+                              onInstallMcp={(target) => void installMcp(target)}
+                            />
+                          ))}
+                        </div>
+                        {installLog && (
+                          <pre className="mt-2 text-[11px] font-mono whitespace-pre-wrap break-all bg-muted/40 rounded p-2 max-h-40 overflow-auto">
+                            {installLog}
+                          </pre>
+                        )}
+                      </div>
+                    )}
+                    {listener.controlDeps && (
+                      <ReportedDepsBody
+                        workspaceId={workspaceId}
+                        listenerId={listener.id}
+                        initial={listener.controlDeps}
+                      />
                     )}
                   </div>
                 )}
               </Section>
-            )}
-
-            {listener.controlDeps && (
-              <ReportedDepsSection workspaceId={workspaceId} listenerId={listener.id} initial={listener.controlDeps} />
             )}
 
             {/* 内容 / 接收地址 — setup steps + the ingest endpoint */}
@@ -794,35 +855,42 @@ export function ListenerDetailPanel({
                 </p>
               </div>
             </Section>
-          </>
+          </div>
         ) : (
           /* 进程日志 tab — live log tail + process state */
-          <Section
-            title="进程日志"
-            aside={
-              <button
-                type="button"
-                onClick={() => void pollLog()}
-                className="h-6 px-1.5 inline-flex items-center gap-1 rounded border border-border text-[11px] text-muted-foreground hover:text-foreground shrink-0"
-                title="刷新"
-              >
-                <RefreshCw className="h-3 w-3" />
-                刷新
-              </button>
-            }
+          <div
+            role="tabpanel"
+            id="listener-tabpanel-log"
+            aria-labelledby="listener-tab-log"
+            className="focus:outline-none"
           >
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <ListenerStatusLight listener={listener} size="md" showLabel />
-                <span className="text-[11px] text-muted-foreground tabular-nums">
-                  pid {listener.status.pid ?? '—'} · 重启 {listener.status.attempts} 次
-                </span>
+            <Section
+              title="进程日志"
+              aside={
+                <button
+                  type="button"
+                  onClick={() => void pollLog()}
+                  className="h-6 px-1.5 inline-flex items-center gap-1 rounded border border-border text-[11px] text-muted-foreground hover:text-foreground shrink-0"
+                  title="刷新"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  刷新
+                </button>
+              }
+            >
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <ListenerStatusLight listener={listener} size="md" showLabel />
+                  <span className="text-[11px] text-muted-foreground tabular-nums">
+                    pid {listener.status.pid ?? '—'} · 重启 {listener.status.attempts} 次
+                  </span>
+                </div>
+                <pre className="text-[11px] font-mono whitespace-pre-wrap break-all bg-muted/40 rounded p-2 max-h-96 min-h-24 overflow-auto">
+                  {logTail && logTail.length > 0 ? logTail : '（暂无日志）'}
+                </pre>
               </div>
-              <pre className="text-[11px] font-mono whitespace-pre-wrap break-all bg-muted/40 rounded p-2 max-h-96 min-h-24 overflow-auto">
-                {logTail && logTail.length > 0 ? logTail : '（暂无日志）'}
-              </pre>
-            </div>
-          </Section>
+            </Section>
+          </div>
         )}
       </div>
     </div>

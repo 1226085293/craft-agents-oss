@@ -12,6 +12,9 @@ import { isAbsolute, join } from 'path';
 import { createLogger } from '@craft-agent/shared/utils';
 
 const log = createLogger('tasks');
+
+/** A newline, named once: this file is edited from scripts that mangle '\n' escapes. */
+const NEWLINE = String.fromCharCode(10);
 import {
   acceptanceItems,
   applyTransition,
@@ -1042,9 +1045,18 @@ export class TaskService {
   }
 
   /** The trigger backlog, as the one paragraph the supervisor reads. */
-  triggerSummary(id: string): string {
-    const stats = this.require(id).stats;
-    const pending = stats?.pendingTriggers ?? [];
+  /**
+   * What the supervisor is owed, grouped by kind.
+   *
+   * `excludeLast` is for the wake that a trigger itself caused: `claimTrigger` appends the firing
+   * trigger to the backlog before anyone reads it, so the message 「本轮被触发」 was immediately
+   * followed by 「累计待处理：定时 1 次」 describing that same trigger — the round explaining the
+   * reason it exists. The record keeps the entry (it is proof the minute fired); only this rendering
+   * leaves it out, because 「待处理」 has to mean 「还没被这次唤醒处理掉的」.
+   */
+  triggerSummary(id: string, options: { excludeLast?: boolean } = {}): string {
+    const recorded = this.require(id).stats?.pendingTriggers ?? [];
+    const pending = options.excludeLast ? recorded.slice(0, -1) : recorded;
     if (pending.length === 0) return '';
     const group = (kind: PendingTrigger['kind']) => pending.filter((entry) => entry.kind === kind);
     const clock = (at: number) => new Date(at).toTimeString().slice(0, 5);
@@ -1052,10 +1064,15 @@ export class TaskService {
     for (const [kind, label] of [['cron', '定时'], ['event', '事件'], ['manual', '手动']] as const) {
       const items = group(kind);
       if (items.length === 0) continue;
-      const detail = kind === 'cron' ? `（${items[0]!.detail ?? ''}）` : '';
-      lines.push(`- ${label}：${items.length} 次（${clock(items[0]!.at)}–${clock(items[items.length - 1]!.at)}）${detail}`);
+      const first = clock(items[0]!.at);
+      const last = clock(items[items.length - 1]!.at);
+      // 「10:19–10:19」 reads like a range a parser broke; one minute is one time.
+      const span = first === last ? first : `${first}–${last}`;
+      lines.push(`- ${label}：${items.length} 次（${span}）`);
     }
-    return lines.join('\n');
+    if (lines.length === 0) return '';
+    lines.push(`共 ${pending.length} 次待处理。`);
+    return lines.join(NEWLINE);
   }
 
   /**

@@ -167,6 +167,33 @@ describe('the summary the supervisor reads', () => {
     expect(summary.split('\n').length).toBeLessThanOrEqual(3);
   });
 
+  it('does not repeat one clock as a range', () => {
+    // Live message read 「定时：1 次（10:19–10:19）」: a range whose ends are the same minute looks
+    // like a broken parser rather than a single firing.
+    const svc = service();
+    const task = recurring(svc);
+    const at = Date.UTC(2026, 10, 13, 10, 0);
+    svc.claimTrigger(task.id, { kind: 'cron', at, detail: 'cron:* * * * *' });
+
+    const clock = new Date(at).toTimeString().slice(0, 5);
+    const summary = svc.triggerSummary(task.id);
+    expect(summary).toContain(`（${clock}）`);
+    expect(summary).not.toContain(`${clock}–${clock}`);
+  });
+
+  it('leaves out the trigger that opened the wake', () => {
+    // `claimTrigger` appends the firing trigger to the backlog before the wake is composed, so the
+    // supervisor was told 「本轮被触发」 and then 「累计待处理：定时 1 次」 about the same firing.
+    const svc = service();
+    const task = recurring(svc);
+    svc.claimTrigger(task.id, { kind: 'cron', at: Date.UTC(2026, 10, 13, 10, 0), detail: 'cron:* * * * *' });
+
+    expect(svc.triggerSummary(task.id, { excludeLast: true })).toBe('');
+    // The record keeps it — only this rendering skips it, so a batch of two still reports one.
+    svc.claimTrigger(task.id, { kind: 'cron', at: Date.UTC(2026, 10, 13, 10, 1), detail: 'cron:* * * * *' });
+    expect(svc.triggerSummary(task.id, { excludeLast: true })).toContain('定时：1 次');
+  });
+
   it('clears only when it is delivered', () => {
     const svc = service();
     const task = recurring(svc);

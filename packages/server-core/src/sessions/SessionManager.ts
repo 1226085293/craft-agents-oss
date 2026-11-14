@@ -8441,7 +8441,9 @@ ${request.prompt}`;
           try {
             const lane = await this.ensureSupervisorSession(workspaceId, 'task')
             if (!lane) return { ok: false, reason: 'no task-lane supervisor' }
-            const summary = service.triggerSummary(task.id)
+            // The trigger that opened this wake is appended to the backlog by the claim itself; it is
+            // this message's subject, not something still waiting for an answer.
+            const summary = service.triggerSummary(task.id, { excludeLast: true })
             const last = task.stats?.lastRound
             const text = [
               `【触发】${task.id}「${task.name}」本轮被触发（${reason}）。`,

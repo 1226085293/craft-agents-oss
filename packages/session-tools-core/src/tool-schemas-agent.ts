@@ -295,77 +295,6 @@ export const CreateTaskSchema = z.object({
 
 export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
 
-/** Task tools (supervisor only). */
-export const TaskCreateSchema = z.object({
-  name: z.string(),
-  instruction: z.string().describe('The original request. Immutable once created.'),
-  /**
-   * Responsibility, in one sentence.
-   *
-   * `TaskSpec` has had this field all along, but no tool could set it — so a
-   * created task never said what it was for, and nothing downstream could answer
-   * "which session is right for this". Required in spirit: a task without a
-   * scope is a task nobody can hand off.
-   */
-  scope: z
-    .string()
-    .optional()
-    .describe('One sentence: what this task is responsible for. Used to match later hand-offs.'),
-  deliverables: z
-    .array(
-      z.object({
-        kind: z.enum(['file', 'directory', 'pr', 'doc', 'message']),
-        path: z.string().optional().describe('Workspace- or absolute path for file/directory kinds.'),
-        note: z.string().optional().describe('What it must contain.'),
-        required: z.boolean().optional(),
-      }),
-    )
-    .optional()
-    .describe('What this task owes. A task with no deliverable cannot be checked.'),
-  acceptance: z
-    .array(
-      z.object({
-        check: z
-          .string()
-          .describe(
-            'What must be true of the finished result, e.g. "docs/a.md 存在且内容非空". Never what this run is allowed to touch.',
-          ),
-        command: z.string().optional().describe('Command the host runs; exit 0 = pass.'),
-      }),
-    )
-    .optional()
-    .describe(
-      'How completion is judged. Run by the host, never by the worker itself. Each item outlives a run, so write a fact about the deliverable — 「本轮未执行 1.2」 is not acceptance but a directive, and as acceptance it became permanently false the moment the next run did 1.2.',
-    ),
-  /**
-   * The plan, as agreed with the user.
-   *
-   * Without this the supervisor could promise 「执行计划写两条大纲：1 写文件 2 收尾」
-   * and then have no way to record it — the worker invented its own three-outline
-   * plan instead (确认位置 / 创建 / 回报), and the board showed something nobody
-   * asked for. A plan the user stated is part of the request, not a detail the
-   * executor should re-derive.
-   */
-  plan: z
-    .array(
-      z.object({
-        id: z.string().describe('Outline id ("1", "2") or sub-step id ("1.1").'),
-        title: z.string(),
-        agent: z.string().optional().describe('Role id that owns this step, from the roster.'),
-      }),
-    )
-    .optional()
-    .describe('Outlines and sub-steps exactly as agreed with the user. The worker may only fill in under these, not replace them.'),
-  cwd: z.string().optional().describe('Working directory for the worker.'),
-  assigneeAgentId: z
-    .string()
-    .optional()
-    .describe('Role id that will execute this task, from the roster above. Omit for the workspace default.'),
-  parentTaskId: z.string().optional(),
-  dependsOn: z.array(z.string()).optional(),
-  priority: z.number().int().min(0).max(4).optional(),
-});
-
 export const TaskUpdateSchema = z.object({
   identifier: z.string(),
   status: z.enum(['backlog', 'running', 'paused', 'completed', 'failed', 'canceled']).optional(),
@@ -526,6 +455,5 @@ export const TaskHandoffSchema = z.object({
   fromSessionId: z.string().optional(),
 });
 
-export type TaskCreateInput = z.infer<typeof TaskCreateSchema>;
 export type TaskUpdateInput = z.infer<typeof TaskUpdateSchema>;
 export type TaskHandoffInput = z.infer<typeof TaskHandoffSchema>;

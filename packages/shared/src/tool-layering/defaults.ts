@@ -56,12 +56,11 @@ export const DEFAULT_TOOL_CATEGORIES: ToolCategoriesConfig = {
         // The task surface itself. Every one of these was uncategorised, which put
         // it in `misc` — and `call_tool` refuses a folded tool from a category that
         // was never expanded, while `misc` has no meta tool to expand. So the
-        // supervisor could not call `task_create` or `dispatch` at all: the tools
-        // existed, the prompts told it to use them, and the router refused them.
-        // That is a large part of "the supervisor never dispatches and does the work
-        // itself" — it was reading the disk because its own tools were unreachable.
+        // supervisor could not call `dispatch` at all: the tools existed, the prompts
+        // told it to use them, and the router refused them. That is a large part of
+        // "the supervisor never dispatches and does the work itself" — it was reading
+        // the disk because its own tools were unreachable.
         //
-        'task_create',
         'task_get',
         'task_list',
         'task_update',

@@ -41,7 +41,6 @@ import {
   handleListQuestions,
   handleDispatch,
   handleReportResult,
-  handleTaskCreate,
   handleCreateTask,
   handleTaskGet,
   handleTaskHandoff,
@@ -54,7 +53,6 @@ import {
   ListQuestionsSchema,
   DispatchSchema,
   ReportResultSchema,
-  TaskCreateSchema,
   CreateTaskSchema,
   TaskGetSchema,
   TaskHandoffSchema,
@@ -423,7 +421,6 @@ export const TOOL_DESCRIPTIONS = {
   call_llm: `Get a secondary LLM for focused subtasks: parallel batch processing, efficiency gains, structured extraction (outputSchema), context isolation. Put text in the prompt param; use attachments only for file paths on disk (max 20 items; for files >2000 lines pass a startLine/endLine range).`,
   spawn_session: `Create an independent session running with its own prompt, connection, model, and sources. Useful for delegating research/analysis/drafts to parallel sessions. Use help=true first to list connections/models/sources. The prompt param is required; optional overrides: model, llmConnection, permissionMode, thinkingLevel, enabledSourceSlugs, workingDirectory. By default (subscribe=true) this session starts FOLLOWING the new session: every finished turn is posted back here as a message and you are woken. Pass subscribe=false for fire-and-forget work. This call returns as soon as the session starts (status 'started'); end your turn instead of polling.`,
 
-  task_create: `Supervisor-only: create a task when the work spans more than one session. instruction is the original request and is immutable — changing it means a new task. Returns the human id (T-1). If you pass plan[], read the roster in this brief first and give every sub-step (ids like '1.1') an agent from it — a plan with an unowned sub-step is refused outright, because a sub-step is the unit of assignment and an unowned one was assigned to nobody. Outlines ('1', '2') take no agent.`,
   create_task: `User-facing supervisor only: the single door through which a person's words enter the system. Pass the user's request VERBATIM in \`request\` — never summarise or reword it (a relay that paraphrased 「只做 1.1，做完就停」 into a meta-instruction produced a task whose boundary existed nowhere). The system creates the task record and hands the words to the lane that analyses them into scope / directive / plan and dispatches. You do not see that lane and cannot message it. To add to an existing task, pass its taskId — nothing new is created, the words become a follow-up.`,
   task_list: `Supervisor-only: list tasks, newest activity first. Filter by status to find what is still running or waiting on a decision.`,
   task_get: `Supervisor-only: read one task, including its handoff trail and budget. Use includeJournal for the full event log.`,
@@ -542,13 +539,12 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'dispatch', description: TOOL_DESCRIPTIONS.dispatch, inputSchema: DispatchSchema, executionMode: 'registry', safeMode: 'block', handler: handleDispatch },
   { name: 'list_questions', description: TOOL_DESCRIPTIONS.list_questions, inputSchema: ListQuestionsSchema, executionMode: 'registry', safeMode: 'allow', handler: handleListQuestions },
   { name: 'ask_user', description: TOOL_DESCRIPTIONS.ask_user, inputSchema: AskUserSchema, executionMode: 'registry', safeMode: 'block', handler: handleAskUser },
-  { name: 'task_create', description: TOOL_DESCRIPTIONS.task_create, inputSchema: TaskCreateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskCreate },
   //
   // `roles: ['supervisor']` is load-bearing, not decoration.
   //
   // The lane filter below only runs for `role === 'supervisor'`, so the user lane
   // restriction alone left this tool visible to every worker — a worker could open a task
-  // through the human's door (`create_task`) while its own lane has `task_create`. Observed
+  // through the human's door (`create_task`), which is the person's lane's job. Observed
   // in the lane audit: `getSessionToolDefs({ role: 'worker' })` returned `create_task`.
   //
   { name: 'create_task', description: TOOL_DESCRIPTIONS.create_task, inputSchema: CreateTaskSchema, executionMode: 'registry', safeMode: 'block', roles: ['supervisor'], handler: handleCreateTask },
@@ -660,7 +656,6 @@ export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
   'dispatch',
   'ask_user',
   'list_questions',
-  'task_create',
   'create_task',
   'task_list',
   'task_get',
@@ -670,7 +665,7 @@ export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
    * Planning is part of the flow the working lane owns.
    *
    * `task_plan` started as a worker tool (a worker keeps its own task's plan current), and the
-   * supervisor wrote its outline through `task_create`'s `spec.plan` — the only path that
+   * supervisor wrote its outline inside the create call's `spec.plan` — the only path that
    * existed. The relay flow retired that path: the user lane registers the record and the
    * working lane must draw the plan out of the person's words *without creating a task*, so
    * the outline write needs its own tool. Ownership still gates it (see `updatePlan`): a
@@ -697,7 +692,6 @@ export const SUPERVISOR_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'dispatch',
   'ask_user',
   'list_questions',
-  'task_create',
   'task_update',
   'task_handoff',
 ]);
@@ -726,7 +720,6 @@ export const SUPERVISOR_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 export const USER_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'dispatch',
-  'task_create',
   'task_update',
   'task_handoff',
   'task_plan',
@@ -741,32 +734,18 @@ export const USER_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set([
  *
  * `create_task` replaced `send_agent_message` as the relay: where the old tool asked the model to
  * reword the person's request into a message (and the reworded message was all the working lane
- * ever saw), this one takes the person's words verbatim and does the relaying itself. The task
- * lane has `task_create`; giving it `create_task` too would be a second door to the same room.
+ * ever saw), this one takes the person's words verbatim and does the relaying itself. It is the
+ * only door that creates a record; the working lane's `task_create` was removed for that reason
+ * (its schema never carried `triggers`, so a task born there could only run once, by hand).
  */
 export const USER_LANE_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set(['create_task']);
-
-/**
- * Tools the working lane no longer carries, because creating a task is the user lane's job.
- *
- * `task_create` let the working lane invent work: it built a record while pushing a task forward,
- * and that record arrived with no `triggers` field and no person behind it — the schema for
- * `task_create` has never had one, so a task created this way could only ever run once, by hand.
- * The person's own words reach a task through `create_task` (user lane), which does carry
- * `triggers`; the working lane's job is to fill in that record and keep it moving.
- *
- * What it keeps is everything *maintenance*: `task_update`, `task_plan`, `dispatch`, `task_handoff`.
- * Work it discovers while pushing a task forward belongs to that task's plan, not to a second task
- * nobody asked for.
- */
-export const TASK_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set(['task_create']);
 
 /** Whether a tool is visible to a supervisor lane. */
 export function isToolVisibleToLane(name: string, lane?: 'user' | 'task'): boolean {
   // Absent lane = the working lane, which keeps the full table. Defaulting the other way
   // would silently remove the dispatcher from every supervisor written before lanes existed.
   if ((lane ?? 'task') === 'task') {
-    return !USER_LANE_ONLY_TOOL_NAMES.has(name) && !TASK_LANE_DENIED_TOOL_NAMES.has(name);
+    return !USER_LANE_ONLY_TOOL_NAMES.has(name);
   }
   return !USER_LANE_DENIED_TOOL_NAMES.has(name);
 }

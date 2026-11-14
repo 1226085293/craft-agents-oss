@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test'
 import { getSupervisorSystemPrompt, SUPERVISOR_PROMPT_TOOLS, USER_LANE_PROMPT_TOOLS, WORKER_MISSING_TOOLS } from '../supervisor-prompt.ts'
-import { SUPERVISOR_TOOL_NAMES, TASK_LANE_DENIED_TOOL_NAMES, USER_LANE_DENIED_TOOL_NAMES, USER_LANE_ONLY_TOOL_NAMES, getSessionToolNames } from '../../../../session-tools-core/src/tool-defs.ts'
+import { SUPERVISOR_TOOL_NAMES, USER_LANE_DENIED_TOOL_NAMES, USER_LANE_ONLY_TOOL_NAMES, getSessionToolNames } from '../../../../session-tools-core/src/tool-defs.ts'
 
 /**
  * These tests exist because of an observed failure, not for coverage.
@@ -168,12 +168,30 @@ describe('supervisor prompt', () => {
   })
 
   it('only names tools the supervisor actually has', () => {
-    // Every backticked identifier that looks like a tool must be in the table.
+    /**
+     * Every backticked identifier that looks like a tool must be in the table — unless the sentence
+     * is forbidding it.
+     *
+     * Naming a tool to deny it is deliberate and load-bearing: 「You have no `task_create`」 is what
+     * stops the model reaching for a tool its table no longer carries. What must not appear is a
+     * mention the model could read as 「you have this」. So a tool name counts as a violation only
+     * when the clause before it is not a denial.
+     */
+    const DENIAL = /(没有|不要|不可以|禁止|不要尝试|不能|no|not|never|cannot|do not)\s*\**\s*$/i
     const text = outsideDenialSection(prompt())
-    const mentioned = [...text.matchAll(/`([a-z][a-z_]+)`/g)].map((m) => m[1]!)
-    const unknown = mentioned.filter(
-      (name) => name.includes('_') && !SUPERVISOR_TOOL_NAMES.has(name) && name !== 'tools_workspace' && name !== 'call_tool',
-    )
+    const unknown = [...text.matchAll(/`([a-z][a-z_]+)`/g)]
+      .filter((m) => {
+        const before = text.slice(Math.max(0, m.index! - 30), m.index!).replace(/\*\*/g, '')
+        return !DENIAL.test(before)
+      })
+      .map((m) => m[1]!)
+      .filter(
+        (name) =>
+          name.includes('_') &&
+          !SUPERVISOR_TOOL_NAMES.has(name) &&
+          name !== 'tools_workspace' &&
+          name !== 'call_tool',
+      )
     expect(unknown).toEqual([])
   })
 
@@ -236,11 +254,10 @@ describe('supervisor prompt', () => {
       expect(SUPERVISOR_TOOL_NAMES.has(name)).toBe(true)
     }
     // Compare as numbers: a Set's .size widens to a literal here otherwise.
-    // Two tools are in the supervisor table but not in the working-lane list: `create_task` is
-    // user-lane-only, and `task_create` is denied to the working lane (the user lane owns creation).
-    // The user-lane list is pinned against the real table below.
+    // One tool is in the supervisor table but not in the working-lane list:
+    // `create_task` is user-lane-only. The user-lane list is pinned against the real table below.
     expect(SUPERVISOR_PROMPT_TOOLS.length as number).toBe(
-      (SUPERVISOR_TOOL_NAMES.size - USER_LANE_ONLY_TOOL_NAMES.size - TASK_LANE_DENIED_TOOL_NAMES.size) as number
+      (SUPERVISOR_TOOL_NAMES.size - USER_LANE_ONLY_TOOL_NAMES.size) as number
     )
   })
 })

@@ -3209,9 +3209,9 @@ export class PiAgent extends BaseAgent {
     }
 
     // Task-board surface. Separate binding from agentTools: the task_* handlers
-    // guard on `ctx.taskTools?.create`, so leaving it unbridged rejected every
-    // caller — the supervisor included — with
-    // "task_create is only available to a supervisor session."
+    // guard on `ctx.taskTools?.update` / `.list` / `.get` / `.handoff`, so leaving
+    // it unbridged rejected every caller — the supervisor included — with
+    // "that tool is only available to a supervisor session."
     if (this.taskTools) {
       this._sessionToolContext.taskTools = this.taskTools;
     }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isToolVisibleToLane } from '../../../session-tools-core/src/tool-defs.ts';
+import { getSessionToolNames, isToolVisibleToLane } from '../../../session-tools-core/src/tool-defs.ts';
 
 /**
  * The lane must reach the agent, or the tool filter silently answers for the wrong lane.
@@ -49,7 +49,19 @@ describe('supervisor lane plumbing', () => {
     expect(isToolVisibleToLane('dispatch', undefined)).toBe(true);
     // …and the user lane actually narrows, which is the behaviour the missing field switched off.
     expect(isToolVisibleToLane('dispatch', 'user')).toBe(false);
-    expect(isToolVisibleToLane('task_create', 'user')).toBe(false);
+    expect(isToolVisibleToLane('task_update', 'user')).toBe(false);
     expect(isToolVisibleToLane('task_get', 'user')).toBe(true);
+  });
+
+  it('has no table entry for task_create, so no lane can reach it', () => {
+    // The lane filter only narrows a table; it cannot remove a tool that is not in one. Asserting
+    // the real table is what answers 「can anyone call this」 — `isToolVisibleToLane` would still say
+    // `true` for a name in the supervisor whitelist, which is why the whitelist entry had to go too.
+    for (const role of ['supervisor', 'worker'] as const) {
+      for (const lane of [undefined, 'task', 'user'] as const) {
+        const tools = getSessionToolNames({ role, ...(lane ? { supervisorLane: lane } : {}) });
+        expect({ role, lane, has: tools.has('task_create') }).toEqual({ role, lane, has: false });
+      }
+    }
   });
 });

@@ -328,14 +328,6 @@ export abstract class BaseAgent implements AgentBackend {
 
   /** Task-board surface (supervisor only). */
   taskTools = null as null | {
-    create(payload: {
-      name: string;
-      instruction: string;
-      assigneeAgentId?: string;
-      parentTaskId?: string;
-      dependsOn?: string[];
-      priority?: number;
-    }): Promise<{ id: string }>;
     list(params: { status?: string; limit?: number }): Promise<
       Array<{ id: string; name: string; status: string; pauseReason?: string | null }>
     >;

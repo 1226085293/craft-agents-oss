@@ -116,7 +116,6 @@ import { buildJudgePrompt, parseJudgeVerdict } from '../tasks/task-judge.ts'
 import { SupervisorRuntime } from '../routing/supervisor-runtime.ts'
 import { completedClaimRefusal, resumeDecisionFor, formatSupervisorMessage } from '@craft-agent/shared/tasks'
 import { buildAgentToolBindings } from './agent-tools-bindings.ts'
-import { unclaimedRelayedTaskRefusal } from './relayed-task-guard.ts'
 import { canSpendParkedArchive, decideRoundEndArchive } from './round-end-archive.ts'
 import {
   buildSectionOwnerPrompt,
@@ -1496,17 +1495,6 @@ export interface ManagedSession {
    * record answers 「这个会话负责到哪」.
    */
   taskScope?: { taskId: string; outlineId?: string; stepIds: string[] }
-  /**
-   * A task the user lane just registered that this session (the working lane) was woken
-   * to take over. While it is set and fresh, `task_create` is refused: the record already
-   * exists, and creating a second one for the same request splits the trail — the scope,
-   * plan and dispatch written on the duplicate were invisible to the original.
-   *
-   * Cleared the moment the lane touches that task (`task_update` / `dispatch` / a
-   * successful `task_plan`), or when a newer relay replaces it.
-   */
-  unclaimedRelayedTaskId?: string
-  unclaimedRelayedTaskAt?: number
   /**
    * Tools this session may use, resolved once when it was created.
    *
@@ -6242,10 +6230,6 @@ export class SessionManager implements ISessionManager {
             }))
           },
           dispatchViaSupervisor: async (params) => {
-            // Dispatching the registered task is claiming it: the relay has been taken over.
-            if (params.target?.kind === 'task' && params.target.taskId) {
-              this.clearRelayedTaskClaim(managed.id, params.target.taskId)
-            }
             const runtime = this.getSupervisorRuntime(managed.workspace.id)
             return runtime.dispatch({ fromSessionId: managed.id, ...params })
           },
@@ -6326,7 +6310,6 @@ export class SessionManager implements ISessionManager {
                   })
                 }
               }
-              this.markRelayedTaskUnclaimed(taskLaneId, taskId)
               const relayed = [
                 formatSupervisorMessage(
                   {
@@ -6366,7 +6349,6 @@ export class SessionManager implements ISessionManager {
               toolCallId: randomUUID(),
               ...(triggers.length ? { triggers } : {}),
             })
-            this.markRelayedTaskUnclaimed(taskLaneId, task.id)
             /**
              * The task's founding words are the person's — stamp the contact.
              *
@@ -6407,46 +6389,6 @@ export class SessionManager implements ISessionManager {
         // separate from `agentTools` because it is only meaningful for a
         // supervisor, and the tool table already hides it from workers.
         managed.agent.taskTools = {
-          create: async (payload) => {
-            /**
-             * The one-creator guard: while a registration relay is unclaimed, this lane must
-             * not create a second record for the same request. Rationale, TTL and the exact
-             * refusal live in `relayed-task-guard.ts`; the mark is set by `createTaskFromUser`
-             * and cleared when the lane claims the task (update / plan / dispatch).
-             */
-            const refusal = unclaimedRelayedTaskRefusal(managed, Date.now())
-            if (refusal) {
-              throw new Error(refusal)
-            }
-            /**
-             * A task belongs to the working lane, whichever lane created it.
-             *
-             * `supervisorSessionId` is where the watchdog and the acceptance gate
-             * send progress — busy, internal traffic. Recording the creating
-             * supervisor meant a task created from 督导·用户 routed every handoff
-             * verdict and every nudge into the conversation the user reads: the
-             * test task T-9 buried its own 拍板 request under nine
-             * 「〔任务进展〕交接未通过」rows. The lane the user talks in must not be
-             * the lane work reports to.
-             */
-            const ownerSessionId =
-              (managed.supervisorLane ?? 'task') === 'user'
-                ? (await this.ensureSupervisorSession(managed.workspace.id, 'task')).id
-                : managed.id
-            const task = this.getTasks(managed.workspace.id).create({
-              name: payload.name,
-              instruction: payload.instruction,
-              assigneeAgentId: payload.assigneeAgentId,
-              parentTaskId: payload.parentTaskId,
-              dependsOn: payload.dependsOn,
-              priority: payload.priority as 0 | 1 | 2 | 3 | 4 | undefined,
-              ...(payload.spec ? { spec: normalizeSpec(payload.spec) } : {}),
-              ...(payload.trigger ? { trigger: normalizeTrigger(payload.trigger) } : {}),
-              supervisorSessionId: ownerSessionId,
-              toolCallId: randomUUID(),
-            })
-            return { id: task.id }
-          },
           list: async (params) => {
             const tasks = this.getTasks(managed.workspace.id).list(params.status as never)
             return tasks.slice(0, params.limit ?? 20).map((t) => ({
@@ -6463,7 +6405,6 @@ export class SessionManager implements ISessionManager {
             return { task, journal: readJournal(managed.workspace.rootPath, identifier) }
           },
           update: async (identifier, patch) => {
-            this.clearRelayedTaskClaim(managed.id, identifier)
             return this.updateTask(managed.workspace.id, identifier, patch as TaskUpdatePatch)
           },
           restructurePlan: async (identifier, request) => {
@@ -6614,7 +6555,6 @@ export class SessionManager implements ISessionManager {
             // plan that updates only on a manual page switch is not a progress
             // indicator; every accepted patch has to reach the board.
             if (result.ok) {
-              this.clearRelayedTaskClaim(managed.id, identifier)
               this.notifyTasksChanged(managed.workspace.id)
             }
             return result.ok
@@ -9311,30 +9251,6 @@ ${request.prompt}`;
       return managed
     }
     return undefined
-  }
-
-  /**
-   * Mark that the working lane was woken to take over a user-registered task.
-   *
-   * The lane's `task_create` is refused while this stands (see the binding), because the
-   * record already exists: creating a second task for the same request splits the trail —
-   * the scope, plan and dispatch written on the duplicate are invisible to the original
-   * and the person is left with two tasks for one request. The refusal points the lane
-   * back at the registered id, so the only way forward is to claim it, which clears the mark.
-   */
-  private markRelayedTaskUnclaimed(taskLaneSessionId: string, taskId: string): void {
-    const lane = this.sessions.get(taskLaneSessionId)
-    if (!lane) return
-    lane.unclaimedRelayedTaskId = taskId
-    lane.unclaimedRelayedTaskAt = Date.now()
-  }
-
-  /** Claimed: the lane touched the registered task, so a later `task_create` is its own call. */
-  private clearRelayedTaskClaim(taskLaneSessionId: string, taskId: string): void {
-    const lane = this.sessions.get(taskLaneSessionId)
-    if (!lane || lane.unclaimedRelayedTaskId !== taskId) return
-    lane.unclaimedRelayedTaskId = undefined
-    lane.unclaimedRelayedTaskAt = undefined
   }
 
   /**

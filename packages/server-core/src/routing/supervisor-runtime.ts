@@ -947,16 +947,12 @@ export class SupervisorRuntime {
     /**
      * A trigger's own claim is not 「someone else is already running」.
      *
-     * The lock exists to stop two rounds running at once, not to stop a round from starting. When a
-     * cron or event fires it claims the lock (`pending:cron:…`) so a second firing in the same
-     * minute banks instead of starting a second round — and the supervisor it wakes then dispatches
-     * the step that claim was for. Refusing that dispatch deadlocked every round after the first:
-     * live, six `run_started` placeholders and one `run_bound`, no worker spawned, `hello-2.md`
-     * never written, and the trigger spent on a round that could not begin.
+     * The lock stops two rounds running at once, not a round from starting: the trigger claims
+     * `pending:cron:…` so the next firing banks, then the supervisor it woke dispatches the step
+     * that claim was for. Refusing that deadlocked every round after the first — six
+     * `run_started` placeholders, one `run_bound`, no worker, `hello-2.md` never written.
      *
-     * So the trigger's claim is the exception: the dispatch takes it over. What still refuses is a
-     * real session holding the task, and another dispatch already in flight (`pending:dispatch`) or
-     * an auto-advance (`pending:next-leg:…`) — those are different rounds, which serial mode forbids.
+     * A real session, an in-flight dispatch, or an auto-advance still refuse: different rounds.
      */
     const triggerClaim = Boolean(lock && /^pending:(?:cron|event|manual)/.test(lock));
     if (lock && !triggerClaim) {

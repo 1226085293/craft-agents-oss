@@ -231,3 +231,45 @@ describe('a trigger claim is handed over, not defended', () => {
     expect(svc.get(task.id)!.stats?.runs).toBe(1);
   })
 })
+
+describe('the backlog a lock banks is released with it', () => {
+  /**
+   * The design: a firing that arrives while the task is locked is banked, and released when the
+   * lock goes. Banked was implemented; released was not.
+   *
+   * `releaseRunRecord` dropped the lock but not the status, so a run that ended without a hand-off
+   * left the task at `running` with nobody running it. The scheduler saw a task still claiming to
+   * run, so those banked firings had nothing to release them — live, `pendingTriggers` reached three
+   * and stayed there with the task stuck at `running`.
+   */
+  it('banks firings while locked, then parks the task and pokes the scheduler', () => {
+    let pokes = 0;
+    const svc = new TaskService({
+      workspaceRoot: root,
+      sessionExists: () => true,
+      wakeSupervisor: () => undefined,
+      pokeScheduler: () => {
+        pokes += 1;
+      },
+    });
+    const task = recurring(svc);
+    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' });
+    svc.startRun(task.id, 'pending:dispatch');
+    svc.startRun(task.id, 'sess_w');
+
+    // Two firings arrive while the round is live: banked, not started.
+    expect(svc.claimTrigger(task.id, { kind: 'cron', at: 2000, detail: 'cron:*/1 * * * *' })).toBeNull();
+    expect(svc.claimTrigger(task.id, { kind: 'cron', at: 3000, detail: 'cron:*/1 * * * *' })).toBeNull();
+    expect(svc.get(task.id)!.stats?.lockSessionId).toBe('sess_w');
+
+    const before = pokes;
+    svc.endRun(task.id, { ok: false, error: 'boom' });
+
+    const after = svc.get(task.id)!;
+    expect(after.status).toBe('backlog');
+    expect(after.stats?.lockSessionId).toBeUndefined();
+    // The banked firings stay: they are what the next round is for.
+    expect(after.stats?.pendingTriggers?.length).toBe(3);
+    expect(pokes).toBeGreaterThan(before);
+  })
+})

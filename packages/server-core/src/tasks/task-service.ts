@@ -558,19 +558,12 @@ export class TaskService {
         runStartedAt: now,
         lastTriggeredAt: now,
         /**
-         * The 3-minute deadline guards a *placeholder*, and only the bind ends one.
+         * The 3-minute deadline guards a *placeholder*; only the bind ends one.
          *
-         * This used to be `undefined` unconditionally, on the reading 「a real claim is not pending
-         * any more」. But a `pending:…` claim reaches this line too, and it erased the deadline
-         * `claimTrigger` had just set (`task-service.ts:956`). Live consequence: a per-minute task's
-         * second round claimed with `pending:cron:* * * * *`, lost its deadline, so the scheduler's
-         * expiry pass could never reclaim it — the lock stayed for good, every later dispatch was
-         * refused with 「运行已经由 … 持有」, no worker was spawned, and the round never closed.
-         * Six `run_started` placeholders, one `run_bound`; `hello-2.md` was never written.
-         *
-         * So: a placeholder keeps whatever deadline it arrived with (a claim with no deadline gets
-         * one now, which is the same 3 minutes from this instant), and the bind — the moment a real
-         * session id replaces it — clears it, because liveness is the heartbeat's job from then on.
+         * Clearing it unconditionally erased the deadline `claimTrigger` had just set, so the
+         * expiry pass could never reclaim a lost claim: the lock stayed for good and every later
+         * dispatch was refused. A placeholder now keeps its deadline; the bind clears it, because
+         * from then on liveness is the heartbeat's job.
          */
         lockDeadlineAt: isPlaceholder ? (task.stats?.lockDeadlineAt ?? now + TRIGGER_CLAIM_MS) : undefined,
       },
@@ -1200,14 +1193,31 @@ export class TaskService {
           : { rounds: { ok: stats.rounds?.ok ?? 0, failed: (stats.rounds?.failed ?? 0) + 1 } }),
       },
     };
-    this.save(next, { silentTerminal: true });
+    /**
+     * A released lock must not leave the task claiming to run.
+     *
+     * `releaseRunRecord` drops the lock but not the status, so a run that ended without a hand-off
+     * sat at `running` with nobody running it — and the triggers that had banked behind that lock
+     * (the design's 「触发积压」) had nothing to release them: the scheduler skips a task whose lock
+     * is still held, and the next tick found no lock and no reason to start. Live: `pending` grew to
+     * three and the task stayed `running` for good.
+     *
+     * Returning to `backlog` is 「registered, not running」, which is exactly the state the next
+     * firing needs. The poke is what turns the banked triggers into a round now rather than at the
+     * next minute boundary.
+     */
+    const parked = next.stats?.lockSessionId
+      ? next
+      : applyTransition(next, 'backlog', { now }).task;
+    this.save(parked, { silentTerminal: true });
     this.disposeRun(id, 'ended');
     appendJournal(this.root, id, {
       type: 'run_ended',
       at: now,
       data: { ok: outcome.ok, activeMs: elapsed, error: outcome.error },
     });
-    return next;
+    if (!next.stats?.lockSessionId) this.deps.pokeScheduler?.();
+    return parked;
   }
 
   /**

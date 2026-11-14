@@ -12,12 +12,19 @@ export {
 // Individual steps
 export { ProviderSelectStep } from './ProviderSelectStep'
 export { WelcomeStep } from './WelcomeStep'
-export { APISetupStep, type ApiSetupMethod } from './APISetupStep'
-export { CredentialsStep, type CredentialStatus } from './CredentialsStep'
 export { CompletionStep } from './CompletionStep'
-export { LocalModelStep, type LocalModelSubmitData } from './LocalModelStep'
 export { ReauthScreen } from './ReauthScreen'
 export { GitBashWarning, type GitBashStatus } from './GitBashWarning'
+
+// Connection-setup vocabulary. The screens that collected it are gone (Settings → LLM gateway
+// owns that now) but `useOnboarding` still describes a connection this way when saving one.
+export type {
+  ApiSetupMethod,
+  ApiKeySubmitData,
+  LocalModelSubmitData,
+  ProviderSegment,
+} from './apisetup-types'
+export { apiSetupMethodToConnectionTypes } from './apisetup-types'
 
 // Main wizard container
 export { OnboardingWizard, type OnboardingState, type OnboardingStep, type LoginStatus } from './OnboardingWizard'
@@ -30,8 +37,4 @@ export type {
 
 export type {
   ApiSetupMethod as ApiSetupMethodType,
-} from './APISetupStep'
-
-export type {
-  CredentialStatus as CredentialStatusType,
-} from './CredentialsStep'
+} from './apisetup-types'

@@ -10,13 +10,12 @@
  * 5. Complete
  */
 import { useState, useCallback, useEffect } from 'react'
+import type { OnboardingState, OnboardingStep } from '@/components/onboarding'
 import type {
-  OnboardingState,
-  OnboardingStep,
   ApiSetupMethod,
-} from '@/components/onboarding'
-import type { LocalModelSubmitData } from '@/components/onboarding/LocalModelStep'
-import type { ApiKeySubmitData } from '@/components/apisetup'
+  ApiKeySubmitData,
+  LocalModelSubmitData,
+} from '@/components/onboarding/apisetup-types'
 import type { CustomEndpointConfig } from '@config/llm-connections'
 import type { SetupNeeds, LlmConnectionSetup } from '../../shared/types'
 
@@ -49,13 +48,10 @@ interface UseOnboardingReturn {
   handleBack: () => void
 
   // API Setup (legacy — kept for direct edit)
-  handleSelectApiSetupMethod: (method: ApiSetupMethod) => void
 
   // Credentials
-  handleSubmitCredential: (data: ApiKeySubmitData) => void
 
   // Local model
-  handleSubmitLocalModel: (data: LocalModelSubmitData) => void
 
   // Git Bash (Windows)
   handleBrowseGitBash: () => Promise<string | null>
@@ -69,8 +65,6 @@ interface UseOnboardingReturn {
   handleFinish: () => void
   handleCancel: () => void
 
-  // Direct edit (skip method selection, jump to credentials)
-  jumpToCredentials: (method: ApiSetupMethod) => void
 
   // Reset
   reset: () => void
@@ -182,9 +176,7 @@ export function useOnboarding({
   const [state, setState] = useState<OnboardingState>({
     step: initialStep,
     loginStatus: 'idle',
-    credentialStatus: 'idle',
     completionStatus: 'saving',
-    apiSetupMethod: initialApiSetupMethod ?? null,
     isExistingUser: initialSetupNeeds?.needsBillingConfig ?? false,
     gitBashStatus: undefined,
     isRecheckingGitBash: false,
@@ -213,77 +205,6 @@ export function useOnboarding({
     checkGitBash()
   }, [])
 
-  // Save configuration using the new unified LLM connection API
-  // Returns true on success, false on failure (sets errorMessage on failure)
-  // `methodOverride` lets callers pass the method explicitly to avoid stale-closure issues
-  // (e.g. when called from an async OAuth flow whose closure predates the state update).
-  const handleSaveConfig = useCallback(async (
-    credential?: string,
-    options?: {
-      baseUrl?: string
-      connectionDefaultModel?: string
-      models?: string[]
-      piAuthProvider?: string
-      modelSelectionMode?: 'automaticallySyncedFromProvider' | 'userDefined3Tier'
-      customEndpoint?: CustomEndpointConfig
-      iamCredentials?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string }
-      awsRegion?: string
-      bedrockAuthMethod?: 'environment'
-    },
-    methodOverride?: ApiSetupMethod,
-    connectionSlugOverride?: string,
-    updateOnly?: boolean,
-  ): Promise<boolean> => {
-    const method = methodOverride ?? state.apiSetupMethod
-    if (!method) {
-      return false
-    }
-
-    setState(s => ({ ...s, completionStatus: 'saving' }))
-
-    try {
-      // Build connection setup from UI state
-      const setup = apiSetupMethodToConnectionSetup(method, {
-        credential,
-        baseUrl: options?.baseUrl,
-        connectionDefaultModel: options?.connectionDefaultModel,
-        models: options?.models,
-        piAuthProvider: options?.piAuthProvider,
-        modelSelectionMode: options?.modelSelectionMode,
-        customEndpoint: options?.customEndpoint,
-        iamCredentials: options?.iamCredentials,
-        awsRegion: options?.awsRegion,
-        bedrockAuthMethod: options?.bedrockAuthMethod,
-      }, connectionSlugOverride ?? editingSlug, existingSlugs)
-      // Use new unified API
-      const result = await window.electronAPI.setupLlmConnection(
-        updateOnly ? { ...setup, updateOnly: true } : setup
-      )
-
-      if (result.success) {
-        setState(s => ({ ...s, completionStatus: 'complete' }))
-        // Notify caller immediately so UI can reflect billing/model changes
-        onConfigSaved?.()
-        return true
-      } else {
-        console.error('[Onboarding] Save failed:', result.error)
-        setState(s => ({
-          ...s,
-          completionStatus: 'saving',
-          errorMessage: result.error || 'Failed to save configuration',
-        }))
-        return false
-      }
-    } catch (error) {
-      console.error('[Onboarding] handleSaveConfig error:', error)
-      setState(s => ({
-        ...s,
-        errorMessage: error instanceof Error ? error.message : 'Failed to save configuration',
-      }))
-      return false
-    }
-  }, [state.apiSetupMethod, onConfigSaved, editingSlug, existingSlugs])
-
   // Continue to next step
   const handleContinue = useCallback(async () => {
     switch (state.step) {
@@ -300,19 +221,11 @@ export function useOnboarding({
         setState(s => ({ ...s, step: 'provider-select' }))
         break
 
-      case 'local-model':
-        // Handled by handleSubmitLocalModel
-        break
-
-      case 'credentials':
-        // Handled by handleSubmitCredential
-        break
-
       case 'complete':
         onComplete()
         break
     }
-  }, [state.step, state.gitBashStatus, state.apiSetupMethod, onComplete])
+  }, [state.step, state.gitBashStatus, onComplete])
 
   // Go back to previous step. If at the initial step, call onDismiss instead.
   const handleBack = useCallback(() => {
@@ -334,192 +247,8 @@ export function useOnboarding({
           onDismiss()
         }
         break
-      case 'credentials':
-        setState(s => ({ ...s, step: 'provider-select', credentialStatus: 'idle', errorMessage: undefined }))
-        break
-      case 'local-model':
-        setState(s => ({ ...s, step: 'provider-select', credentialStatus: 'idle', errorMessage: undefined }))
-        break
     }
   }, [state.step, state.gitBashStatus, initialStep, onDismiss])
-
-  // Select API setup method (legacy — kept for direct edit flows)
-  const handleSelectApiSetupMethod = useCallback((method: ApiSetupMethod) => {
-    setState(s => ({ ...s, apiSetupMethod: method }))
-  }, [])
-
-  // Submit credential (API key + optional endpoint config)
-  // Tests the connection first before saving to catch issues early
-  const handleSubmitCredential = useCallback(async (data: ApiKeySubmitData) => {
-    setState(s => ({ ...s, credentialStatus: 'validating', errorMessage: undefined }))
-
-    const isPiApiKeyFlow = state.apiSetupMethod === 'pi_api_key'
-
-    try {
-      // Bedrock (Pi+amazon-bedrock) — skip API key validation and connection test
-      if (data.bedrockAuthMethod) {
-        const saved = await handleSaveConfig(undefined, {
-          baseUrl: data.baseUrl,
-          connectionDefaultModel: data.connectionDefaultModel,
-          models: data.models,
-          piAuthProvider: data.piAuthProvider,
-          modelSelectionMode: data.modelSelectionMode,
-          iamCredentials: data.iamCredentials,
-          awsRegion: data.awsRegion,
-          bedrockAuthMethod: data.bedrockAuthMethod,
-        })
-        if (saved) {
-          setState(s => ({ ...s, credentialStatus: 'success', step: 'complete' }))
-        } else {
-          setState(s => ({ ...s, credentialStatus: 'error' }))
-        }
-        return
-      }
-
-      // When editing an existing connection, API key is optional (empty = keep existing credential)
-      if (!data.apiKey.trim() && editingSlug) {
-        const saved = await handleSaveConfig(undefined, {
-          baseUrl: data.baseUrl,
-          connectionDefaultModel: data.connectionDefaultModel,
-          models: data.models,
-          piAuthProvider: data.piAuthProvider,
-          modelSelectionMode: data.modelSelectionMode,
-          customEndpoint: data.customEndpoint,
-        })
-        if (saved) {
-          setState(s => ({ ...s, credentialStatus: 'success', step: 'complete' }))
-        } else {
-          setState(s => ({ ...s, credentialStatus: 'error' }))
-        }
-        return
-      }
-
-      // API key validation differs by endpoint locality:
-      // - Local/loopback custom endpoints may be keyless (e.g. Ollama)
-      // - Non-local endpoints require an API key
-      const isLoopbackCustomEndpoint = isLoopbackEndpoint(data.baseUrl)
-      const isMaskedApiKey = isMaskedCredential(data.apiKey)
-      if (isPiApiKeyFlow) {
-        if (!data.apiKey.trim() && !isMaskedApiKey && !isLoopbackCustomEndpoint) {
-          setState(s => ({
-            ...s,
-            credentialStatus: 'error',
-            errorMessage: 'Please enter a valid API key',
-          }))
-          return
-        }
-      } else {
-        if (!data.apiKey.trim() && !isMaskedApiKey && !isLoopbackCustomEndpoint) {
-          setState(s => ({
-            ...s,
-            credentialStatus: 'error',
-            errorMessage: 'Please enter a valid API key',
-          }))
-          return
-        }
-      }
-
-      // Validate connection by spawning a lightweight subprocess test.
-      // Custom endpoint protocol routes through PiAgent at runtime, so test with Pi too.
-      const setupTestProvider = data.customEndpoint ? 'pi' : (isPiApiKeyFlow ? 'pi' : 'anthropic')
-      const testResult = await window.electronAPI.testLlmConnectionSetup({
-        provider: setupTestProvider,
-        apiKey: data.apiKey,
-        connectionSlug: editingSlug ?? undefined,
-        baseUrl: data.baseUrl,
-        model: data.models?.[0],
-        piAuthProvider: data.piAuthProvider,
-        customEndpoint: data.customEndpoint,
-      })
-
-      if (!testResult.success) {
-        setState(s => ({
-          ...s,
-          credentialStatus: 'error',
-          errorMessage: testResult.error || 'Connection test failed',
-        }))
-        return
-      }
-
-      const saved = await handleSaveConfig(data.apiKey, {
-        baseUrl: data.baseUrl,
-        connectionDefaultModel: data.connectionDefaultModel,
-        models: data.models,
-        piAuthProvider: data.piAuthProvider,
-        modelSelectionMode: data.modelSelectionMode,
-        customEndpoint: data.customEndpoint,
-      })
-
-      if (saved) {
-        setState(s => ({
-          ...s,
-          credentialStatus: 'success',
-          step: 'complete',
-        }))
-      } else {
-        // Save failed — error is already set by handleSaveConfig, stay on credentials step
-        setState(s => ({ ...s, credentialStatus: 'error' }))
-      }
-    } catch (error) {
-      setState(s => ({
-        ...s,
-        credentialStatus: 'error',
-        errorMessage: error instanceof Error ? error.message : 'Validation failed',
-      }))
-    }
-  }, [handleSaveConfig, state.apiSetupMethod])
-
-  // Save config, validate the connection, and update state accordingly.
-  // Shared by all setup flows after credentials are captured.
-  // `method` is passed explicitly to break the stale-closure chain — the
-  // await crosses renders, so handleSaveConfig's closure may have an outdated
-  // state.apiSetupMethod.
-  const saveAndValidateConnection = useCallback(async (connectionSlug: string, method: ApiSetupMethod, credential?: string, updateOnly?: boolean): Promise<boolean> => {
-    const saved = await handleSaveConfig(credential, undefined, method, connectionSlug, updateOnly)
-    if (!saved) {
-      setState(s => ({ ...s, credentialStatus: 'error' }))
-      return false
-    }
-    const testResult = await window.electronAPI.testLlmConnection(connectionSlug)
-    if (testResult.success) {
-      setState(s => ({ ...s, credentialStatus: 'success', step: 'complete' }))
-      return true
-    } else {
-      setState(s => ({ ...s, credentialStatus: 'error', errorMessage: testResult.error || 'Connection test failed' }))
-      return false
-    }
-  }, [handleSaveConfig])
-
-
-
-
-  // Submit local model configuration (Ollama or any OpenAI-compatible local server)
-  const handleSubmitLocalModel = useCallback(async (data: LocalModelSubmitData) => {
-    setState(s => ({ ...s, credentialStatus: 'validating', errorMessage: undefined }))
-
-    try {
-      // apiSetupMethod was set to 'anthropic_api_key' when entering local-model step
-      const saved = await handleSaveConfig(undefined, {
-        baseUrl: data.baseUrl,
-        connectionDefaultModel: data.model,
-        models: data.models,
-        customEndpoint: { api: 'openai-completions' },
-      })
-
-      if (saved) {
-        setState(s => ({ ...s, credentialStatus: 'success', step: 'complete' }))
-      } else {
-        setState(s => ({ ...s, credentialStatus: 'error' }))
-      }
-    } catch (error) {
-      setState(s => ({
-        ...s,
-        credentialStatus: 'error',
-        errorMessage: error instanceof Error ? error.message : 'Failed to save configuration',
-      }))
-    }
-  }, [handleSaveConfig])
-
 
   // Git Bash handlers (Windows only)
   const handleBrowseGitBash = useCallback(async () => {
@@ -574,37 +303,21 @@ export function useOnboarding({
     setState(s => ({ ...s, step: 'welcome' }))
   }, [])
 
-  // Jump directly to credentials step with a pre-set method (for editing existing connections)
-  const jumpToCredentials = useCallback((method: ApiSetupMethod) => {
-    setState(s => ({
-      ...s,
-      step: 'credentials' as const,
-      apiSetupMethod: method,
-      credentialStatus: 'idle' as const,
-      errorMessage: undefined,
-    }))
-  }, [])
-
   // Reset onboarding to initial state (used after logout or modal close)
   const reset = useCallback(() => {
     setState({
       step: initialStep,
       loginStatus: 'idle',
-      credentialStatus: 'idle',
       completionStatus: 'saving',
-      apiSetupMethod: initialApiSetupMethod ?? null,
       isExistingUser: false,
       errorMessage: undefined,
     })
-  }, [initialStep, initialApiSetupMethod])
+  }, [initialStep])
 
   return {
     state,
     handleContinue,
     handleBack,
-    handleSelectApiSetupMethod,
-    handleSubmitCredential,
-    handleSubmitLocalModel,
     // Git Bash (Windows)
     handleBrowseGitBash,
     handleUseGitBashPath,
@@ -612,7 +325,6 @@ export function useOnboarding({
     handleClearError,
     handleFinish,
     handleCancel,
-    jumpToCredentials,
     reset,
   }
 }

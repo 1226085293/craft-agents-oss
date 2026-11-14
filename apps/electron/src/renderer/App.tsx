@@ -2183,9 +2183,6 @@ export default function App() {
               // and is the only place that stays in step with the config schema.
               void openSettingsWindow('llm', windowWorkspaceId)
             }}
-            onSelectApiSetupMethod={onboarding.handleSelectApiSetupMethod}
-            onSubmitCredential={onboarding.handleSubmitCredential}
-            onSubmitLocalModel={onboarding.handleSubmitLocalModel}
             onFinish={onboarding.handleFinish}
             onBrowseGitBash={onboarding.handleBrowseGitBash}
             onUseGitBashPath={onboarding.handleUseGitBashPath}

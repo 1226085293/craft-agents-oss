@@ -1,96 +1,41 @@
 /**
- * OnboardingFlowDemo — Interactive walkthrough of the new onboarding flow.
+ * OnboardingFlowDemo — Interactive walkthrough of the onboarding flow.
  *
- * Manages its own state so you can click through the entire sequence
- * in the playground without needing real IPC or OAuth.
+ * Manages its own state so you can click through the sequence in the playground without needing
+ * real IPC.
  *
- * Flow: WelcomeStep → ProviderSelectStep → CredentialsStep / LocalModelStep → CompletionStep
+ * Flow: WelcomeStep → ProviderSelectStep → CompletionStep
+ *
+ * The credential and local-model screens used to sit between provider-select and completion.
+ * They are gone: connection setup is Settings → LLM gateway now, and the welcome flow opens that
+ * page instead of collecting a key itself.
  */
 import { useState, useCallback, useEffect } from 'react'
 import { ensureMockElectronAPI } from '../mock-utils'
 import { WelcomeStep } from '@/components/onboarding/WelcomeStep'
 import { ProviderSelectStep } from '@/components/onboarding/ProviderSelectStep'
-import { CredentialsStep } from '@/components/onboarding/CredentialsStep'
-import { LocalModelStep } from '@/components/onboarding/LocalModelStep'
 import { CompletionStep } from '@/components/onboarding/CompletionStep'
-import type { ApiSetupMethod } from '@/components/onboarding/APISetupStep'
-import type { CredentialStatus } from '@/components/onboarding/CredentialsStep'
 
-type DemoStep = 'welcome' | 'provider-select' | 'credentials' | 'local-model' | 'complete'
+type DemoStep = 'welcome' | 'provider-select' | 'complete'
 
 export function OnboardingFlowDemo() {
   useEffect(() => { ensureMockElectronAPI() }, [])
 
   const [step, setStep] = useState<DemoStep>('welcome')
-  const [method, setMethod] = useState<ApiSetupMethod | null>(null)
-  const [credStatus, setCredStatus] = useState<CredentialStatus>('idle')
-  const [localStatus, setLocalStatus] = useState<'idle' | 'validating' | 'success' | 'error'>('idle')
-  const [errorMessage, setErrorMessage] = useState<string | undefined>()
 
-  // The real screen has one action now: open the LLM gateway settings page. The demo keeps the
-  // credentials step reachable so that screen still has a preview — nothing in production
-  // navigates here any more.
+  // In the real app this opens Settings → LLM gateway. The demo advances so the rest of the
+  // sequence stays previewable.
   const handleOpenLlmSettings = useCallback(() => {
-    setCredStatus('idle')
-    setLocalStatus('idle')
-    setErrorMessage(undefined)
-    setMethod('pi_api_key')
-    setStep('credentials')
-  }, [])
-
-  const handleBack = useCallback(() => {
-    switch (step) {
-      case 'provider-select':
-        setStep('welcome')
-        break
-      case 'credentials':
-      case 'local-model':
-        setStep('provider-select')
-        setCredStatus('idle')
-        setLocalStatus('idle')
-        setErrorMessage(undefined)
-        break
-    }
-  }, [step])
-
-  const simulateOAuthSuccess = useCallback(() => {
-    setCredStatus('validating')
-    setTimeout(() => {
-      setCredStatus('success')
-      setTimeout(() => setStep('complete'), 600)
-    }, 1500)
-  }, [])
-
-  const simulateApiKeySubmit = useCallback(() => {
-    setCredStatus('validating')
-    setTimeout(() => {
-      setCredStatus('success')
-      setTimeout(() => setStep('complete'), 600)
-    }, 1200)
-  }, [])
-
-  const simulateLocalSubmit = useCallback(() => {
-    setLocalStatus('validating')
-    setTimeout(() => {
-      setLocalStatus('success')
-      setTimeout(() => setStep('complete'), 600)
-    }, 1200)
+    setStep('complete')
   }, [])
 
   const handleRestart = useCallback(() => {
     setStep('welcome')
-    setMethod(null)
-    setCredStatus('idle')
-    setLocalStatus('idle')
-    setErrorMessage(undefined)
   }, [])
 
-  // Step labels for the breadcrumb
-  const activeStepLabel = step === 'local-model' ? 'Local Model' : 'Credentials'
   const STEP_ORDER: { key: DemoStep; label: string }[] = [
     { key: 'welcome', label: 'Welcome' },
     { key: 'provider-select', label: 'Provider' },
-    { key: step === 'local-model' ? 'local-model' : 'credentials', label: activeStepLabel },
     { key: 'complete', label: 'Done' },
   ]
 
@@ -137,25 +82,6 @@ export function OnboardingFlowDemo() {
 
         {step === 'provider-select' && (
           <ProviderSelectStep onOpenLlmSettings={handleOpenLlmSettings} />
-        )}
-
-        {step === 'credentials' && method && (
-          <CredentialsStep
-            apiSetupMethod={method}
-            status={credStatus}
-            errorMessage={errorMessage}
-            onSubmit={simulateApiKeySubmit}
-            onBack={handleBack}
-          />
-        )}
-
-        {step === 'local-model' && (
-          <LocalModelStep
-            onSubmit={simulateLocalSubmit}
-            onBack={handleBack}
-            status={localStatus}
-            errorMessage={errorMessage}
-          />
         )}
 
         {step === 'complete' && (

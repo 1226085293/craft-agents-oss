@@ -2,8 +2,6 @@ import type { ComponentEntry } from './types'
 import { OnboardingFlowDemo } from '../demos/OnboardingFlowDemo'
 import { ProviderSelectStep } from '@/components/onboarding/ProviderSelectStep'
 import { WelcomeStep } from '@/components/onboarding/WelcomeStep'
-import { APISetupStep } from '@/components/onboarding/APISetupStep'
-import { CredentialsStep } from '@/components/onboarding/CredentialsStep'
 import { CompletionStep } from '@/components/onboarding/CompletionStep'
 import { GitBashWarning, type GitBashStatus } from '@/components/onboarding/GitBashWarning'
 import { OnboardingWizard } from '@/components/onboarding/OnboardingWizard'
@@ -12,9 +10,7 @@ import type { OnboardingState } from '@/components/onboarding/OnboardingWizard'
 const createOnboardingState = (overrides: Partial<OnboardingState> = {}): OnboardingState => ({
   step: 'welcome',
   loginStatus: 'idle',
-  credentialStatus: 'idle',
   completionStatus: 'complete',
-  apiSetupMethod: null,
   isExistingUser: false,
   gitBashStatus: { found: false, path: null, platform: 'win32' },
   isRecheckingGitBash: false,
@@ -75,91 +71,6 @@ export const onboardingComponents: ComponentEntry[] = [
     ],
     mockData: () => ({
       onContinue: noopHandler,
-    }),
-  },
-  {
-    id: 'api-setup-step',
-    name: 'APISetupStep',
-    category: 'Onboarding',
-    description: 'Choose payment method for AI usage with provider segmented control',
-    component: APISetupStep,
-    props: [
-      {
-        name: 'selectedMethod',
-        description: 'Currently selected API setup method',
-        control: {
-          type: 'select',
-          options: [
-            { label: 'None', value: '' },
-            { label: 'Anthropic API Key', value: 'anthropic_api_key' },
-            { label: 'CAB API Key', value: 'pi_api_key' },
-          ],
-        },
-        defaultValue: '',
-      },
-      {
-        name: 'initialSegment',
-        description: 'Initial provider segment to show',
-        control: {
-          type: 'select',
-          options: [
-            { label: 'Anthropic', value: 'anthropic' },
-            { label: 'OpenAI', value: 'openai' },
-          ],
-        },
-        defaultValue: 'anthropic',
-      },
-    ],
-    variants: [
-      { name: 'Anthropic Segment', props: { selectedMethod: null, initialSegment: 'anthropic' } },
-      { name: 'Anthropic - API Key Selected', props: { selectedMethod: 'anthropic_api_key', initialSegment: 'anthropic' } },
-      { name: 'CAB Segment', props: { selectedMethod: null, initialSegment: 'pi' } },
-      { name: 'CAB - API Key Selected', props: { selectedMethod: 'pi_api_key', initialSegment: 'pi' } },
-    ],
-    mockData: () => ({
-      onSelect: (method: string) => console.log('[Playground] Selected method:', method),
-      onContinue: noopHandler,
-      onBack: noopHandler,
-    }),
-  },
-  {
-    id: 'credentials-step-api-key',
-    name: 'Credentials - API Key',
-    category: 'Onboarding',
-    description: 'API key + optional Base URL and Model for compatible APIs',
-    component: CredentialsStep,
-    props: [
-      {
-        name: 'status',
-        description: 'Credential validation status',
-        control: {
-          type: 'select',
-          options: [
-            { label: 'Idle', value: 'idle' },
-            { label: 'Validating', value: 'validating' },
-            { label: 'Success', value: 'success' },
-            { label: 'Error', value: 'error' },
-          ],
-        },
-        defaultValue: 'idle',
-      },
-      {
-        name: 'errorMessage',
-        description: 'Error message to display',
-        control: { type: 'string', placeholder: 'Error message' },
-        defaultValue: '',
-      },
-    ],
-    variants: [
-      { name: 'Idle', props: { apiSetupMethod: 'pi_api_key', status: 'idle' } },
-      { name: 'Validating', props: { apiSetupMethod: 'pi_api_key', status: 'validating' } },
-      { name: 'Success', props: { apiSetupMethod: 'pi_api_key', status: 'success' } },
-      { name: 'Error', props: { apiSetupMethod: 'pi_api_key', status: 'error', errorMessage: 'Invalid API key. Please check and try again.' } },
-    ],
-    mockData: () => ({
-      apiSetupMethod: 'pi_api_key',
-      onSubmit: (data: { apiKey: string; baseUrl?: string; connectionDefaultModel?: string; models?: string[] }) => console.log('[Playground] Submitted:', data),
-      onBack: noopHandler,
     }),
   },
   {
@@ -274,12 +185,6 @@ export const onboardingComponents: ComponentEntry[] = [
         name: 'Git Bash Warning (Rechecking)',
         props: {
           state: createOnboardingState({ step: 'git-bash', isRecheckingGitBash: true }),
-        },
-      },
-      {
-        name: 'Credentials - API Key',
-        props: {
-          state: createOnboardingState({ step: 'credentials', apiSetupMethod: 'anthropic_api_key' }),
         },
       },
       {

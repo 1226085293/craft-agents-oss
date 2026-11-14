@@ -119,7 +119,7 @@ export interface SettingsRadioCardProps {
  *   value="api_key"
  *   label="API Key"
  *   description="Pay-as-you-go with your Anthropic key"
- *   expandedContent={<ApiKeyInput />}
+ *   expandedContent={<SomeExpandedControl />}
  * />
  */
 export function SettingsRadioCard({

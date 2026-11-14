@@ -512,7 +512,7 @@ export function resolveMidStreamBehavior(
  * to the model's `id` when promoting so that downstream renderer surfaces that
  * read `m.name` (the trigger button display, picker row labels) keep showing a
  * label after the toggle promotes a string entry. The `ModelDefinition` cast
- * matches the existing shape produced by `ApiKeyInput.tsx` and the Pi driver.
+ * matches the shape the Pi driver expects for a connection.
  */
 export function setModelSupportsImages(
   connection: LlmConnection,

@@ -1,20 +1,21 @@
 import { cn } from "@/lib/utils"
 import { WelcomeStep } from "./WelcomeStep"
-import type { ApiSetupMethod } from "./APISetupStep"
 import { ProviderSelectStep } from "./ProviderSelectStep"
-import { CredentialsStep, type CredentialStatus } from "./CredentialsStep"
-import { LocalModelStep, type LocalModelSubmitData } from "./LocalModelStep"
 import { CompletionStep } from "./CompletionStep"
 import { GitBashWarning, type GitBashStatus } from "./GitBashWarning"
-import type { ApiKeySubmitData } from "../apisetup"
-import type { CustomEndpointApi } from '@config/llm-connections'
 
+/**
+ * Steps the welcome flow can be on.
+ *
+ * `credentials` and `local-model` used to be here: the wizard collected an API key or a local
+ * endpoint itself. Both screens are gone — connection setup lives in Settings → LLM gateway, and
+ * the welcome flow reaches it through `onOpenLlmSettings`. Leaving the two values in the union
+ * would have kept a state the flow can no longer enter.
+ */
 export type OnboardingStep =
   | 'welcome'
   | 'git-bash'
   | 'provider-select'
-  | 'local-model'
-  | 'credentials'
   | 'complete'
 
 export type LoginStatus = 'idle' | 'waiting' | 'success' | 'error'
@@ -22,9 +23,7 @@ export type LoginStatus = 'idle' | 'waiting' | 'success' | 'error'
 export interface OnboardingState {
   step: OnboardingStep
   loginStatus: LoginStatus
-  credentialStatus: CredentialStatus
   completionStatus: 'saving' | 'complete'
-  apiSetupMethod: ApiSetupMethod | null
   isExistingUser: boolean
   errorMessage?: string
   gitBashStatus?: GitBashStatus
@@ -39,8 +38,6 @@ interface OnboardingWizardProps {
   // Event handlers
   onContinue: () => void
   onBack: () => void
-  onSelectApiSetupMethod: (method: ApiSetupMethod) => void
-  onSubmitCredential: (data: ApiKeySubmitData) => void
   onFinish: () => void
 
   // Git Bash (Windows)
@@ -49,28 +46,8 @@ interface OnboardingWizardProps {
   onRecheckGitBash?: () => void
   onClearError?: () => void
 
-  // Provider select
-  /**
-   * Open the LLM gateway settings page.
-   *
-   * The wizard used to branch into five provider-specific credential flows; all of them are
-   * replaced by that one page, so the callback is all this screen needs.
-   */
+  /** Open Settings → LLM gateway (the only connection-setup path the flow has) */
   onOpenLlmSettings?: () => void
-
-  // Local model
-  onSubmitLocalModel?: (data: LocalModelSubmitData) => void
-
-  // Edit mode (pre-fill existing connection values)
-  editInitialValues?: {
-    apiKey?: string
-    baseUrl?: string
-    connectionDefaultModel?: string
-    activePreset?: string
-    models?: string[]
-    customApi?: CustomEndpointApi
-    supportsImages?: boolean
-  }
 
   className?: string
 }
@@ -78,18 +55,15 @@ interface OnboardingWizardProps {
 /**
  * OnboardingWizard - Full-screen onboarding flow container
  *
- * Manages the step-by-step flow for setting up Craft Agent:
  * 1. Welcome
- * 2. Provider Select (Claude / ChatGPT / Copilot / API Key / Local)
- * 3. Credentials (API Key or OAuth) or Local Model
+ * 2. Git Bash (Windows only)
+ * 3. Provider select — a single card that opens LLM settings
  * 4. Completion
  */
 export function OnboardingWizard({
   state,
   onContinue,
   onBack,
-  onSelectApiSetupMethod,
-  onSubmitCredential,
   onFinish,
   // Git Bash (Windows)
   onBrowseGitBash,
@@ -98,10 +72,6 @@ export function OnboardingWizard({
   onClearError,
   // Provider select
   onOpenLlmSettings,
-  // Local model
-  onSubmitLocalModel,
-  // Edit mode
-  editInitialValues,
   className
 }: OnboardingWizardProps) {
   const renderStep = () => {
@@ -131,28 +101,6 @@ export function OnboardingWizard({
 
       case 'provider-select':
         return <ProviderSelectStep onOpenLlmSettings={onOpenLlmSettings!} />
-
-      case 'local-model':
-        return (
-          <LocalModelStep
-            onSubmit={onSubmitLocalModel!}
-            onBack={onBack}
-            status={state.credentialStatus === 'validating' ? 'validating' : state.credentialStatus === 'error' ? 'error' : 'idle'}
-            errorMessage={state.errorMessage}
-          />
-        )
-
-      case 'credentials':
-        return (
-          <CredentialsStep
-            apiSetupMethod={state.apiSetupMethod!}
-            status={state.credentialStatus}
-            errorMessage={state.errorMessage}
-            onSubmit={onSubmitCredential}
-            onBack={onBack}
-            editInitialValues={editInitialValues}
-          />
-        )
 
       case 'complete':
         return (

@@ -15,7 +15,7 @@
  * this out explicitly.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { CONFIG_DIR } from './paths.ts';
@@ -257,58 +257,144 @@ export function readLlmUsage(): LlmUsageRecord[] {
   // Persisted days first (oldest → newest), then the session file, so the
   // merged list stays time-ordered without a sort.
   const days = listDayFiles().reverse();
+  const sources = days.map((name) => join(usageDir(), name));
+  sources.push(usagePath());
+
+  // The merged result itself is cached, not only the per-file parses: the
+  // cross-file de-duplication is a string key per record, which over ~50k
+  // records costs more than the parse does once the parse is cached. Readers
+  // get a shallow copy so a caller that sorts in place cannot reorder the cache.
+  const sig = sources.map((path) => `${path}#${statSig(path) ?? '-'}`).join('\n');
+  if (mergedCache?.sig === sig) return mergedCache.records.slice();
+
   const out: LlmUsageRecord[] = [];
   const seen = new Set<string>();
-  for (const name of days) out.push(...parseLines(readFileSafe(join(usageDir(), name)), seen));
-  out.push(...parseLines(readFileSafe(usagePath()), seen));
-  return out;
+  for (const path of sources) {
+    // Keys are collected per file and merged afterwards on purpose: a repeated
+    // request inside *one* file is legitimate and must survive, while the copy
+    // of it in the other file must not.
+    const local = new Set<string>();
+    for (const rec of parsedFile(path)) {
+      if (!rec) continue;
+      const key = recordKey(rec);
+      // Only a key contributed by a *previous* source is a duplicate: the same
+      // request repeated inside one file is legitimate.
+      if (seen.has(key)) continue;
+      local.add(key);
+      out.push(rec);
+    }
+    for (const key of local) seen.add(key);
+  }
+  pruneFileCache(sources);
+  mergedCache = { sig, records: out };
+  return out.slice();
 }
 
-function readFileSafe(path: string): string {
+let mergedCache: { sig: string; records: LlmUsageRecord[] } | null = null;
+
+// ============================================================================
+// Parse cache
+// ============================================================================
+
+/**
+ * Records of one already-parsed file, keyed by its stat signature.
+ *
+ * Both readers used to `readFileSync` + `JSON.parse` every line of every file
+ * per call. With ~50k records and 28 MB on disk that cost ~220 ms of *synchronous*
+ * work per call, and the settings page calls the read path once per provider
+ * (15 of them) on mount while the log view polls every 3 s — seconds of a
+ * blocked main process, which is what made the page feel frozen.
+ *
+ * Files are append-only, so a file whose size/mtime/inode did not change cannot
+ * have new records: the parsed array is safe to reuse. Inode and ctime are part
+ * of the signature so a file recreated at the same size (tests, a pruned and
+ * re-written day file) is never mistaken for the cached one.
+ */
+interface ParsedFile {
+  sig: string
+  /** Index-aligned with the file's lines; `null` = blank or unparseable line. */
+  records: Array<LlmUsageRecord | null>
+}
+
+const parsedFiles = new Map<string, ParsedFile>()
+let cachedLines = 0
+/** Bound on retained parsed lines, so a long history cannot grow unbounded. */
+const MAX_CACHED_LINES = 200_000
+
+function statSig(path: string): string | null {
   try {
-    return readFileSync(path, 'utf8');
+    const st = statSync(path)
+    return `${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`
   } catch {
-    return '';
+    return null
+  }
+}
+
+/** Parsed records of one source, parsing only when the file actually changed. */
+function parsedFile(path: string): Array<LlmUsageRecord | null> {
+  const sig = statSig(path)
+  if (sig === null) return []
+  const hit = parsedFiles.get(path)
+  if (hit && hit.sig === sig) {
+    // Re-insert to keep Map order ≈ least-recently-used first.
+    parsedFiles.delete(path)
+    parsedFiles.set(path, hit)
+    return hit.records
+  }
+  let raw: string
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch {
+    return []
+  }
+  const lines = raw.split('\n')
+  const records = new Array<LlmUsageRecord | null>(lines.length).fill(null)
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim()
+    if (!line) continue
+    try {
+      records[i] = JSON.parse(line) as LlmUsageRecord
+    } catch {
+      // A torn final line (crash mid-append) or a corrupt one in the middle:
+      // losing that record beats failing the whole dashboard.
+    }
+  }
+  if (hit) cachedLines -= hit.records.length
+  cachedLines += records.length
+  parsedFiles.set(path, { sig, records })
+  evictParsedFiles()
+  return records
+}
+
+function evictParsedFiles(): void {
+  for (const [path, entry] of parsedFiles) {
+    if (cachedLines <= MAX_CACHED_LINES) return
+    parsedFiles.delete(path)
+    cachedLines -= entry.records.length
+  }
+}
+
+/** Forget entries for files that no longer exist (a pruned day file). */
+function pruneFileCache(live: ReadonlyArray<string>): void {
+  if (parsedFiles.size <= live.length) return
+  const keep = new Set(live)
+  for (const [path, entry] of parsedFiles) {
+    if (keep.has(path)) continue
+    parsedFiles.delete(path)
+    cachedLines -= entry.records.length
   }
 }
 
 /**
- * Parse one source, skipping lines another source already contributed.
+ * Cross-file identity of one record.
  *
- * The comparison is on the raw line: the two files receive byte-identical
- * records, and two requests that are identical in *every* field and land in the
- * same millisecond are not distinguishable anyway — while two identical lines in
- * the *same* file are kept, because a repeated request is legitimate.
+ * The two sinks receive byte-identical JSON for the same request, so any
+ * faithful field signature identifies the copy. Derived from the record rather
+ * than the raw line so the cache does not have to retain 28 MB of source text
+ * just to de-duplicate against it.
  */
-function parseLines(raw: string, seen?: Set<string>): LlmUsageRecord[] {
-  if (!raw) return [];
-  const lines = raw.split('\n');
-  const out: LlmUsageRecord[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    if (!line) continue;
-    if (seen?.has(line)) continue;
-    // The last line may be a torn write; only tolerate that on the final entry.
-    if (i === lines.length - 1) {
-      try {
-        out.push(JSON.parse(line) as LlmUsageRecord);
-      } catch {
-        break;
-      }
-      continue;
-    }
-    try {
-      out.push(JSON.parse(line) as LlmUsageRecord);
-    } catch {
-      // A bad line in the middle is skipped; the rest of the history remains
-      // readable, which is the point of an append-only log.
-    }
-  }
-  if (seen) for (const l of lines) {
-    const t = l.trim();
-    if (t) seen.add(t);
-  }
-  return out;
+function recordKey(r: LlmUsageRecord): string {
+  return `${r.ts}|${r.startedAt ?? ''}|${r.provider}|${r.keyId}|${r.publicModel}|${r.upstreamModel}|${r.status}|${r.statusCode}|${r.attempts ?? ''}|${r.totalMs ?? ''}|${r.promptTokens ?? ''}|${r.completionTokens ?? ''}|${r.error ?? ''}`
 }
 
 /** Most recent `limit` records, oldest first. */
@@ -447,20 +533,16 @@ export function queryLlmUsage(query: UsageQuery = {}): UsageQueryResult {
   const seen = new Set<string>()
 
   outer: for (const path of sources) {
-    const raw = readFileSafe(path)
-    if (!raw) continue
-    const lines = raw.split('\n')
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i]!.trim()
-      if (!line) continue
-      if (seen.has(line)) continue
-      let rec: LlmUsageRecord
-      try {
-        rec = JSON.parse(line) as LlmUsageRecord
-      } catch {
-        // Torn last line (or a corrupt one) — skip it, keep walking.
-        continue
-      }
+    const records = parsedFile(path)
+    // Per-file keys, merged after the file: a repeated identical request inside
+    // one file is kept, its copy in the other sink is not.
+    const local = new Set<string>()
+    for (let i = records.length - 1; i >= 0; i--) {
+      const rec = records[i]
+      if (!rec) continue
+      const key = recordKey(rec)
+      if (seen.has(key)) { local.add(key); continue }
+      local.add(key)
       if (tags.length > 0 && !tags.every((t) => tagMatches(rec, t))) continue
       if (rows.length >= limit) {
         truncated = true
@@ -468,11 +550,9 @@ export function queryLlmUsage(query: UsageQuery = {}): UsageQueryResult {
       }
       rows.push(rec)
     }
-    for (const l of lines) {
-      const t = l.trim()
-      if (t) seen.add(t)
-    }
+    for (const key of local) seen.add(key)
   }
+  pruneFileCache(sources)
 
   // Sources are already newest-first, but each file is only internally ordered;
   // sort so a batch appended out of order (or a clock skew) cannot misorder rows.

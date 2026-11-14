@@ -529,16 +529,17 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
   /** One rule, as a short fact: 「定时 · 0 9 * * *」 / 「事件 · github/issues」. */
   const describeRule = (rule: TaskTriggerValue): string => {
     if (rule.kind === 'cron') {
-      /**
-       * The words first, the expression in backticks after them.
-       *
-       * `* * * * *` is a complete expression — every field is a wildcard, so it fires every minute —
-       * but bare it reads like a template nobody filled in. The label says what it means; the code
-       * span keeps the exact expression for anyone who needs it, and keeps the asterisks literal:
-       * in Markdown `* * * * *` is emphasis and rendered as `****`.
-       */
       const schedule = describeCron(rule.expr)
-      const short = schedule === rule.expr ? `\`${rule.expr}\`` : `${schedule}（\`${rule.expr}\`）`
+      /**
+       * Words only — the expression adds nothing once the words are right.
+       *
+       * This label is plain text in a `<span>`, not Markdown, so any wrapper shows up literally: with
+       * backticks it read 「每分钟（`* * * * *`）」, and without them 「每分钟（* * * * *）」 — either way five
+       * asterisks sat next to the words that already said the same thing. The expression is still the
+       * source of truth on the record; it is printed only when `describeCron` did not recognise the
+       * shape, which is exactly when the words are missing.
+       */
+      const short = schedule === rule.expr ? rule.expr : schedule
       return `定时 · ${short}${rule.timezone ? ` (${rule.timezone})` : ''}${rule.enabled === false ? '（已停用）' : ''}`
     }
     if (rule.kind === 'event') {

@@ -73,7 +73,7 @@ describe('a recurring round ends, not the task', () => {
     expect(after.status).not.toBe('completed');
   });
 
-  it('resets the plan so the next round can be dispatched', async () => {
+  it('clears the plan so the next round writes its own', async () => {
     const svc = service();
     const artifact = join(root, 'out.md');
     writeFileSync(artifact, 'hello', 'utf-8');
@@ -84,16 +84,16 @@ describe('a recurring round ends, not the task', () => {
 
     await deliver(svc, task.id, artifact);
 
-    const plan = svc.get(task.id)!.spec?.plan ?? [];
-    expect(plan.map((step) => step.status)).toEqual(['todo']);
-    // Ownership survives the reset — the plan is the record of who does what, and clearing it
-    // would leave the next round's step unassigned.
-    expect(plan[0]?.agent).toBe('builtin-default');
+    // The round's plan is the round: it leaves with it. Keeping the steps (even as `todo`) let each
+    // round append its own section onto the last one, until the plan described history.
+    expect(svc.get(task.id)!.spec?.plan ?? []).toEqual([]);
   });
 
 
-  it('keeps the evidence note with the step it proved', async () => {
-    // The reset exists to make the next round dispatchable, not to erase why this one counted.
+  it("keeps the round's outline in the journal, where nothing can inherit it", async () => {
+    // The note is the evidence for why a step counted. It used to survive on the step, which meant the
+    // step survived too — and the next round appended to it. The round's own record is the journal
+    // snapshot and `handoffs`; the live plan belongs to the round that is running now.
     const svc = service();
     const artifact = join(root, 'out.md');
     writeFileSync(artifact, 'hello', 'utf-8');
@@ -103,9 +103,10 @@ describe('a recurring round ends, not the task', () => {
 
     await deliver(svc, task.id, artifact);
 
-    const step = svc.get(task.id)!.spec?.plan?.[0]
-    expect(step?.status).toBe('todo')
-    expect(step?.note).toContain('12 passed')
+    expect(svc.get(task.id)!.spec?.plan ?? []).toEqual([]);
+    const reset = readJournal(root, task.id).find((entry) => entry.type === 'round_reset')
+    const snapshot = (reset?.data as { plan?: Array<{ id: string }> } | undefined)?.plan
+    expect(snapshot?.map((step) => step.id)).toEqual(['1.1'])
   })
 
   it('keeps what the round did in the journal, because the plan no longer shows it', async () => {

@@ -487,12 +487,14 @@ describe('the trigger is editable from the page', () => {
     expect(html).not.toContain('第 1 轮')
   })
 
-  it('keeps the cron expression literal instead of letting Markdown eat the stars', () => {
-    // Live: every cron task read 「定时 · **** (Asia/Shanghai)」 because `* * * * *` is emphasis in
-    // Markdown. The person could not tell one cadence from another, and 「每分钟」 looked broken.
+  it('does not print a bare expression next to the words that already say it', () => {
+    // Live: the meta line read 「每分钟（`* * * * *`）」 — backticks, because this label is a plain-text
+    // `<span>` and never goes through Markdown. Dropping the backticks only traded one artefact for
+    // another (「每分钟（* * * * *）」), so a recognised schedule now prints as words alone.
     const html = renderDetail({ ...detail, trigger: { kind: 'cron', expr: '* * * * *', timezone: 'Asia/Shanghai', enabled: true } })
-    expect(html).toContain('* * * * *')
-    expect(html).not.toMatch(/定时 · \*\*\*\*/)
+    expect(html).toContain('每分钟')
+    expect(html).not.toContain('* * * * *')
+    expect(html).not.toContain('`')
   })
 
   it('says the cadence in words before the expression', () => {
@@ -502,6 +504,8 @@ describe('the trigger is editable from the page', () => {
     const everyMinute = renderDetail({ ...detail, trigger: { kind: 'cron', expr: '* * * * *', timezone: 'Asia/Shanghai', enabled: true } })
     expect(everyMinute).toContain('每分钟')
 
+    // A shape the describer does not know keeps its expression: the words are missing, so the
+    // expression is the only thing that can tell one schedule from another.
     const weekdays = renderDetail({ ...detail, trigger: { kind: 'cron', expr: '0 9 * * 1-5', timezone: 'Asia/Shanghai', enabled: true } })
     expect(weekdays).toContain('0 9 * * 1-5')
     expect(weekdays).not.toContain('每分钟')

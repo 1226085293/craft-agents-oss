@@ -64,7 +64,9 @@ describe('a round plans its own steps', () => {
 
     const after = svc.get(task.id)!;
     expect(after.status).toBe('backlog');
-    expect(after.spec?.plan?.map((step) => step.status)).toEqual(['todo']);
+    // Empty, not `todo`: resetting the statuses kept every step, so the next round's model saw last
+    // round's outline still in place and appended to it —五个 section 的任务计划长成了六个。
+    expect(after.spec?.plan).toEqual([]);
     expect(after.stats?.lastRound?.round).toBe(1);
   })
 

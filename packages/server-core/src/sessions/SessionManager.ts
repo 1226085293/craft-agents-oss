@@ -117,6 +117,7 @@ import { SupervisorRuntime } from '../routing/supervisor-runtime.ts'
 import { completedClaimRefusal, resumeDecisionFor, formatSupervisorMessage } from '@craft-agent/shared/tasks'
 import { buildAgentToolBindings } from './agent-tools-bindings.ts'
 import { unclaimedRelayedTaskRefusal } from './relayed-task-guard.ts'
+import { canSpendParkedArchive, decideRoundEndArchive } from './round-end-archive.ts'
 import {
   buildSectionOwnerPrompt,
   parseSectionOwner,
@@ -2097,6 +2098,16 @@ export class SessionManager implements ISessionManager {
   static readonly STOP_GRACE_MS = 5_000
 
   private sessions: Map<string, ManagedSession> = new Map()
+  /**
+   * Workers whose round ended while they were still finishing their own turn.
+   *
+   * `report_result` is a tool call, so the worker is mid-turn the instant it hands off — the round is
+   * over but the conversation is not. Archiving there tore down a live turn, so the archive was simply
+   * skipped and the session outlived every round it ran: live at 12:1x, T-1 accumulated one worker per
+   * round (broad-swan, lucid-beach) while the record said its round was closed. The request is parked
+   * here and spent in `onProcessingStopped`, which is the moment the turn actually ends.
+   */
+  private archiveAfterTurn: Set<string> = new Set()
   // Delta batching for performance - reduces IPC events from 50+/sec to ~20/sec
   private pendingDeltas: Map<string, PendingDelta> = new Map()
   private deltaFlushTimers: Map<string, NodeJS.Timeout> = new Map()
@@ -8091,13 +8102,19 @@ ${request.prompt}`;
        */
       onRoundEnd: (_taskId, sessionId) => {
         const managed = this.sessions.get(sessionId)
-        // Still finishing its turn: it has already handed off, and archiving under it would tear down
-        // a live conversation. `currentSessionId` is cleared either way, so it will not be reused.
-        if (!managed || managed.isArchived || managed.isProcessing) return
+        // The worker is mid-turn: `report_result` is itself a tool call of the turn that just ended the
+        // round. Archiving there used to be skipped outright, which is why one worker per round stayed
+        // on disk forever. Park it instead — `onProcessingStopped` spends the request when the turn ends.
+        const decision = decideRoundEndArchive(managed)
+        if (decision === 'skip') return
+        if (decision === 'defer') {
+          this.archiveAfterTurn.add(sessionId)
+          return
+        }
         void this.moveSessionToScope(
           sessionId,
-          managed.projectId ?? null,
-          managed.folderId ?? null,
+          managed!.projectId ?? null,
+          managed!.folderId ?? null,
           true,
         ).catch((error) => {
           sessionLog.warn('failed to archive a finished round worker', { sessionId, error })
@@ -13063,6 +13080,29 @@ ${request.prompt}`;
     // 会话停止处理 5 分钟后断开本会话 MCP 连接（guide 预期“空闲时 0 常驻”）；
     // 下一轮消息发送时 hasSources 分支会重新 sync 连接。
     this.scheduleMcpIdleDisconnect(managed)
+
+    /**
+     * Spend a parked round-end archive.
+     *
+     * `onRoundEnd` cannot archive a worker that is still running the turn that reported the hand-off,
+     * so it leaves the id here. This is that turn ending — the conversation is idle and the session is
+     * finished with the task. Deferred to a microtask so this turn's own bookkeeping (queued messages,
+     * run settlement) lands first; archiving mid-cleanup would race the queue.
+     */
+    if (canSpendParkedArchive(managed, this.archiveAfterTurn.has(sessionId))) {
+      this.archiveAfterTurn.delete(sessionId)
+      const projectId = managed.projectId ?? null
+      const folderId = managed.folderId ?? null
+      void Promise.resolve()
+        .then(async () => {
+          const live = this.sessions.get(sessionId)
+          if (!canSpendParkedArchive(live, true)) return
+          await this.moveSessionToScope(sessionId, projectId, folderId, true)
+        })
+        .catch((error) => {
+          sessionLog.warn('failed to archive a finished round worker', { sessionId, error })
+        })
+    }
 
     // Clear any per-send permission-mode override applied for the turn that
     // just finished. The persisted/diagnostics mode is untouched — this only

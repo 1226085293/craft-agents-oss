@@ -34,15 +34,23 @@ const service = () =>
   new TaskService({ workspaceRoot: root, sessionExists: () => false, wakeSupervisor: () => undefined });
 
 /**
- * A supervisor turn, reduced to its effects: dispatch the step, do the work, report delivered.
+ * A supervisor turn, reduced to its effects: write this round's step, do the work, report delivered.
  *
  * The worker session is reused across rounds — that is what a recurring task does — so the run lock
- * and the session id stay the same and the plan is what changes.
+ * and the session id stay the same and the plan is what changes. The plan is written every round on
+ * purpose: a recurring round ends by clearing its plan, so a supervisor that assumed last round's step
+ * was still there would dispatch nothing on minute two. That assumption is exactly what this test
+ * exists to catch, so the stand-in does what the prompt tells a real one to do.
  */
 const supervisorTurn = (svc: TaskService, rounds: Array<{ rounds: number; status: string }>) => {
   let session = 'sess_worker';
   return async (task: Task): Promise<{ ok: boolean }> => {
     svc.startRun(task.id, session);
+    // Round N's plan is written by round N: the outline first, then the step under it.
+    if ((svc.get(task.id)?.spec?.plan?.length ?? 0) === 0) {
+      svc.updatePlan(task.id, { id: '1', title: '每轮执行' });
+      svc.updatePlan(task.id, { id: '1.1', title: '发一句问候', agent: 'builtin-default' });
+    }
     svc.updatePlan(task.id, { id: '1.1', status: 'done' });
     await svc.reportHandoff(
       task.id,

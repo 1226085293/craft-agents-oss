@@ -76,7 +76,7 @@ describe('a finished plan ends the round, whichever word the worker used', () =>
     // The live failure: plan finished, hand-off accepted, and `rounds` stayed empty forever.
     expect(after.stats?.rounds?.ok).toBe(1);
     expect(after.status).toBe('backlog');
-    expect(after.spec?.plan?.map((step) => step.status)).toEqual(['todo', 'todo']);
+    expect(after.spec?.plan).toEqual([]);
     expect(after.stats?.lastRound?.summary).toContain('你好+1');
     expect((after.stats?.lastRound?.result?.data as { result: number }).result).toBe(2);
 

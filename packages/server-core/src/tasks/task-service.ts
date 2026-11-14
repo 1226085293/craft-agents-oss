@@ -789,6 +789,18 @@ export class TaskService {
     }));
 
     /**
+     * A recurring round does not inherit the plan it just finished.
+     *
+     * Resetting the statuses kept every step, so the next round's model saw last round's outline still
+     * sitting there and appended to it: live, five minutes of 「每分钟你好N」 produced six sections
+     * (每轮执行 / 读取上轮结果 / 第2轮执行 / 第3轮执行 / 第4轮执行 / 第5轮执行), each round stacked on the last
+     * until the plan described history instead of work. The round's plan *is* the round (that is what
+     * closes it), so it is cleared with the round and the next one files its own. The finished outline
+     * is not lost: it is in the journal entry below (`plan: snapshot`) and in `handoffs`.
+     */
+    const nextPlan = isRecurring(task) ? [] : resetPlan;
+
+    /**
      * The payload lives on the round, not on every hand-off.
      *
      * `handoffs` keeps the history of attempts; a recurring task adds one per round, so carrying the
@@ -816,7 +828,7 @@ export class TaskService {
       ...task,
       currentSessionId: undefined,
       handoffs: trimmedHandoffs,
-      spec: task.spec ? { ...task.spec, plan: resetPlan } : task.spec,
+      spec: task.spec ? { ...task.spec, plan: nextPlan } : task.spec,
       stats: {
         ...stats,
         rounds: { ok: (stats.rounds?.ok ?? 0) + 1, failed: stats.rounds?.failed ?? 0 },

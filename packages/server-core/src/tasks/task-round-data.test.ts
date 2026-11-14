@@ -85,9 +85,10 @@ describe('a round hands its data to the next round', () => {
     expect(after2.stats?.lastRound?.round).toBe(2);
     expect(after2.stats?.lastRound?.result?.data).toEqual(second);
     expect((after2.stats?.lastRound?.result?.data as { total: number }).total).toBe(12);
-    // The plan is reset for round 3, and the previous delivery is what it starts from.
+    // The plan is cleared for round 3 — not reset in place — and the previous delivery is what it
+    // starts from.
     expect(after2.status).toBe('backlog');
-    expect(after2.spec?.plan?.[0]?.status).toBe('todo');
+    expect(after2.spec?.plan).toEqual([]);
   })
 
 

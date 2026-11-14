@@ -1085,9 +1085,22 @@ export class TaskService {
     if (held && !held.startsWith('pending:')) return task;
 
     const released = this.releaseRunRecord(task, now);
+    /**
+     * Giving the claim back does not end the round.
+     *
+     * This path is 「nobody picked this up」 — the supervisor was mid-turn, the wake failed. The
+     * firing stays owed and the round stays where it was, so the marker that says 「a round is on the
+     * clock」 has to survive: without it the next claim (the dispatch that finally comes) looks like
+     * the start of a new round and counts a second run for the same one. Live: a per-minute task
+     * reached `runs: 3` against `rounds.ok: 1`.
+     */
     const cleared: Task = {
       ...released,
-      stats: { ...(released.stats ?? { runs: 0, activeMs: 0 }), lockDeadlineAt: undefined },
+      stats: {
+        ...(released.stats ?? { runs: 0, activeMs: 0 }),
+        lockDeadlineAt: undefined,
+        ...(task.stats?.runStartedAt ? { runStartedAt: task.stats.runStartedAt } : {}),
+      },
     };
     return released.status === 'running' ? applyTransition(cleared, 'backlog', { now }).task : cleared;
   }

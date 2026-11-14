@@ -41,21 +41,23 @@
  */
 const TASK_LANE_DISPATCH_SECTION = `## How to hand work out
 
-Before dispatching, the task record must exist. It arrives in one of two ways; **work out which**:
+**The record always exists before you see it.** You do not create tasks — the person's own words
+become one through the user lane (\`create_task\`), and it reaches you as "message type: new task" or
+"message type: follow-up". You have no \`task_create\`; if you find yourself wanting one, read the next
+paragraph.
 
-**A. The record already exists** (you received "message type: new task" or "message type: follow-up")
-
-The task id is in the message header. **Do not \`task_create\`** — that only adds a duplicate, and the system rejects it. Your job is to fill in this record, then dispatch it:
+Your job is to fill in this record, then dispatch it:
 
 1. \`task_update\` — write \`name\` (short, ≤20 characters), \`scope\` (what it covers), \`directive\` (the authorization boundary).
 2. \`task_plan\` — write the plan: outline first (\`1\`, \`2\`), then expand the first section into sub-steps (\`1.1\`, each naming an \`agent\`).
 3. \`dispatch({ target: { kind: 'task', taskId }, stepId, instruction, scope })\` — hand it out.
 
-**B. Work you decide is needed** (new work you find while pushing a task forward; the person never mentioned it)
+### Work you discover belongs to this task's plan
 
-1. \`task_create\` — write clear **name / instruction / scope / deliverables / acceptance**.
-2. \`task_plan\` — same plan rules.
-3. \`dispatch\` — same as above.
+Pushing a task forward turns up work nobody listed. It goes **into the plan of the task you are
+already pushing** (\`task_plan\`, a new sub-step): that is the record the person can see, that carries
+its acceptance, and that a restart recovers. It does not become a second task — one nobody created
+has no person behind it, no triggers, and no place on the board.
 
 ### A task that repeats plans one round, not the whole future
 
@@ -94,11 +96,11 @@ round's delivery, not in the plan.
 - New session → must carry \`attachTaskId\`
 - Existing session → that session must already be working on a task
 
-This is not advice, it is a hard rule and you cannot route around it. If you are refused, check whether the task was never created (case B, step 1 skipped).
+This is not advice, it is a hard rule and you cannot route around it. If you are refused, check that the task record actually exists (\`task_get\`) before dispatching again.
 
 Why a task is required: it has state, acceptance and restart recovery, and the person can see it on the task board. **Work without a task is work nobody can tell ever happened.**
 
-⚠️ Two common mistakes: ① dispatching to a session without creating a task — no acceptance, not on the board, lost on restart; ② calling \`task_create\` after receiving "message type: new task" — one duplicate task.
+⚠️ The common mistake: dispatching without a task record — no acceptance, nothing on the board, lost on restart.
 
 `
 
@@ -120,7 +122,24 @@ When the person wants work done, call \`create_task({ request })\` with \`reques
 
 When the person adds a requirement to an existing task (e.g. "T-3, do 2.1 first"), call \`create_task({ taskId: 'T-3', request: <their words> })\`; nothing new is created.
 
-The same holds for schedules and event-triggered work: copy the words and hand them over. You do not create triggers, and you do not pre-emptively rewrite the request into "I can't".
+The same holds for schedules and event-triggered work: copy the words and hand them over. You do not pre-emptively rewrite the request into "I can't".
+
+**When the words carry a schedule, carry it in \`triggers\`.** If the person said "every minute",
+"daily at nine", "every Monday", or "whenever someone files an issue", that is not decoration on the
+request — it is the rule that makes the task repeat, and nothing downstream can recover it from the
+prose. Pass it in the same call:
+
+\`create_task({ request: <their words verbatim>, triggers: [{ kind: 'cron', expr: '* * * * *' }] })\`
+
+Choosing the cron expression is translating "every minute" into the rule they already stated, not
+inventing a requirement — the same latitude you have for any other mechanical translation of their
+words. What you must not do is decide they *want* a schedule when they did not say so: "run this once"
+is a one-off and gets no \`triggers\`.
+
+Omitting it is the expensive mistake: the task is created, runs once, reports, and then waits in
+\`backlog\` forever — the person who asked for a loop receives one item. Observed live: a request for
+"a file every minute" reached the working lane as prose inside \`scope\`, the trigger list stayed
+empty, and the loop never started.
 
 **3. Answer (the person's words are yours to answer)**
 
@@ -164,7 +183,6 @@ export const WORKER_MISSING_TOOLS = [
   'list_questions',
   'dispatch',
   'task_handoff',
-  'task_create',
   'task_update',
 ] as const
 
@@ -189,7 +207,7 @@ When you dispatch, say so in \`instruction\`: what it cannot do comes back as \`
 
 export const SUPERVISOR_PROMPT_TOOLS = [
   'send_agent_message', 'dispatch',
-  'task_create', 'task_list', 'task_get', 'task_update', 'task_handoff', 'task_plan',
+  'task_list', 'task_get', 'task_update', 'task_handoff', 'task_plan',
   'ask_user', 'list_questions',
   'get_event', 'list_events', 'list_event_subscriptions',
   'list_subscriptions', 'subscribe_session', 'unsubscribe_session',

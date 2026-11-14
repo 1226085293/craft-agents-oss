@@ -49,10 +49,17 @@ describe('supervisor lanes', () => {
     }
   })
 
-  it('gives the working lane task_create, not the relay-only create_task', () => {
+  it('gives the working lane neither door to creation', () => {
+    // `task_create` used to be here and is now denied: a record born in the working lane arrived
+    // with no triggers field (its schema has never had one) and no person behind it, so it could
+    // only ever run once. Creation is the user lane's, through `create_task` — the one door that
+    // carries `triggers`. The working lane keeps maintenance: update, plan, dispatch, handoff.
     const tools = taskLaneTools()
-    expect(tools.has('task_create')).toBe(true)
+    expect(tools.has('task_create')).toBe(false)
     expect(tools.has('create_task')).toBe(false)
+    for (const name of ['task_update', 'task_plan', 'dispatch', 'task_handoff']) {
+      expect(tools.has(name)).toBe(true)
+    }
   })
 
   it('narrows the JSON-schema path the Pi proxy defs use', () => {

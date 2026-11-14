@@ -31,11 +31,14 @@ describe('supervisor lanes: one writer, one reader', () => {
     }
   });
 
-  it('leaves the task lane every write', () => {
+  it('leaves the task lane every write except creation', () => {
+    // Creation moved to the user lane (`create_task`), which is also the only path that can carry
+    // `triggers`. Everything that *maintains* an existing task stays here.
     const tools = taskTools();
-    for (const name of ['task_create', 'task_update', 'task_handoff', 'dispatch', 'SubmitPlan']) {
+    for (const name of ['task_update', 'task_handoff', 'dispatch', 'SubmitPlan']) {
       expect(tools.has(name)).toBe(true);
     }
+    expect(tools.has('task_create')).toBe(false);
   });
 
   /**

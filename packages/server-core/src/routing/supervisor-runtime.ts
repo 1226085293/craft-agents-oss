@@ -486,7 +486,7 @@ export class SupervisorRuntime {
     if (task.status && isTerminal(task.status as never)) {
       throw new DispatchRefused(
         `${task.id} 已经${task.status === 'completed' ? '完成' : '取消'}了，不能再派活。` +
-          '要继续做就新建一条任务（task_create）；要接着这条做，先把任务重新打开。',
+          '要接着这条做，先把任务重新打开；如果这是另一件事，让用户重新提一次（任务由用户创建，你这边没有创建入口）。',
       )
     }
 

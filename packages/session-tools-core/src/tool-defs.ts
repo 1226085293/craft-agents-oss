@@ -746,11 +746,28 @@ export const USER_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 export const USER_LANE_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set(['create_task']);
 
+/**
+ * Tools the working lane no longer carries, because creating a task is the user lane's job.
+ *
+ * `task_create` let the working lane invent work: it built a record while pushing a task forward,
+ * and that record arrived with no `triggers` field and no person behind it — the schema for
+ * `task_create` has never had one, so a task created this way could only ever run once, by hand.
+ * The person's own words reach a task through `create_task` (user lane), which does carry
+ * `triggers`; the working lane's job is to fill in that record and keep it moving.
+ *
+ * What it keeps is everything *maintenance*: `task_update`, `task_plan`, `dispatch`, `task_handoff`.
+ * Work it discovers while pushing a task forward belongs to that task's plan, not to a second task
+ * nobody asked for.
+ */
+export const TASK_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set(['task_create']);
+
 /** Whether a tool is visible to a supervisor lane. */
 export function isToolVisibleToLane(name: string, lane?: 'user' | 'task'): boolean {
   // Absent lane = the working lane, which keeps the full table. Defaulting the other way
   // would silently remove the dispatcher from every supervisor written before lanes existed.
-  if ((lane ?? 'task') === 'task') return !USER_LANE_ONLY_TOOL_NAMES.has(name);
+  if ((lane ?? 'task') === 'task') {
+    return !USER_LANE_ONLY_TOOL_NAMES.has(name) && !TASK_LANE_DENIED_TOOL_NAMES.has(name);
+  }
   return !USER_LANE_DENIED_TOOL_NAMES.has(name);
 }
 

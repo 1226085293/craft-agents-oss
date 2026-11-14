@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test'
 import { getSupervisorSystemPrompt, SUPERVISOR_PROMPT_TOOLS, USER_LANE_PROMPT_TOOLS, WORKER_MISSING_TOOLS } from '../supervisor-prompt.ts'
-import { SUPERVISOR_TOOL_NAMES, USER_LANE_DENIED_TOOL_NAMES, USER_LANE_ONLY_TOOL_NAMES, getSessionToolNames } from '../../../../session-tools-core/src/tool-defs.ts'
+import { SUPERVISOR_TOOL_NAMES, TASK_LANE_DENIED_TOOL_NAMES, USER_LANE_DENIED_TOOL_NAMES, USER_LANE_ONLY_TOOL_NAMES, getSessionToolNames } from '../../../../session-tools-core/src/tool-defs.ts'
 
 /**
  * These tests exist because of an observed failure, not for coverage.
@@ -71,16 +71,18 @@ describe('supervisor prompt', () => {
     expect(text).toContain('file read/write')
   })
 
-  it('describes both ways a task comes to exist, and never says to re-create a relayed one', () => {
-    // Two entrances exist and the prompt must not collapse them into one. The old text said
-    // 「先建任务，再派发」 unconditionally — read after a 「【新任务 …已登记】」 message it says the
-    // record does not exist yet, and the lane that believed it created a second task.
+  it('says the record always arrives first, because this lane cannot create one', () => {
+    // There is exactly one entrance now: the person's words become a task through the user lane
+    // (`create_task`, the only door that carries `triggers`). The working lane fills that record in
+    // and keeps it moving. It used to also have `task_create` for work it discovered on its own —
+    // and a task born that way had no person behind it and no schedule, so it could only run once.
     const text = prompt()
-    expect(text).toContain('task_create')
-    expect(text).toContain('The record already exists')
-    expect(text).toContain('Do not')
+    expect(text).toContain('The record always exists before you see it')
+    expect(text).toContain('You have no `task_create`')
     expect(text).toContain('acceptance')
-    // The unconditional instruction is the bug; it must not come back.
+    // Work it discovers goes into the plan it is already pushing, not into a second task.
+    expect(text).toContain("belongs to this task's plan")
+    // The old unconditional 「create the task first, then dispatch」 is the bug; it must not return.
     expect(text).not.toContain('create the task first, then dispatch')
   })
 
@@ -119,7 +121,11 @@ describe('supervisor prompt', () => {
   })
 
   it('warns against dispatching work that has no task', () => {
-    expect(prompt()).toContain('Two common mistakes')
+    // The other half of the old warning — 「don't call task_create after receiving a relayed task」
+    // — is gone with the tool itself: the working lane can no longer create a task at all.
+    const text = prompt()
+    expect(text).toContain('dispatching without a task record')
+    expect(text).toContain('Work without a task is work nobody can tell ever happened')
   })
 
   it('keeps the hand-off discipline that makes the turn cap survivable', () => {
@@ -219,10 +225,11 @@ describe('supervisor prompt', () => {
       expect(SUPERVISOR_TOOL_NAMES.has(name)).toBe(true)
     }
     // Compare as numbers: a Set's .size widens to a literal here otherwise.
-    // `create_task` is in the supervisor table but user-lane-only, so it is absent from the
-    // working-lane list; the user-lane list is pinned against the real table below.
+    // Two tools are in the supervisor table but not in the working-lane list: `create_task` is
+    // user-lane-only, and `task_create` is denied to the working lane (the user lane owns creation).
+    // The user-lane list is pinned against the real table below.
     expect(SUPERVISOR_PROMPT_TOOLS.length as number).toBe(
-      (SUPERVISOR_TOOL_NAMES.size - USER_LANE_ONLY_TOOL_NAMES.size) as number
+      (SUPERVISOR_TOOL_NAMES.size - USER_LANE_ONLY_TOOL_NAMES.size - TASK_LANE_DENIED_TOOL_NAMES.size) as number
     )
   })
 })

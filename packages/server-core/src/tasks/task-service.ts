@@ -1209,15 +1209,6 @@ export class TaskService {
       data: { cleared: pending.length - remaining.length, kept: remaining.length },
     });
   }
-  /** A turn with no final reply leaves the backlog owed; three in a row is a fault. */
-  noteWakeWithoutReply(id: string, now = this.now()): number {
-    const task = this.require(id);
-    const failures = (task.stats?.wakeFailures ?? 0) + 1;
-    this.save({ ...task, stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), wakeFailures: failures } });
-    appendJournal(this.root, id, { type: 'wake_without_reply', at: now, data: { wakeFailures: failures } });
-    return failures;
-  }
-
   endRun(id: string, outcome: { ok: boolean; error?: string; sessionId?: string }): Task {
     const task = this.require(id);
     const now = this.now();

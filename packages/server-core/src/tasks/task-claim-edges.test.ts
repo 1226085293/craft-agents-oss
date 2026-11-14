@@ -96,18 +96,6 @@ describe('a claim that ends without a round', () => {
     expect(after.stats?.pendingTriggers).toEqual([]);
   })
 
-  it('counts a wake with no reply but does not lose the trigger', () => {
-    const svc = service();
-    const task = recurring(svc);
-    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:* * * * *' });
-
-    expect(svc.noteWakeWithoutReply(task.id)).toBe(1);
-    expect(svc.noteWakeWithoutReply(task.id)).toBe(2);
-
-    const after = svc.get(task.id)!;
-    expect(after.stats?.wakeFailures).toBe(2);
-    expect(after.stats?.pendingTriggers?.length).toBe(1);
-  })
 })
 
 describe('expiry asks the right session whether it is busy', () => {

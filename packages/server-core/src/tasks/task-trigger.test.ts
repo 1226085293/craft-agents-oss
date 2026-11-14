@@ -219,11 +219,15 @@ describe('the summary the supervisor reads', () => {
   it('resets the no-reply counter only when nothing is left owed', () => {
     // The counter means 「the supervisor was woken and never answered」. Resetting it while entries
     // are still outstanding would hide exactly that.
+    //
+    // The counter is driven by claim expiry (the scheduler's path), not by a method of its own:
+    // `noteWakeWithoutReply` used to exist for this and became unreachable once the silent-turn
+    // accounting moved to `silentTurns`.
     const svc = service();
     const task = recurring(svc);
-    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:* * * * *' });
+    const claimed = svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:* * * * *' })!;
     svc.markTriggersDelivered(task.id, 1000);
-    svc.noteWakeWithoutReply(task.id);
+    svc.expireTriggerClaim(task.id, claimed.stats!.lockDeadlineAt!);
     svc.recordTrigger(task.id, { kind: 'cron', at: 2000, detail: 'cron:* * * * *' });
 
     svc.clearTriggers(task.id);

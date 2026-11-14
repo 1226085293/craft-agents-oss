@@ -740,13 +740,32 @@ export class WhatsAppAuth {
             }
             this.log('whatsapp_connected', { attempt: this.attempt })
             break
-          case 'disconnected':
+          case 'disconnected': {
+            // The worker emits this on every socket close, then reconnects for
+            // anything that is not a logout — Baileys routinely drops the
+            // socket right after handing out a QR (515 restart-required, or a
+            // transient `statusCode=unknown`). Reporting `failed` there killed
+            // a pairing that was still in progress: the QR vanished and the
+            // dialog showed a failure while a fresh QR was about to arrive.
+            // Only a logout, an exhausted reconnect, or a drop after we were
+            // already connected is terminal.
+            const pairing = this.snapshot.phase === 'awaiting' || this.snapshot.phase === 'scanned'
+            if (!event.loggedOut && pairing) {
+              this.snapshot = {
+                ...this.snapshot,
+                detail: '连接中断，正在重试…',
+                error: undefined,
+                attempt: this.attempt,
+              }
+              break
+            }
             this.snapshot = {
               phase: event.loggedOut ? 'expired' : 'failed',
               attempt: this.attempt,
               error: event.reason ?? (event.loggedOut ? '已退出登录，请重新扫码' : '连接断开'),
             }
             break
+          }
           case 'unavailable':
             this.snapshot = { phase: 'failed', attempt: this.attempt, error: event.message }
             break

@@ -8445,8 +8445,19 @@ ${request.prompt}`;
             // this message's subject, not something still waiting for an answer.
             const summary = service.triggerSummary(task.id, { excludeLast: true })
             const last = task.stats?.lastRound
+            /**
+             * The header says why in words, not in the scheduler's own vocabulary.
+             *
+             * `reason` is an internal id — `cron:* * * * *`, `event:qqmail-idle/mail.received` — used as
+             * the claim placeholder and the backlog `detail`. Passed through to this message it read
+             * 「本轮被触发（cron:* * * * *）」, which repeats what `task_get` already shows under `triggers`
+             * and invites the model to parse a prefix that means nothing to it.
+             */
+            const why = reason.startsWith('event:')
+              ? `事件 ${reason.slice('event:'.length)}`
+              : '定时到点'
             const text = [
-              `【触发】${task.id}「${task.name}」本轮被触发（${reason}）。`,
+              `【触发】${task.id}「${task.name}」本轮被触发（${why}）。`,
               summary ? `\n累计待处理：\n${summary}` : '',
               last
                 ? `\n上一轮：第 ${last.round} 轮已交接（${last.outcome}）：${last.summary}`

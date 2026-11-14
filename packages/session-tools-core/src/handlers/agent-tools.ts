@@ -264,9 +264,10 @@ export async function handleListQuestions(
 /**
  * User-lane supervisor: the person's words, verbatim, handed to the working lane.
  *
- * `task_create` is deliberately not in the user lane's table — it cannot dispatch, and a
- * half-created task no lane can move is the shape that got stuck before. So the user lane
- * gets this instead: it does not write the record, it only says what the person said.
+ * No lane has `task_create` any more — `create_task` replaced it. The reason the user lane
+ * cannot write the record itself: it cannot dispatch, and a half-created task no lane can
+ * move is the shape that got stuck before. So the user lane gets this instead: it does not
+ * write the record, it only says what the person said.
  */
 export async function handleCreateTask(
   ctx: SessionToolContext,

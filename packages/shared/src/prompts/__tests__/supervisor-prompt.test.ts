@@ -78,7 +78,16 @@ describe('supervisor prompt', () => {
     // and a task born that way had no person behind it and no schedule, so it could only run once.
     const text = prompt()
     expect(text).toContain('The record always exists before you see it')
-    expect(text).toContain('You have no `task_create`')
+    /**
+     * And it must not name the tool it does not have.
+     *
+     * 「You have no `task_create`」 reads as a denial, but its effect on a model that has never
+     * heard the name is the opposite: it plants one. Measured in 261114-wild-fern — the prompt
+     * sentence went into the session's long-term memory verbatim (injected twice) and came back
+     * into context on every later turn. The table already answers "do I have this": a call to a
+     * tool it lacks comes back as `Unknown proxy tool: <name>`.
+     */
+    expect(text).not.toContain('task_create')
     expect(text).toContain('acceptance')
     // Work it discovers goes into the plan it is already pushing, not into a second task.
     expect(text).toContain("belongs to this task's plan")
@@ -169,22 +178,14 @@ describe('supervisor prompt', () => {
 
   it('only names tools the supervisor actually has', () => {
     /**
-     * Every backticked identifier that looks like a tool must be in the table — unless the sentence
-     * is forbidding it.
+     * Every backticked identifier that looks like a tool must be in the table.
      *
-     * Naming a tool to deny it is deliberate and load-bearing: 「You have no `task_create`」 is what
-     * stops the model reaching for a tool its table no longer carries. What must not appear is a
-     * mention the model could read as 「you have this」. So a tool name counts as a violation only
-     * when the clause before it is not a denial.
+     * Denials used to be exempt on the theory that naming a missing tool stops the model reaching
+     * for it. It does the opposite: the model reads the name and keeps it. A sentence like
+     * 「You have no `x`」 is worth less than the risk it creates, so nothing is exempt now.
      */
-    const DENIAL = /(没有|不要|不可以|禁止|不要尝试|不能|no|not|never|cannot|do not)\s*\**\s*$/i
     const text = outsideDenialSection(prompt())
-    const unknown = [...text.matchAll(/`([a-z][a-z_]+)`/g)]
-      .filter((m) => {
-        const before = text.slice(Math.max(0, m.index! - 30), m.index!).replace(/\*\*/g, '')
-        return !DENIAL.test(before)
-      })
-      .map((m) => m[1]!)
+    const unknown = [...text.matchAll(/`([a-z][a-z_]+)`/g)].map((m) => m[1]!)
       .filter(
         (name) =>
           name.includes('_') &&
@@ -499,8 +500,8 @@ describe('lane prompts match their tool tables', () => {
     const task = getSessionToolNames({ role: 'supervisor', supervisorLane: 'task' })
     expect(user.size as number).toBeLessThan(task.size as number)
     // Everything the user lane has, the working lane has too — with one deliberate exception:
-    // `create_task` is the user lane's own door (the task lane has `task_create`), so it is the
-    // only name a lane may carry that the other does not. Everything else still only narrows.
+    // `create_task` is the user lane's own door, so it is the only name a lane may carry that
+    // the other does not. Everything else still only narrows.
     for (const name of user) {
       if (USER_LANE_ONLY_TOOL_NAMES.has(name)) continue
       expect(task.has(name)).toBe(true)

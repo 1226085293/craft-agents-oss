@@ -588,8 +588,8 @@ export function formatPauseBrief(task: Task): string {
     '',
     '## What you do now',
     '',
-    'Use `report_to_user` to tell the person: this slice is finished, you stopped here on their instruction, what is still missing, and whether to release it.',
-    '**Do not dispatch, do not keep executing, and do not use ask_user to re-ask what was already asked** — this turn only explains.',
+    'Use `ask_user` to tell the person: this slice is finished, you stopped here on their instruction, what is still missing, and whether to release it.',
+    '**Do not dispatch and do not keep executing** — this turn only explains.',
   );
   return lines.join('\n');
 }

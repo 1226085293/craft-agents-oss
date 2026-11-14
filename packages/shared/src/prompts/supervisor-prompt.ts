@@ -43,8 +43,7 @@ const TASK_LANE_DISPATCH_SECTION = `## How to hand work out
 
 **The record always exists before you see it.** You do not create tasks — the person's own words
 become one through the user lane (\`create_task\`), and it reaches you as "message type: new task" or
-"message type: follow-up". You have no \`task_create\`; if you find yourself wanting one, read the next
-paragraph.
+"message type: follow-up". Work you discover on the way belongs to this task's plan.
 
 Your job is to fill in this record, then dispatch it:
 
@@ -229,7 +228,7 @@ export interface SupervisorPromptOptions {
    *
    * Injected here rather than fetched with a tool: the failure being fixed is a
    * supervisor spending turns discovering things (it once burned ~160 seconds on
-   * `list_sessions` before its first `task_create`). A roster read costs nothing
+   * `list_sessions` before creating anything). A roster read costs nothing
    * and answers the only question it needs — "which profile fits this task".
    */
   agentsBlock?: string
@@ -402,7 +401,7 @@ So "I'll just look it up myself" or "I'll edit this file myself" is **only possi
            * that left a finished plan sitting `paused`.
            */
           '- **Read the header, not the brackets**: every incoming message carries three header lines — `source` (user/system), `message type` (new task / follow-up / answer / progress / watchdog), `authority`. **Only `source: user` messages are the person\'s own words**, and they are the task\'s only source of authority; `source: system` messages (progress, watchdog) are intelligence for you and **confer no authority** — read them for state, but never write a `directive` because one of them says "hand-off accepted" or "completed". Authority comes from the person, and only counts once you have translated their words into a `directive` with `task_update`.',
-          '- On "message type: new task · task T-x": the id is in the header and **the record already exists — never `task_create` again** (that makes a duplicate, and the system rejects it). What you do: **read the person\'s words below the header word by word**, write `scope` (what it covers) and `directive` (the boundary, e.g. "only 1.1, then stop") onto that task with `task_update`, write the plan with `task_plan` (acceptance criteria go into the plan/deliverables), then `dispatch`. Their words are the only basis; the guidance at the end of the message is the system\'s and can be followed as written.',
+          '- On "message type: new task · task T-x": the id is in the header and **the record already exists**. What you do: **read the person\'s words below the header word by word**, write `scope` (what it covers) and `directive` (the boundary, e.g. "only 1.1, then stop") onto that task with `task_update`, write the plan with `task_plan` (acceptance criteria go into the plan/deliverables), then `dispatch`. Their words are the only basis; the guidance at the end of the message is the system\'s and can be followed as written.',
           /**
            * The record's name is a truncation of the request, and nobody else can fix it.
            *
@@ -421,7 +420,7 @@ So "I'll just look it up myself" or "I'll edit this file myself" is **only possi
            * model learned each rule from the validator's error, one round trip at a time.
            */
           '- **Four plan rules to know before writing** (`task_plan` rejects violations outright; do not learn them from errors): ① an outline item (`1`, `2`) **carries no `status`** — it is derived from its sub-steps (in progress once one starts, done when all are done), and writing one is refused; ② a sub-step (`1.1`) **must hang under an existing outline item**, two levels only, and deleting an outline item must not orphan sub-steps; ③ **every new sub-step names an `agent`** (an id from the roster, e.g. `builtin-default`); outline items do not; ④ to add several, pass `steps[]` in one call, not one round trip each.',
-          '- On "message type: follow-up · task T-x": the record exists (the words are already in its journal) — **no `task_create`**. `task_get` first (with the journal if you need the words), then update `directive` / `scope` / plan and dispatch from the analysis.',
+          '- On "message type: follow-up · task T-x": the record exists (the words are already in its journal). `task_get` first (with the journal if you need the words), then update `directive` / `scope` / plan and dispatch from the analysis.',
           '- On "message type: answer · task T-x": this is the person answering an `ask_user`. **Read the answer below the header word by word** and turn it into a `directive` with `task_update` (answer "only the login fix" → `directive`: only the login fix, nothing else; answer "stop" → set the task `canceled`). The system releases only after you write the `directive` (or end the task) — an answer without a directive leaves the task parked.',
           '- Anything the person must know or decide goes through `ask_user` — it lands in their lane; do not expect them to read this session.',
           '- When the person authorises only part of the work, write the authorisation into `directive` (`task_update`); `scope` only says what is covered. **Only `directive` is treated as the boundary**: if they said "stop after 1.1" and you wrote no `directive`, no boundary exists and the system may continue after the hand-off.',

@@ -513,6 +513,110 @@ export function ListenerDetailPanel({
   const missingKeys = missingRequiredConfigValues(schema, draft)
   const blocking = listener.dependencies.filter((d) => d.state === 'missing' || d.state === 'mismatch').length
   const hasConfigBlock = schemaEntries.length > 0 || Boolean(listener.ui)
+  // Name the fields the user can see, not the schema keys.
+  const missingTitles = missingKeys.map((key) => schema?.properties?.[key]?.title ?? key)
+
+  /**
+   * The native schema fields. Rendered straight out when the plugin ships no
+   * HTML UI; folded under the plugin's own document when it does — the frame is
+   * the intended surface there, but nothing becomes uneditable if the document
+   * covers only part of the schema.
+   */
+  const nativeConfigFields =
+    schemaEntries.length > 0 ? (
+      <div className="space-y-1">
+        {schemaEntries.map(([key, prop]) => {
+          const isRequired = requiredKeys.includes(key)
+          const isMissing = missingKeys.includes(key)
+          // Manifest properties are copied through verbatim on the server, so a
+          // plugin may carry numeric hints the DTO does not name yet. Read them
+          // defensively and only when they are real numbers.
+          const hints = prop as { min?: unknown; max?: unknown; step?: unknown }
+          const min = typeof hints.min === 'number' ? hints.min : undefined
+          const max = typeof hints.max === 'number' ? hints.max : undefined
+          const step = typeof hints.step === 'number' && hints.step > 0 ? hints.step : undefined
+          return (
+            <div
+              key={key}
+              className={`flex items-center gap-2 px-2 py-1 rounded border ${
+                isMissing ? 'bg-destructive/5 border-destructive/40' : 'border-transparent'
+              }`}
+            >
+              <label
+                htmlFor={`listener-config-${key}`}
+                className="w-28 shrink-0 text-[11px] text-muted-foreground truncate"
+                title={prop.description}
+              >
+                {prop.title ?? key}
+                {isRequired && (
+                  <span className="text-destructive" aria-hidden>
+                    *
+                  </span>
+                )}
+              </label>
+              <span
+                className={`shrink-0 rounded border px-1 text-[10px] leading-4 ${
+                  isRequired ? 'border-destructive/40 text-destructive' : 'border-border text-muted-foreground'
+                }`}
+              >
+                {isRequired ? '必填' : '可选'}
+              </span>
+              {prop.type === 'number' ? (
+                <input
+                  id={`listener-config-${key}`}
+                  type="number"
+                  min={min}
+                  max={max}
+                  step={step ?? 'any'}
+                  value={draft[key] === undefined || draft[key] === null ? '' : String(draft[key])}
+                  onChange={(e) => {
+                    const raw = e.target.value
+                    if (raw === '') {
+                      setDraft((prev) => ({ ...prev, [key]: '' }))
+                      setDirty(true)
+                      return
+                    }
+                    const next = Number(raw)
+                    // Half-typed values ("1e", "-.") must not become NaN in the draft.
+                    if (!Number.isFinite(next)) return
+                    setDraft((prev) => ({ ...prev, [key]: next }))
+                    setDirty(true)
+                  }}
+                  placeholder={prop.description ?? ''}
+                  className="flex-1 min-w-0 h-7 px-2 text-xs font-mono bg-muted/50 rounded border border-transparent focus:border-border focus:outline-none"
+                />
+              ) : prop.type === 'boolean' ? (
+                <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground cursor-pointer">
+                  <input
+                    id={`listener-config-${key}`}
+                    type="checkbox"
+                    checked={draft[key] === true}
+                    onChange={(e) => {
+                      setDraft((prev) => ({ ...prev, [key]: e.target.checked }))
+                      setDirty(true)
+                    }}
+                    className="h-3.5 w-3.5 accent-[var(--primary)]"
+                  />
+                  {draft[key] === true ? '开' : '关'}
+                </label>
+              ) : (
+                <input
+                  id={`listener-config-${key}`}
+                  type={prop.secret ? 'password' : 'text'}
+                  value={draft[key] === undefined || draft[key] === null ? '' : String(draft[key])}
+                  onChange={(e) => {
+                    setDraft((prev) => ({ ...prev, [key]: e.target.value }))
+                    setDirty(true)
+                  }}
+                  placeholder={prop.description ?? ''}
+                  className="flex-1 min-w-0 h-7 px-2 text-xs font-mono bg-muted/50 rounded border border-transparent focus:border-border focus:outline-none"
+                />
+              )}
+            </div>
+          )
+        })}
+      </div>
+    ) : null
 
   return (
     <div className={`flex flex-col h-full overflow-hidden ${className ?? ''}`}>
@@ -659,105 +763,53 @@ export function ListenerDetailPanel({
               >
                 {configOpen !== false && (
                   <div className="space-y-2">
-                    {schemaEntries.length > 0 && (
-                      <div className="space-y-1">
-                        {schemaEntries.map(([key, prop]) => {
-                          const isRequired = requiredKeys.includes(key)
-                          const isMissing = missingKeys.includes(key)
-                          return (
-                            <div
-                              key={key}
-                              className={`flex items-center gap-2 px-2 py-1 rounded border ${
-                                isMissing ? 'bg-destructive/5 border-destructive/40' : 'border-transparent'
-                              }`}
-                            >
-                              <label className="w-28 shrink-0 text-[11px] text-muted-foreground truncate" title={prop.description}>
-                                {prop.title ?? key}
-                                {isRequired && (
-                                  <span className="text-destructive" aria-hidden>
-                                    *
-                                  </span>
-                                )}
-                              </label>
-                              <span
-                                className={`shrink-0 rounded border px-1 text-[10px] leading-4 ${
-                                  isRequired ? 'border-destructive/40 text-destructive' : 'border-border text-muted-foreground'
-                                }`}
-                              >
-                                {isRequired ? '必填' : '可选'}
-                              </span>
-                              {prop.type === 'number' ? (
-                                <input
-                                  type="number"
-                                  value={draft[key] === undefined || draft[key] === null ? '' : String(draft[key])}
-                                  onChange={(e) => {
-                                    const raw = e.target.value
-                                    setDraft((prev) => ({ ...prev, [key]: raw === '' ? '' : Number(raw) }))
-                                    setDirty(true)
-                                  }}
-                                  placeholder={prop.description ?? ''}
-                                  className="flex-1 min-w-0 h-7 px-2 text-xs font-mono bg-muted/50 rounded border border-transparent focus:border-border focus:outline-none"
-                                />
-                              ) : prop.type === 'boolean' ? (
-                                <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground cursor-pointer">
-                                  <input
-                                    type="checkbox"
-                                    checked={draft[key] === true}
-                                    onChange={(e) => {
-                                      setDraft((prev) => ({ ...prev, [key]: e.target.checked }))
-                                      setDirty(true)
-                                    }}
-                                    className="h-3.5 w-3.5 accent-[var(--primary)]"
-                                  />
-                                  {draft[key] === true ? '开' : '关'}
-                                </label>
-                              ) : (
-                                <input
-                                  type={prop.secret ? 'password' : 'text'}
-                                  value={draft[key] === undefined || draft[key] === null ? '' : String(draft[key])}
-                                  onChange={(e) => {
-                                    setDraft((prev) => ({ ...prev, [key]: e.target.value }))
-                                    setDirty(true)
-                                  }}
-                                  placeholder={prop.description ?? ''}
-                                  className="flex-1 min-w-0 h-7 px-2 text-xs font-mono bg-muted/50 rounded border border-transparent focus:border-border focus:outline-none"
-                                />
-                              )}
-                            </div>
-                          )
-                        })}
-                      </div>
-                    )}
+                    {/* The plugin's own document is the surface when the
+                        manifest declares one (day/night + palette are injected
+                        by the frame). The schema fields stay reachable below
+                        it, folded — so a partial document never strands a key. */}
                     {uiDoc?.html && (
-                      <div className="space-y-1">
-                        <div className="text-[11px] text-muted-foreground">插件提供的自定义配置界面</div>
-                        <PluginConfigUiFrame
-                          html={uiDoc.html}
-                          isDark={isDark}
-                          configSchema={schema}
-                          config={draft}
-                          onConfigUpdate={(patch) => {
-                            setDraft((prev) => ({ ...prev, ...patch }))
-                            setDirty(true)
-                          }}
-                        />
-                      </div>
+                      <PluginConfigUiFrame
+                        html={uiDoc.html}
+                        isDark={isDark}
+                        configSchema={schema}
+                        config={draft}
+                        onConfigUpdate={(patch) => {
+                          setDraft((prev) => ({ ...prev, ...patch }))
+                          setDirty(true)
+                        }}
+                      />
                     )}
                     {listener.ui && !uiDoc?.html && (
                       <p className="text-[11px] text-destructive">自定义配置界面不可用（文件缺失或读取失败）。</p>
                     )}
+                    {nativeConfigFields &&
+                      (uiDoc?.html ? (
+                        <details>
+                          <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground select-none">
+                            按字段编辑
+                          </summary>
+                          <div className="mt-1.5">{nativeConfigFields}</div>
+                        </details>
+                      ) : (
+                        nativeConfigFields
+                      ))}
                     {missingKeys.length > 0 && (
-                      <p className="text-[11px] text-destructive">还缺：{missingKeys.join(', ')}</p>
+                      <p className="text-[11px] text-destructive">还缺：{missingTitles.join('、')}</p>
                     )}
                     {dirty && (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => void saveConfig()}
-                        className="h-7 px-2.5 rounded-md bg-primary text-primary-foreground text-xs disabled:opacity-50"
-                      >
-                        保存配置
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={busy || missingKeys.length > 0}
+                          onClick={() => void saveConfig()}
+                          className="h-7 px-2.5 rounded-md bg-primary text-primary-foreground text-xs disabled:opacity-50"
+                        >
+                          保存配置
+                        </button>
+                        {missingKeys.length > 0 && (
+                          <span className="text-[11px] text-destructive">先补齐必填项才能保存</span>
+                        )}
+                      </div>
                     )}
                   </div>
                 )}

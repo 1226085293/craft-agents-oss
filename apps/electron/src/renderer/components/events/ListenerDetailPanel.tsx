@@ -51,6 +51,7 @@ import {
 import { useTheme } from '@/context/ThemeContext'
 import { PluginIcon } from './EventsListenersPanel'
 import { ListenerStatusLight } from './ListenerStatusLight'
+import { ListenerAuthButton } from './ListenerAuthDialog'
 import { PluginConfigUiFrame } from './PluginConfigUiFrame'
 
 export interface ListenerDetailPanelProps {
@@ -633,6 +634,14 @@ export function ListenerDetailPanel({
           </span>
           <ListenerStatusLight listener={listener} size="md" showLabel />
         </div>
+        {/* Sign-in sits next to the light (it is plugin state, like the light);
+            it hides itself for a plugin with no sign-in flow. */}
+        <ListenerAuthButton
+          workspaceId={workspaceId}
+          listenerId={listener.id}
+          running={listener.status.state === 'running'}
+          onConnected={() => void load()}
+        />
         <button
           type="button"
           disabled={busy || listener.errors.length > 0}

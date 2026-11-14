@@ -544,8 +544,22 @@ export class TaskService {
         lockSessionId: sessionId,
         runStartedAt: now,
         lastTriggeredAt: now,
-        // A real claim is not pending any more; the deadline only guards the placeholder.
-        lockDeadlineAt: undefined,
+        /**
+         * The 3-minute deadline guards a *placeholder*, and only the bind ends one.
+         *
+         * This used to be `undefined` unconditionally, on the reading 「a real claim is not pending
+         * any more」. But a `pending:…` claim reaches this line too, and it erased the deadline
+         * `claimTrigger` had just set (`task-service.ts:956`). Live consequence: a per-minute task's
+         * second round claimed with `pending:cron:* * * * *`, lost its deadline, so the scheduler's
+         * expiry pass could never reclaim it — the lock stayed for good, every later dispatch was
+         * refused with 「运行已经由 … 持有」, no worker was spawned, and the round never closed.
+         * Six `run_started` placeholders, one `run_bound`; `hello-2.md` was never written.
+         *
+         * So: a placeholder keeps whatever deadline it arrived with (a claim with no deadline gets
+         * one now, which is the same 3 minutes from this instant), and the bind — the moment a real
+         * session id replaces it — clears it, because liveness is the heartbeat's job from then on.
+         */
+        lockDeadlineAt: isPlaceholder ? (task.stats?.lockDeadlineAt ?? now + TRIGGER_CLAIM_MS) : undefined,
       },
       updatedAt: now,
     };

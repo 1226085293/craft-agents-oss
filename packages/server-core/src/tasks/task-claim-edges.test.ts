@@ -156,3 +156,38 @@ describe('the summary', () => {
     expect(svc.triggerSummary(task.id)).toContain(expected);
   })
 })
+
+describe('a placeholder claim keeps its deadline until it binds', () => {
+  /**
+   * Live, this cost a per-minute task every round after the first.
+   *
+   * `startRun` cleared `lockDeadlineAt` unconditionally — 「a real claim is not pending any more」 —
+   * but a `pending:…` claim reaches the same line, and it erased the three minutes `claimTrigger`
+   * had just set. Six `run_started` placeholders, one `run_bound`: the lock could never expire, so
+   * every later dispatch was refused with 「运行已经由 … 持有」, no worker was spawned, and the round
+   * never closed.
+   */
+  it('keeps the 3 minutes the claim just set', () => {
+    const svc = service();
+    const task = recurring(svc);
+    const claimed = svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:* * * * *' });
+    expect(claimed).not.toBeNull();
+    const lockId = claimed!.stats?.lockSessionId;
+    const deadline = claimed!.stats?.lockDeadlineAt;
+
+    expect(lockId?.startsWith('pending:')).toBe(true);
+    expect(deadline).toBeGreaterThan(0);
+  })
+
+  it('clears it on the bind, because liveness is the heartbeat\'s job then', () => {
+    const svc = service();
+    const task = recurring(svc);
+    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:* * * * *' });
+    expect(svc.get(task.id)!.stats?.lockDeadlineAt).toBeGreaterThan(0);
+
+    const bound = svc.startRun(task.id, 'sess_worker');
+    expect(bound.ok).toBe(true);
+    expect(svc.get(task.id)!.stats?.lockSessionId).toBe('sess_worker');
+    expect(svc.get(task.id)!.stats?.lockDeadlineAt).toBeUndefined();
+  })
+})

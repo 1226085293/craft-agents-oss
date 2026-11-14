@@ -10,7 +10,7 @@
  *    always no and a turn still working lost its claim mid-flight.
  */
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import type { Task } from '@craft-agent/shared/tasks';
@@ -271,5 +271,51 @@ describe('the backlog a lock banks is released with it', () => {
     // The banked firings stay: they are what the next round is for.
     expect(after.stats?.pendingTriggers?.length).toBe(3);
     expect(pokes).toBeGreaterThan(before);
+  })
+})
+
+describe('one round is one run, even when a firing lands mid-round', () => {
+  /**
+   * `runs` is the budget's clock (`runs > maxRuns`), so counting a round twice halves the rounds a
+   * task gets. Live, a per-minute task showed `runs: 8` against `rounds.ok: 6`.
+   *
+   * The window: `reportHandoff` releases the lock *before* the verdict decides what happens next, so
+   * between a worker's delivery and the round's close the record says `running` with no lock and no
+   * session. A firing that landed there claimed a second round for the same one.
+   */
+  it('banks the firing while the round is still open, lock or no lock', () => {
+    const svc = service();
+    const task = recurring(svc);
+    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' });
+    svc.startRun(task.id, 'pending:dispatch');
+    svc.startRun(task.id, 'sess_w');
+    expect(svc.get(task.id)!.stats?.runs).toBe(1);
+
+    /**
+     * The window `reportHandoff` opens: `releaseRunRecord` drops the lock *before* the verdict
+     * decides what happens next, so for a moment the record reads `running` with nobody holding it.
+     * Rebuilt directly, because that window is internal to `reportHandoff`.
+     */
+    const raw = JSON.parse(readFileSync(join(root, 'tasks', `${task.id}.json`), 'utf8'))
+    raw.status = 'running'
+    raw.stats = { ...raw.stats, lockSessionId: undefined, lockDeadlineAt: undefined }
+    writeFileSync(join(root, 'tasks', `${task.id}.json`), JSON.stringify(raw))
+    expect(svc.get(task.id)!.status).toBe('running')
+    expect(svc.get(task.id)!.stats?.lockSessionId).toBeUndefined()
+
+    // A firing in that window must bank, not start a second round.
+    const claimed = svc.claimTrigger(task.id, { kind: 'cron', at: 2000, detail: 'cron:*/1 * * * *' })
+    expect(claimed).toBeNull()
+    expect(svc.get(task.id)!.stats?.runs).toBe(1)
+  })
+
+  it('still claims once the round is over', () => {
+    // The other half: a `backlog` task must start, or the loop stops.
+    const svc = service();
+    const task = recurring(svc);
+    expect(svc.get(task.id)!.status).toBe('backlog')
+    const claimed = svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' })
+    expect(claimed).not.toBeNull()
+    expect(svc.get(task.id)!.stats?.runs).toBe(1)
   })
 })

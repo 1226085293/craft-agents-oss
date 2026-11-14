@@ -932,8 +932,22 @@ export class TaskService {
     /**
      * A live run keeps the round.
      */
+    /**
+     * A round that is still open takes the firing as backlog, whatever the lock says.
+     *
+     * The lock is released by `reportHandoff` before the verdict decides what happens next, so
+     * between a worker's delivery and the round's close there is a window with `status: running`,
+     * no lock, and no session — and a firing that landed there claimed a *second* round. Live, one
+     * round produced `pending:dispatch` at 08:18:38 and `pending:cron` at 08:20:26 for the same
+     * 08:19:24 close: `runs` ran ahead of `rounds.ok` by exactly one per round, and `runs` is the
+     * budget's clock.
+     *
+     * 「No lock」 means 「nobody is running this」 only when the round is over. While it is open, the
+     * firing waits like any other.
+     */
     const held = task.stats?.lockSessionId;
-    if (held) {
+    const roundOpen = task.status === 'running';
+    if (held || roundOpen) {
       const next: Task = { ...task, stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), pendingTriggers: accumulated } };
       this.save(next);
       appendJournal(this.root, id, { type: 'trigger_accumulated', at: now, data: trigger });

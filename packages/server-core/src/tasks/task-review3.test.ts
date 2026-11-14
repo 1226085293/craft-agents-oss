@@ -168,6 +168,17 @@ describe('the end-of-round report carries the backlog', () => {
 
     const text = wakes.at(-1) ?? '';
     expect(text).toContain('本轮期间累计的触发');
+    /**
+     * The backlog is delivered *merged* and it is not a cue to dispatch.
+     *
+     * It used to end with 「要接着跑就 dispatch」 — an invitation to keep working in the round that
+     * just ended. Live, a per-minute task took it: round 2 grew from one step to six and ran four
+     * minutes, so the triggers that fired in the meantime piled up behind it.
+     */
+    expect(text).toContain('本轮已经结束，这些触发不用在本轮补派');
+    expect(text).not.toContain('要接着跑就 dispatch');
+    // One paragraph, counts per kind — not one line per firing.
+    expect(text).toContain('次');
     expect(svc.get(task.id)!.stats?.triggersDeliveredAt).toBeGreaterThan(0);
   })
 })

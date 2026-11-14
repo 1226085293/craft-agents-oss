@@ -2642,7 +2642,7 @@ export class TaskService {
       const triggerBacklog = this.triggerSummary(id)
       if (triggerBacklog) this.markTriggersDelivered(id, backlogReadAt)
       const triggerHint = triggerBacklog
-        ? `。\n\n本轮期间累计的触发：\n${triggerBacklog}\n要接着跑就 dispatch；不跑也没关系，下一轮到点会再问你。`
+        ? `。\n\n本轮期间累计的触发：\n${triggerBacklog}\n本轮已经结束，这些触发不用在本轮补派——下一次触发会正常开新的一轮。`
         : ''
       this.deps.wakeSupervisor(
         next.supervisorSessionId,

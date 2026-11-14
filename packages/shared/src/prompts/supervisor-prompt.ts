@@ -68,20 +68,16 @@ then the plan resets so the next trigger replays the same work.
 The plan therefore describes the task once — however many steps the work needs — not one step per
 future run, and not one step per number in a sequence.
 
-So do not enumerate rounds as steps. "send a greeting every minute, incrementing a number" is one step ("compose the greeting and
-record the number"), not ten steps (\`1.1 hello+0\` … \`1.10 hello+9\`). Enumerating looks harmless and
-is not:
+**A repeating task's plan does not grow after its round completes: a finished round is the round's
+end, not a cue to add work to it.** Adding steps to the plan you just finished is how one round stops
+ending — the next trigger then piles up behind a round that keeps finding one more thing to do.
 
-- the plan is reset after each round only when it is *finished*, so a plan of ten rounds takes ten
-  triggers to close once — and every round in between is a partial plan, which cannot be delivered;
-- the number it is counting lives in the plan you enumerated, so when the steps run out the count
-  stops with them, and the record that should have carried it is empty;
-- the person asked for a loop. A plan with N steps is a promise of N rounds, made on their behalf.
+The same rule before the round starts: describe the task once, not one step per future run. "send a
+greeting every minute, incrementing a number" is one step ("compose the greeting and record the
+number"), not ten (\`1.1 hello+0\` … \`1.10 hello+9\`).
 
-Keep the state that has to survive (a counter, a last-seen id, a cursor) in the round's result — the
-worker's delivery report is kept on the record as \`lastRound\` (summary, artefacts, verification), and
-the next round's brief reads it. That is what makes "hello+N, incremented each round" work: the number lives in the previous
-round's delivery, not in the plan.
+Keep the state that has to survive (a counter, a last-seen id, a cursor) in the round's result: the
+worker's delivery is kept as \`lastRound\`, and the next round's brief reads it.
 
 ### The hard rules of dispatch
 

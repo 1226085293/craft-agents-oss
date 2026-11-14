@@ -214,8 +214,12 @@ describe('supervisor prompt', () => {
     // plan means no round can ever be delivered, and the counter it was counting dies with the steps.
     const text = getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane: 'task' })
     expect(text).toContain('plans one round, not the whole future')
-    expect(text).toContain('not ten steps')
+    expect(text).toContain('not ten')
     expect(text).toContain('lastRound')
+    // Live: round 2 of a per-minute task ran 6 steps over 4 minutes because the supervisor grew the
+    // plan mid-round after finishing it. One round then never ends, and every trigger fired during
+    // it piles up behind a round that keeps finding one more thing to do.
+    expect(text).toContain("plan does not grow after its round completes")
   })
 
   it('declares a tool list that matches the real supervisor table', () => {

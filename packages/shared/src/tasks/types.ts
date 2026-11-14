@@ -275,6 +275,21 @@ export interface TaskStats {
    */
   wakeFailures?: number;
   /**
+   * Consecutive supervisor turns that produced nothing, whatever woke them.
+   *
+   * `wakeFailures` counts one source only — a trigger backlog this lane was shown. That missed the
+   * case that actually loses a task: measured 2026-11-14 on T-1, the watchdog woke the task
+   * supervisor three times about a worker that would not report, each turn died as
+   * `503 no healthy account`, and nothing anywhere counted it. `wakeFailures` stayed `null` because
+   * no trigger was ever claimed, so the 「three in a row is a fault」 rule — which already existed —
+   * never ran. The task sat paused with nobody told.
+   *
+   * The defect was the filter, not the count: what matters is that this lane was given something to
+   * answer and answered nothing. So this counts every no-reply turn against the tasks it holds, and
+   * is reset by any turn that does reply.
+   */
+  silentTurns?: number;
+  /**
    * When this task's trigger backlog was last put in front of the supervisor.
    *
    * 「Accumulated」 and 「delivered」 are different facts, and a turn that ends settles only what it

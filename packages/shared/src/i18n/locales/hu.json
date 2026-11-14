@@ -1463,6 +1463,7 @@
   "taskboard.empty": "No tasks yet. The supervisor creates one when work spans sessions.",
   "taskboard.title": "Tasks",
   "tasks.supervisorInterrupted": "A felügyelő nem válaszol. Kérlek, ellenőrizd.",
+  "tasks.supervisorRecovered": "A felügyelő ismét válaszol",
   "terminal.copyCommand": "Parancs másolása",
   "terminal.copyOutput": "Kimenet másolása",
   "terminal.output": "Kimenet",

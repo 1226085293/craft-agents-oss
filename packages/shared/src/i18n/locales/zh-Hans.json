@@ -1463,6 +1463,7 @@
   "taskboard.empty": "还没有任务。督导在处理跨会话的活时会建一个。",
   "taskboard.title": "任务",
   "tasks.supervisorInterrupted": "任务督导中断，请检查",
+  "tasks.supervisorRecovered": "任务督导已恢复正常",
   "terminal.copyCommand": "复制命令",
   "terminal.copyOutput": "复制输出",
   "terminal.output": "输出",

@@ -1463,6 +1463,7 @@
   "taskboard.empty": "No tasks yet. The supervisor creates one when work spans sessions.",
   "taskboard.title": "Tasks",
   "tasks.supervisorInterrupted": "Der Aufgaben-Supervisor antwortet nicht mehr. Bitte prüfen.",
+  "tasks.supervisorRecovered": "Der Aufgaben-Supervisor antwortet wieder",
   "terminal.copyCommand": "Befehl kopieren",
   "terminal.copyOutput": "Ausgabe kopieren",
   "terminal.output": "Ausgabe",

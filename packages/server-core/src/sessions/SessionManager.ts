@@ -108,7 +108,7 @@ function generateShortId(): string {
   return Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')
 }
 import { SupervisorNoticeQueue } from './supervisor-notices.ts'
-import { startWatchdog, type WatchdogLoop } from '../tasks/task-watchdog.ts'
+import { startWatchdog, MAX_IDLE_WAKES, type WatchdogLoop } from '../tasks/task-watchdog.ts'
 import { startTaskScheduler, runEventPass, runCronPass, type TaskRunnerDeps } from '../tasks/task-scheduler.ts'
 import { startPageRefreshScheduler } from '../pages/page-refresh-scheduler.ts'
 import { migrateAutomationCronTasks } from '../tasks/automation-migration.ts'
@@ -240,6 +240,52 @@ let sessionLog: Logger = createScopedLogger(CONSOLE_LOGGER, 'session')
  * deterministic signal (the adapter enqueues info → replay → complete in that
  * order). Pure so the guard is unit-testable in isolation.
  */
+/**
+ * What one supervisor turn means for the tasks that lane holds.
+ *
+ * Extracted from `settleTaskTriggers` because this is the whole decision: whether the person hears
+ * 「the supervisor stopped answering」, and whether they hear the end of that outage. The delivery
+ * itself is a few `sendMessage` calls; getting this wrong is what made T-1 pause on 2026-11-14 with
+ * nothing said.
+ *
+ * `limit` is passed in rather than read here so the caller owns the budget (it is the watchdog's
+ * `MAX_IDLE_WAKES + 1`) and the rule stays a pure function of the numbers.
+ */
+export type TaskFaultVerdict =
+  /** Nothing to say about this task — either it was already reported, or the count moved elsewhere. */
+  | { kind: 'quiet' }
+  /** The count crossed the limit on this very turn: the person is told. */
+  | { kind: 'report'; silentTurns: number }
+  /** The lane answered after having been reported: say the outage is over. */
+  | { kind: 'recovered'; silentTurns: number }
+
+export function classifyTaskFaultOutcome(params: {
+  replied: boolean
+  /** Count after this turn's update: the new total when silent, or 0 when the lane replied. */
+  silentTurns: number
+  /** Count before this turn — what a recovery is measured against. */
+  previousSilentTurns: number
+  limit: number
+}): TaskFaultVerdict {
+  const { replied, silentTurns, previousSilentTurns, limit } = params
+  if (replied) {
+    /**
+     * Only announce recovery if the person was actually told there was a fault. Comparing the
+     * previous count against the limit is the record's own answer to 「did we cross it」 — the
+     * notification is sent exactly once, on the turn the count equals the limit, so anything at or
+     * above the limit means it went out.
+     */
+    if (previousSilentTurns >= limit) return { kind: 'recovered', silentTurns: previousSilentTurns }
+    return { kind: 'quiet' }
+  }
+  /**
+   * Exactly equal, not greater: the report is for the turn that crosses the limit. A task that keeps
+   * failing after being reported must not be re-reported on every silent turn — the person has been
+   * told once, and saying it again would turn one fault into a stream of messages.
+   */
+  return silentTurns === limit ? { kind: 'report', silentTurns } : { kind: 'quiet' }
+}
+
 export function hasVerificationReplayPending(
   messages: ReadonlyArray<{ role: string; statusType?: string; timestamp?: number }>,
   lastUserTimestamp: number | undefined,
@@ -2149,6 +2195,17 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * How many supervisor turns in a row may produce nothing before the person is told.
+   *
+   * Deliberately the watchdog's own budget plus one: `MAX_IDLE_WAKES` is how many times the loop
+   * will nudge a worker before it gives up, so a supervisor gets exactly one more turn than the
+   * nudges it is expected to answer. Counting them separately is how the two drifted apart — the
+   * loop exhausted its budget and paused the task on the third nudge, while this counter, which was
+   * supposed to notice nothing was being said, never incremented at all.
+   */
+  private static readonly SILENT_TURN_LIMIT = MAX_IDLE_WAKES + 1
+
+  /**
    * Settle every task this supervisor lane holds a trigger backlog for.
    *
    * Called once per supervisor turn with the one fact that matters: did the turn produce a final
@@ -2158,44 +2215,109 @@ export class SessionManager implements ISessionManager {
    * A turn with no final reply keeps the backlog owed and counts the failure. Three in a row is not
    * a flake: the person is told, because a supervisor that stops answering leaves every recurring
    * task silently doing nothing while its record still says it is registered.
+   *
+   * ## Why this no longer filters on the trigger backlog
+   *
+   * The count used to run only over tasks with a delivered trigger, because that is what 「woken by
+   * the scheduler」 meant. Measured 2026-11-14 on T-1, that filter is why the rule missed the case
+   * it exists for: the watchdog woke the task supervisor three times about a worker that would not
+   * report, every turn died as `503 no healthy account`, and `wakeFailures` stayed `null` because no
+   * trigger was ever claimed. The task paused at 23:47 and the person was never told.
+   *
+   * What the rule needs to know is not what woke the turn but whether the turn said anything. A
+   * supervisor that answers nothing is a fault regardless of who asked.
    */
   private async settleTaskTriggers(managed: ManagedSession, replied: boolean): Promise<void> {
     try {
       const service = this.getTasks(managed.workspace.id)
-      const pending = service
-        .list()
-        .filter(
-          (task) =>
-            task.supervisorSessionId === managed.id &&
-            (task.stats?.pendingTriggers?.length ?? 0) > 0 &&
-            // Only what this lane was actually shown. A turn woken by task A's report used to clear
-            // task B's backlog as well, and B was never asked about again.
-            (task.stats?.triggersDeliveredAt ?? 0) > 0,
-        )
-      if (pending.length === 0) return
+      const owned = service.list().filter((task) => task.supervisorSessionId === managed.id)
+      if (owned.length === 0) return
 
-      for (const task of pending) {
-        if (replied) {
-          service.clearTriggers(task.id)
+      /**
+       * A task with a delivered backlog needs its backlog settled whatever happens next; the reply
+       * accounting below is about the turn, and applies to every task this lane holds.
+       */
+      const owed = owned.filter(
+        (task) =>
+          (task.stats?.pendingTriggers?.length ?? 0) > 0 &&
+          // Only what this lane was actually shown. A turn woken by task A's report used to clear
+          // task B's backlog as well, and B was never asked about again.
+          (task.stats?.triggersDeliveredAt ?? 0) > 0,
+      )
+
+      for (const task of owed) {
+        if (replied) service.clearTriggers(task.id)
+      }
+
+      /**
+       * The wording lives in the locale files, not here: this sentence is read by the person, and
+       * the app already knows which language that is (Appearance > Language).
+       *
+       * `i18n` is initialized by the host app. In a headless or test host it may not be, and `t()`
+       * then returns the key itself — which would put 「tasks.supervisorInterrupted」 in front of the
+       * person as if it were a message. The Chinese string is the fallback because this sentence
+       * only exists for a person to read.
+       */
+      const say = (key: string, fallback: string): string =>
+        i18n.isInitialized ? i18n.t(key) : fallback
+
+      for (const task of owned) {
+        /**
+         * The count moves first, then the rule reads both numbers it produced.
+         *
+         * Splitting them keeps `classifyTaskFaultOutcome` a pure function of the before/after values
+         * while the record stays the source of truth: the process that sees the third failure is not
+         * necessarily the one that saw the first.
+         */
+        const previous = task.stats?.silentTurns ?? 0
+        const silentTurns = replied ? service.clearSilentTurns(task.id) : service.noteSilentTurn(task.id)
+        const verdict = classifyTaskFaultOutcome({
+          replied,
+          silentTurns,
+          previousSilentTurns: previous,
+          limit: SessionManager.SILENT_TURN_LIMIT,
+        })
+        if (verdict.kind === 'quiet') continue
+
+        /**
+         * Both verdicts are for the person, and both go to the user lane — never back into the lane
+         * that is not answering. That is the whole bug this replaces: the notice used to be sent to
+         * the task supervisor, so a dead supervisor was told about its own silence.
+         */
+        const lane = await this.ensureSupervisorSession(managed.workspace.id, 'user')
+        if (verdict.kind === 'recovered') {
+          if (lane) {
+            this.notifySupervisor(
+              lane.id,
+              `task-recovered:${task.id}`,
+              say('tasks.supervisorRecovered', '任务督导已恢复正常'),
+            )
+          }
+          sessionLog.info('supervisor is answering again', { taskId: task.id, silentTurns: verdict.silentTurns })
           continue
         }
-        const failures = service.noteWakeWithoutReply(task.id)
-        if (failures < 3) continue
 
-        // The wording lives in the locale files, not here: this sentence is read by the person, and
-        // the app already knows which language that is (Appearance > Language).
+        if (lane) {
+          this.notifySupervisor(
+            lane.id,
+            `task-fault:${task.id}`,
+            say('tasks.supervisorInterrupted', '任务督导中断，请检查'),
+          )
+        }
         /**
-         * `i18n` is initialized by the host app. In a headless or test host it may not be, and
-         * `t()` then returns the key itself — which would put 「tasks.supervisorInterrupted」 in front
-         * of the person as if it were a message. The Chinese string is the fallback because this
-         * sentence only exists for a person to read.
+         * No `setStatus` here.
+         *
+         * This clause used to pause the task (`process_lost`) the moment it told the person the
+         * supervisor had gone quiet. Two things were wrong with that. Pausing is the watchdog's
+         * judgement to make — it owns `MAX_IDLE_WAKES`, the worker's own failure count, and the
+         * lock — and this path knows only that one supervisor turn produced no text, which a
+         * transient upstream fault also produces. Coupling the two meant a single bad minute could
+         * freeze a healthy task for good.
+         *
+         * So the message is the whole action: the person is told, and whether the task stops is
+         * decided by the loop that can see the task itself.
          */
-        const key = 'tasks.supervisorInterrupted'
-        const text = i18n.isInitialized ? i18n.t(key) : '任务督导中断，请检查'
-        const lane = await this.ensureSupervisorSession(managed.workspace.id, 'user')
-        if (lane) this.notifySupervisor(lane.id, `task-fault:${task.id}`, text)
-        service.setStatus(task.id, 'paused', { pauseReason: 'process_lost' })
-        sessionLog.warn('supervisor stopped answering a task trigger', { taskId: task.id, failures })
+        sessionLog.warn('supervisor stopped answering a task', { taskId: task.id, silentTurns: verdict.silentTurns })
       }
     } catch (error) {
       sessionLog.warn('failed to settle task triggers', { error })

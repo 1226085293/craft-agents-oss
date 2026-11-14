@@ -1622,6 +1622,46 @@ export class TaskService {
    * Same shape as `recordLostRetry`, same reason: the counter has to outlive the process that
    * increments it, or a task stuck on an unwritten question is nudged on every boot forever.
    */
+  /**
+   * Count a supervisor turn that was given work and produced nothing.
+   *
+   * Returns the new count so the caller can compare it against its own threshold. Written to the
+   * record rather than held in memory for the same reason as every other counter here: the process
+   * that notices the third failure is not necessarily the one that saw the first.
+   */
+  noteSilentTurn(id: string): number {
+    const task = this.require(id);
+    const now = this.now();
+    const turns = (task.stats?.silentTurns ?? 0) + 1;
+    this.save({
+      ...task,
+      stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), silentTurns: turns },
+      updatedAt: now,
+    });
+    appendJournal(this.root, id, { type: 'silent_turn', at: now, data: { silentTurns: turns } });
+    return turns;
+  }
+
+  /**
+   * The supervisor spoke, so the run of silent turns is over.
+   *
+   * Returns what the count was, because 「was failing, now is not」 is a fact the person was told
+   * about and therefore has to be told the end of. Zero means there was nothing to announce.
+   */
+  clearSilentTurns(id: string): number {
+    const task = this.require(id);
+    const previous = task.stats?.silentTurns ?? 0;
+    if (previous === 0) return 0;
+    const now = this.now();
+    this.save({
+      ...task,
+      stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), silentTurns: 0 },
+      updatedAt: now,
+    });
+    appendJournal(this.root, id, { type: 'silent_turns_cleared', at: now, data: { was: previous } });
+    return previous;
+  }
+
   recordUnwordedRetry(id: string, count: number): Task {
     const task = this.require(id);
     const stats = task.stats ?? { runs: 0, activeMs: 0 };

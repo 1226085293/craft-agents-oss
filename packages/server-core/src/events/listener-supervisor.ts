@@ -24,6 +24,31 @@ import type { LoadedListener } from './listener-registry.ts';
 
 const log = createLogger('events');
 
+/**
+ * Hand a plugin its config as a file it can read, so secrets stay out of the
+ * environment block. Written on every start, so a config edit — including the
+ * token a sign-in just produced — applies on the next enable.
+ *
+ * Exported because the sign-in tests assert against the same writer the
+ * supervisor uses; a test-local copy could drift and prove nothing.
+ */
+export function writeListenerConfigFile(
+  dataDir: string,
+  config: Record<string, unknown> | undefined,
+): string | null {
+  if (!config || Object.keys(config).length === 0) return null;
+  const configPath = join(dataDir, 'config.json');
+  try {
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    return configPath;
+  } catch {
+    return null;
+  }
+}
+
 const DEFAULT_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000];
 const DEFAULT_MAX_ATTEMPTS = 5;
 const LOG_MAX_BYTES = 5 * 1024 * 1024;
@@ -135,18 +160,7 @@ export class ListenerSupervisor {
     // Surface the user's saved config (email, authCode…) to the child as a
     // file it can read — secrets stay out of the environment block. Written
     // on every start so a config edit applies on the next enable.
-    let configPath: string | null = null;
-    if (listener.config && Object.keys(listener.config).length > 0) {
-      configPath = join(listener.dataDir, 'config.json');
-      try {
-        writeFileSync(configPath, `${JSON.stringify(listener.config, null, 2)}\n`, {
-          encoding: 'utf8',
-          mode: 0o600,
-        });
-      } catch {
-        configPath = null;
-      }
-    }
+    const configPath = writeListenerConfigFile(listener.dataDir, listener.config);
 
     const argv = program.map((part) => substitute(part, listener));
     const cwd = manifest.runtime?.cwd ? substitute(manifest.runtime.cwd, listener) : listener.dir;

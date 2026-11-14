@@ -426,7 +426,10 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
       if (!listenerId) throw new Error('listenerId is required');
       const workspace = requireWorkspace(workspaceId);
       const dataDir = join(workspace.rootPath, 'events-data', listenerId);
-      return readPluginAuth(listenerId, dataDir);
+      const result = await readPluginAuth(listenerId, dataDir);
+      // Reading is not inert: this poll is where a completed scan first becomes
+      // visible, so the same transition that persists credentials runs here.
+      return finishAuth(workspaceId, listenerId, workspace.rootPath, result);
     },
   );
 

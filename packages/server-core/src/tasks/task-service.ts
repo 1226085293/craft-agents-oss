@@ -1420,7 +1420,37 @@ export class TaskService {
       ? this.releaseRunRecord({ ...task, decisions: queue, updatedAt: now }, now)
       : { ...task, decisions: queue, updatedAt: now }
     const saved = this.save(next);
-    if (parksRun) this.disposeRun(id, 'suspended');
+    if (parksRun) {
+      /**
+       * The run handle stops the session while it still has one.
+       *
+       * Read before the dispose, because disposing deletes the handle. A `pending:` placeholder is
+       * not a session — `disposeRun` deliberately ignores it — so this asks the same question that
+       * function does, and the two cannot both act.
+       */
+      const handledByRun = Boolean(this.runSessionOf(id));
+      this.disposeRun(id, 'suspended');
+      /**
+       * Stop the worker from the record when the handle is gone.
+       *
+       * `disposeRun` is the teardown of a run, and it answers only while that run still has a
+       * handle. An ordinary hand-off ends one first: `reportHandoff` calls `disposeRun('ended')`,
+       * which deletes the handle. So a question asked after a slice was delivered parked the task —
+       * `save` derives `paused` and the board said 「等你决定」 — while `disposeRun('suspended')`
+       * found nothing to tear down and returned. The worker kept running against a task that had
+       * officially stopped.
+       *
+       * Measured 2026-11-14 on T-1: question asked at 05:17:00, and the worker went on to edit the
+       * plan at 05:19:01 and file another hand-off at 05:19:10. That hand-off woke the supervisor,
+       * which tried to dispatch into a paused task, was refused, and asked the same question a
+       * second time at 05:19:52 — a duplicate decision nothing could answer, which then held the
+       * person's reply undelivered for good.
+       *
+       * The record knows which session is working; the handle does not have to exist for it to be
+       * stopped.
+       */
+      if (!handledByRun) this.stopWorker(saved);
+    }
     appendJournal(this.root, id, {
       type: 'decision_asked',
       at: now,
@@ -2879,6 +2909,12 @@ export class TaskService {
    * destroys it, and a leaked run can never leave its resources behind.
    */
   private readonly runRegistry = new Map<string, RunHandle>();
+
+  /** The real session a run still holds, if any. Placeholders are not sessions. */
+  private runSessionOf(taskId: string): string | undefined {
+    const sessionId = this.runRegistry.get(taskId)?.sessionId;
+    return sessionId && !sessionId.startsWith('pending:') ? sessionId : undefined;
+  }
 
   private registerRun(taskId: string, sessionId: string): RunHandle {
     let handle = this.runRegistry.get(taskId);

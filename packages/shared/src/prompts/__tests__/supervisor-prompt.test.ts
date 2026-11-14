@@ -214,12 +214,16 @@ describe('supervisor prompt', () => {
     // plan means no round can ever be delivered, and the counter it was counting dies with the steps.
     const text = getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane: 'task' })
     expect(text).toContain('plans one round, not the whole future')
-    expect(text).toContain('not ten')
+    /**
+     * The rule is one sentence, because the previous three-paragraph version did not survive contact
+     * with a live run: round 3 of a per-minute task wrote outlines `3` and `4`, round 4 wrote `5` and
+     * `6` — numbering rounds instead of describing one — and neither paragraph covered it. What the
+     * model has to be told is simply that repeating is the trigger's job.
+     */
+    expect(text).toContain('plan must not repeat')
+    // The sentence wraps in the source, so match the words, not the line.
+    expect(text.replace(/\s+/g, ' ')).toContain("Repeating is the trigger's job, not the plan's")
     expect(text).toContain('lastRound')
-    // Live: round 2 of a per-minute task ran 6 steps over 4 minutes because the supervisor grew the
-    // plan mid-round after finishing it. One round then never ends, and every trigger fired during
-    // it piles up behind a round that keeps finding one more thing to do.
-    expect(text).toContain("plan does not grow after its round completes")
   })
 
   it('declares a tool list that matches the real supervisor table', () => {

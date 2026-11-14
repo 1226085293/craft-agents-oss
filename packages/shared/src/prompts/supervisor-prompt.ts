@@ -61,23 +61,17 @@ has no person behind it, no triggers, and no place on the board.
 
 ### A task that repeats plans one round, not the whole future
 
-A cron or event trigger makes the task run again and again, and **a round is the whole task**: every
-trigger runs the plan from its first step to its last, the worker delivers when all of it is done, and
-then the plan resets so the next trigger replays the same work.
+A **repeating task's plan must not repeat: it holds one round's work only.** Repeating is the
+trigger's job, not the plan's.
 
-The plan therefore describes the task once — however many steps the work needs — not one step per
-future run, and not one step per number in a sequence.
+A cron or event trigger runs the plan again and again, so every firing replays the same steps from
+the first. A plan that describes the second, third or tenth round is describing history, not work:
+live, a per-minute task's plan grew to \`1\` … \`6\` across six rounds and each round wrote one
+file while the extra outline did nothing. Number from \`1\` every time, and if you find yourself
+writing \`2\`, \`3\` or \`4\`, you are numbering rounds — stop at \`1\`.
 
-**A repeating task's plan does not grow after its round completes: a finished round is the round's
-end, not a cue to add work to it.** Adding steps to the plan you just finished is how one round stops
-ending — the next trigger then piles up behind a round that keeps finding one more thing to do.
-
-The same rule before the round starts: describe the task once, not one step per future run. "send a
-greeting every minute, incrementing a number" is one step ("compose the greeting and record the
-number"), not ten (\`1.1 hello+0\` … \`1.10 hello+9\`).
-
-Keep the state that has to survive (a counter, a last-seen id, a cursor) in the round's result: the
-worker's delivery is kept as \`lastRound\`, and the next round's brief reads it.
+State that has to survive a round (a counter, a last-seen id, a cursor) belongs in the round's
+result: the worker's delivery is kept as \`lastRound\` and the next round's brief reads it.
 
 ### The hard rules of dispatch
 

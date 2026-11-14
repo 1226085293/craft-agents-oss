@@ -1125,6 +1125,24 @@ export class SupervisorRuntime {
             })
           await this.deps.sendToSession(action.sessionId, action.message)
         } else {
+          /**
+           * Queued work still has to be allowed when it finally runs.
+           *
+           * A dispatch is only *queued* during the supervisor's turn and starts when that turn ends, so
+           * a task can change state in between. Live: the person said 「停止！」, the supervisor queued one
+           * more dispatch, then cancelled the task seven seconds later — and the drain still spawned a
+           * worker for it. That worker filed a hand-off into a cancelled task and was told 「T-1 已被取消」.
+           * 「Queued」 is not a promise that the task still wants the work.
+           */
+          const queuedTask = action.taskId ? this.deps.getTask?.(action.taskId) : undefined
+          if (queuedTask?.status && isTerminal(queuedTask.status as never)) {
+            await this.deps.sendToSession(
+              supervisorSessionId,
+              `上一轮排队的派发没有执行：${queuedTask.id} 已经${queuedTask.status === 'completed' ? '完成' : '取消'}了。` +
+                '这一轮里「已派发」的说法因此没有发生。',
+            )
+            continue
+          }
           const outcome = await this.deps.spawnWorker({
             name: action.name,
             agentId: action.agentId,

@@ -49,6 +49,8 @@ function harness(
       string,
       {
         id: string;
+        /** Read again at drain time: a task can be cancelled between queueing and starting. */
+        status?: string;
         currentSessionId?: string;
         /** Sessions the task has run in; the reuse pool. */
         sessionIds?: string[];
@@ -204,6 +206,55 @@ describe('unclaimed events', () => {
  * supervisor dispatched it. The lookup had been dropping the field, which made
  * the bug invisible: `dispatch` never received it to pass on.
  */
+/**
+ * A queued dispatch is not a promise to start.
+ *
+ * Live run: the person said 「停止！」, the supervisor queued one more dispatch at 02:23:09 and cancelled
+ * the task at 02:23:16. The turn ended, the queue drained, and a worker was spawned anyway — it filed a
+ * hand-off into a cancelled task and got back 「T-1 已被取消」. The record said one thing and a session
+ * did another under its name.
+ */
+describe('a queued dispatch re-checks the task', () => {
+  it('does not spawn when the task was cancelled after queueing', async () => {
+    const task = { id: 'T-1', status: 'running' };
+    const tasks = new Map([['T-1', task]]);
+    const h = harness(workspace(), { tasks });
+
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      scope: '再发一次问候',
+      instruction: '生成第六轮问候',
+      attachTaskId: 'T-1',
+      parallel: false,
+    });
+
+    // The person says stop while the supervisor's turn is still open — exactly the window this guards.
+    task.status = 'canceled';
+    await drain(h);
+
+    expect(h.spawned).toHaveLength(0);
+    expect(h.sent.some((entry) => entry.text.includes('没有执行'))).toBe(true);
+  });
+
+  it('still spawns while the task accepts work', async () => {
+    const tasks = new Map([['T-1', { id: 'T-1', status: 'backlog' }]]);
+    const h = harness(workspace(), { tasks });
+
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      scope: '改前端',
+      instruction: '把按钮改成蓝色',
+      attachTaskId: 'T-1',
+      parallel: false,
+    });
+    await drain(h);
+
+    expect(h.spawned).toHaveLength(1);
+  });
+});
+
 describe('dispatch honours the task assignee', () => {
   it("spawns the worker under the task's assigned profile", async () => {
     const tasks = new Map([

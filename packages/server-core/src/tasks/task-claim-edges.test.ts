@@ -398,3 +398,37 @@ describe('a repeating task plans one round', () => {
     expect(svc.updatePlan(task.id, { id: '2.1', title: 'w', agent: 'builtin-default' }).ok).toBe(true)
   })
 })
+
+describe('a paused task ignores its triggers', () => {
+  /**
+   * Pausing is the person's instruction to stop. The branch asked 「may a run start now?」
+   * (`startGate`) instead of 「is this task paused?」, so a task the person had stopped kept waking
+   * the supervisor every minute to be told 「本轮被触发」.
+   */
+  it('banks the firing without waking anyone, whatever the pause reason', () => {
+    for (const reason of ['waiting', 'awaiting_dispatch', 'process_lost'] as const) {
+      const svc = service();
+      const task = recurring(svc);
+      svc.setStatus(task.id, 'paused', { pauseReason: reason });
+
+      const before = svc.get(task.id)!.stats?.pendingTriggers?.length ?? 0
+      expect(svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' })).toBeNull()
+      const after = svc.get(task.id)!
+      expect(after.status).toBe('paused')
+      // Banked, not acted on: the firing is recorded so the person can see what arrived.
+      expect(after.stats?.pendingTriggers?.length).toBe(before + 1)
+    }
+  })
+
+  it('starts the next round once the pause is lifted', () => {
+    // The rule it protects is not 「paused forever」: resuming is the person's way back in.
+    const svc = service();
+    const task = recurring(svc);
+    svc.setStatus(task.id, 'paused', { pauseReason: 'waiting' })
+    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' })
+    svc.setStatus(task.id, 'backlog')
+
+    expect(svc.claimTrigger(task.id, { kind: 'cron', at: 2000, detail: 'cron:*/1 * * * *' })).not.toBeNull()
+    expect(svc.get(task.id)!.status).toBe('running')
+  })
+})

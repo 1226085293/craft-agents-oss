@@ -957,17 +957,21 @@ export class TaskService {
     if (task.status === 'completed' || task.status === 'canceled') return null;
 
     /**
-     * A paused task accumulates and nothing else.
+     * A paused task ignores its triggers.
      *
-     * The pause that matters is 「有人在回答一个问题」, and waking the supervisor there would ask it
-     * to dispatch around a decision the person has not given yet — the directive gate would refuse
-     * the dispatch, so all it buys is a wasted turn and a supervisor reading 「继续吗」 about a
-     * question it already asked. Whatever the trigger wanted is still owed, so it is recorded.
+     * Pausing is the person's instruction to stop, so a firing while paused must not wake the
+     * supervisor at all — it was, because this branch asked 「may a run start now?」 (`startGate`)
+     * rather than 「is this task paused?」. A per-minute task paused by the user kept waking the
+     * supervisor every minute to be told 「本轮被触发」 about work the person had just stopped.
+     *
+     * The firing is still recorded, so the trigger is not lost and the person can see what arrived
+     * while it was stopped; nothing acts on it. Resuming clears the pause, and the next firing after
+     * that starts a round normally.
      *
      * Deliberately not derived from the lock: a pause written by the service releases the run lock
      * (the run is over), so 「lock still held」 cannot be the test for 「waiting for a person」.
      */
-    if (task.status === 'paused' && !this.canRunWhilePaused(task, now)) {
+    if (task.status === 'paused') {
       const next: Task = {
         ...task,
         stats: { ...(task.stats ?? { runs: 0, activeMs: 0 }), pendingTriggers: accumulated },

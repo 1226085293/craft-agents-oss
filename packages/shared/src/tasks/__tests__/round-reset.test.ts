@@ -194,3 +194,28 @@ describe('what the reset must not touch', () => {
     expect(archivedSessionIds).toEqual(['sess_r2b']);
   });
 });
+
+describe('the report survives the round that filed it', () => {
+  /**
+   * `handoffs` empties when a round closes — the next round must not inherit this round's attempts.
+   * But the watchdog asked 「did THIS run file?」 through that array, so every closed round looked
+   * unreported until the next hand-off arrived: live, T-1 closed round 5 and the supervisor was told
+   * 「T-1 的执行者已停止但没交作业」 about the session that had just reported it.
+   */
+  it('stamps the accepted report so the question stays answerable after the clear', () => {
+    const { task } = reset()
+    expect(task.handoffs).toEqual([])
+    expect(task.stats?.lastHandoffAt).toBe(NOW)
+    expect(task.stats?.lastHandoffSessionId).toBe('sess_r2b')
+  })
+
+  it('ignores a refused attempt, because a rejection is not a report', () => {
+    const refused = finishedRound({
+      handoffs: [
+        { at: NOW - 2000, fromSessionId: 'sess_r2a', outcome: 'handoff', summary: '被拒', round: 3, passed: false },
+      ] as Task['handoffs'],
+    })
+    const { task } = resetRoundState(refused, { now: NOW })
+    expect(task.stats?.lastHandoffAt).toBeUndefined()
+  })
+})

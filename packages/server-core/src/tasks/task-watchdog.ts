@@ -252,6 +252,23 @@ export const MAX_IDLE_WAKES = 2;
  */
 function hasFiledThisRun(task: Task): boolean {
   const runStartedAt = task.stats?.runStartedAt;
+  /**
+   * The stamp first, because `handoffs` empties when a round closes.
+   *
+   * A run that reported and then had its round closed is finished, not unreported: `round_reset`
+   * clears the timeline (the next round must not inherit those attempts) and keeps
+   * `lastHandoffAt`/`lastHandoffSessionId` for exactly this question. Without it, the watchdog read
+   * every closed round as 「执行者已停止但没交作业」 and nudged a session that had already reported.
+   * Live: T-1 closed round 5, claimed the next one, and the supervisor got that message about the
+   * worker that had just handed off.
+   */
+  if (
+    typeof task.stats?.lastHandoffAt === 'number' &&
+    task.stats.lastHandoffSessionId === task.currentSessionId &&
+    (!runStartedAt || task.stats.lastHandoffAt >= runStartedAt)
+  ) {
+    return true;
+  }
   return task.handoffs.some(
     (handoff) =>
       handoff.outcome !== 'needs_decision' &&

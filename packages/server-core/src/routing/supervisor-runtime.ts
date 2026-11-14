@@ -792,6 +792,19 @@ export class SupervisorRuntime {
                 session!.role === 'worker' &&
                 session!.agentId === namedStep.agent &&
                 session!.isProcessing === false &&
+                /**
+                 * An archived session is closed for business.
+                 *
+                 * The round-end archive runs every round for a recurring task: the worker reports,
+                 * the round closes, and its conversation is filed away so the next round starts
+                 * clean. Reusing it anyway fed each new round into the session the archive had just
+                 * retired — live, `261114-dynamic-aurora` was archived at the end of round 1 and
+                 * then reused for rounds 2, 3, 4 and again after the task was paused, so 「每轮干净
+                 * 开始」 never happened.
+                 *
+                 * The pointer path above already checks this; the scope-search path did not.
+                 */
+                session!.archived !== true &&
                 session!.taskId === task.id,
             )
           const sameOutline = outlineId

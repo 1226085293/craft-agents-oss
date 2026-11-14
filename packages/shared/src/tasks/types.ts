@@ -302,6 +302,18 @@ export interface TaskStats {
    * This field is the answer that survives lock churn: `runs` only moves when this stamp moves.
    */
   runsCountedFor?: number;
+  /**
+   * The last hand-off this record accepted, kept across the round reset.
+   *
+   * `handoffs` is the round's timeline and `round_reset` clears it — correct, the next round must
+   * not inherit the previous round's attempts. But the watchdog asks 「did THIS run file a report?」
+   * by looking in `handoffs`, and after a reset that question has no answer even though the run
+   * filed one: live, T-1 closed round 5, the next round was claimed, and the watchdog told the
+   * supervisor 「执行者已停止但没交作业」 about a session that had just reported. This stamp is what
+   * survives the reset, so the question stays answerable.
+   */
+  lastHandoffAt?: number;
+  lastHandoffSessionId?: string;
 }
 
 export interface PendingTrigger {

@@ -88,17 +88,26 @@ describe('a finished plan ends the round, whichever word the worker used', () =>
 })
 
 describe('a pause with nothing refusing it does not block the next round', () => {
-  it('starts a round on a paused task that the gate would allow', () => {
-    // The derived pause (`awaiting_dispatch`) is not a question for a person. Treating it as one left
-    // three triggers accumulating behind it while the plan sat finished.
+  it('ignores every firing while the task is paused', () => {
+    /**
+     * Pausing is the person's instruction to stop, so a timer must not restart the task — not even
+     * through a pause the service derived itself (`awaiting_dispatch`), which is what this case used
+     * to allow. The rule it was protecting — 「a derived pause should not deadlock the loop」 — is
+     * still satisfied: resuming clears the pause, and the next firing after that starts a round.
+     *
+     * Live, a per-minute task the person paused kept waking the supervisor every minute to be told
+     * 「本轮被触发」 about work they had just stopped.
+     */
     const svc = service();
     const task = recurring(svc);
     svc.setStatus(task.id, 'paused', { pauseReason: 'awaiting_dispatch' });
 
     const claimed = svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' });
 
-    expect(claimed).not.toBeNull();
-    expect(svc.get(task.id)!.status).toBe('running');
+    expect(claimed).toBeNull();
+    expect(svc.get(task.id)!.status).toBe('paused');
+    // The firing is still recorded, so the person can see what arrived while it was stopped.
+    expect(svc.get(task.id)!.stats?.pendingTriggers?.length).toBe(1);
   })
 
   it('still only accumulates while a person is deciding', () => {

@@ -79,6 +79,13 @@ export function resetRoundState(task: Task, options: RoundResetOptions): RoundRe
    * session that was holding it. An empty list is not 「nothing to archive」 on such a record, it is
    * 「this round predates the list」, so the fallback covers both.
    */
+  /**
+   * The last accepted report, read before the timeline is cleared.
+   *
+   * Only an accepted one counts: a refused hand-off is an attempt, not a report, and the worker
+   * still owes one.
+   */
+  const lastHandoff = [...(task.handoffs ?? [])].reverse().find((handoff) => handoff.passed !== false)
   const roundList = options.roundSessionIds ?? task.roundSessionIds ?? [];
   const archivedSessionIds = roundList.length
     ? roundList
@@ -98,6 +105,16 @@ export function resetRoundState(task: Task, options: RoundResetOptions): RoundRe
     ...(options.clearPlan && task.spec ? { spec: { ...task.spec, plan: [] } } : {}),
     stats: {
       ...keepLifetimeStats(stats),
+      /**
+       * The round's timeline goes, the fact that it reported stays.
+       *
+       * `handoffs` is cleared below because the next round must not inherit this round's attempts.
+       * But the watchdog asks 「did this run file?」 through it, so clearing it silently made every
+       * closed round look unreported until the next hand-off arrived. Live: T-1 closed round 5 and
+       * the supervisor was told 「T-1 的执行者已停止但没交作业」 about the session that had just
+       * reported it.
+       */
+      ...(lastHandoff ? { lastHandoffAt: lastHandoff.at, lastHandoffSessionId: lastHandoff.fromSessionId } : {}),
       // Wake bookkeeping is 「how many times this round had to be nudged」, not a lifetime tally.
       wakeAttempts: undefined,
       lastWakeAt: undefined,

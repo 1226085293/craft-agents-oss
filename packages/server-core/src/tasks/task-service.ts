@@ -583,6 +583,22 @@ export class TaskService {
          * from then on liveness is the heartbeat's job.
          */
         lockDeadlineAt: isPlaceholder ? (task.stats?.lockDeadlineAt ?? now + TRIGGER_CLAIM_MS) : undefined,
+        /**
+         * A new run gets a fresh wake budget.
+         *
+         * `wakeAttempts` counts 「this run was woken and did not move」, and the idle rule pauses the
+         * task once it reaches `MAX_IDLE_WAKES`. It was only cleared when a ROUND closed, so a
+         * one-off task never cleared it: after two idle wakes the counter sat at the cap for good,
+         * and every resume was paused again by the very next pass — which stops the worker session
+         * as it pauses. Observed live on 261115-broad-puma: `idle_wake` at 00:50:33 and 00:57:59,
+         * pause at 00:58:14, resumed at 00:58:32, and paused again 28 seconds later — the turn
+         * ended `interrupted` with no message, and the person saw work stop for no stated reason.
+         *
+         * A resumed task is a new attempt at the work, so the budget has to come back with it.
+         * `sameRound` excludes the bind that belongs to a run already counted, so a placeholder
+         * hand-over does not quietly refill the budget mid-run.
+         */
+        ...(continuesRun || sameRound ? {} : { wakeAttempts: undefined }),
       },
       updatedAt: now,
     };

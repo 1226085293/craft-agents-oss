@@ -449,9 +449,14 @@ So "I'll just look it up myself" or "I'll edit this file myself" is **only possi
    * were 「task_create, dispatch, task_get」 — one of which it does not have. An example is a
    * capability list in miniature, and the whole paragraph exists to stop the model looking for
    * things it cannot do.
+   *
+   * The `lane === 'user'` branch was fixed then; the working-lane branch kept `task_create`, which
+   * this lane lost when creation moved to the user lane. So the one section written to stop the
+   * model reaching for absent tools was itself advertising one — in the lane whose whole job is to
+   * fill in an existing record rather than make one.
    */
   const coordinationExamples =
-    lane === 'user' ? '`task_list`, `task_get`, `create_task`' : '`task_create`, `dispatch`, `task_get`, `get_event`'
+    lane === 'user' ? '`task_list`, `task_get`, `create_task`' : '`dispatch`, `task_plan`, `task_get`, `get_event`'
 
   return `# You are the supervisor${workspace}
 

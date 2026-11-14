@@ -113,10 +113,20 @@ export function readAgentRoster(workspaceRootPath: string | undefined): AgentPro
 }
 
 /**
- * Format the roster. Returns '' when there is nothing to say, so the caller can
- * append unconditionally.
+ * Format the roster. Returns '' when there is nothing to say, so the caller can append
+ * unconditionally.
+ *
+ * The block reaches **both** supervisor lanes, so the sentences around the id list have to be
+ * the lane's own. It used to say 「`task_create` 的 `assigneeAgentId` …」 — a tool no lane has any
+ * more (creation moved to the user lane's `create_task`, which carries no assignee), and then
+ * 「`task_update` …」, which the user lane does not have either. A roster that documents assignment
+ * to a lane whose whole rule is 「你不派活」 is the same contradiction the two-lane split exists to
+ * avoid, one layer down.
  */
-export function formatAgentRosterBlock(entries: AgentPromptEntry[]): string {
+export function formatAgentRosterBlock(
+  entries: AgentPromptEntry[],
+  options: { lane?: 'user' | 'task' } = {},
+): string {
   if (entries.length === 0) return '';
 
   const lines = entries.map((entry) => {
@@ -124,19 +134,29 @@ export function formatAgentRosterBlock(entries: AgentPromptEntry[]): string {
     return entry.gist ? `- \`${entry.id}\`（${label}）：${entry.gist}` : `- \`${entry.id}\`（${label}）`;
   });
 
+  const lane = options.lane ?? 'task';
+  const assignment =
+    lane === 'user'
+      ? '这些角色由干活的那条通道在被派活时挑选，这条路不指派——你只把用户的原话交出去。'
+      : '`task_update` 的 `assigneeAgentId` 和 `dispatch` 的 `target.agentId` 决定**由谁来做**。按任务性质选：要改 UI 的和要查资料的，不该是同一个人。留空就用默认角色。';
+
   return [
     '',
     '## 可选角色',
     '',
-    '`task_create` 的 `assigneeAgentId` 和 `dispatch` 的 `target.agentId` 决定**由谁来做**。按任务性质选：要改 UI 的和要查资料的，不该是同一个人。留空就用默认角色。',
+    assignment,
     '',
     ...lines,
-    '',
-    '选错了不用重派：`task_update` 也能改 `assigneeAgentId`，但只对**还没起会话**的任务有效——已经跑起来的会话带着原来的角色。',
+    ...(lane === 'user'
+      ? []
+      : ['', '选错了不用重派：`task_update` 也能改 `assigneeAgentId`，但只对**还没起会话**的任务有效——已经跑起来的会话带着原来的角色。']),
   ].join('\n');
 }
 
 /** Convenience: read + format in one call. */
-export function buildAgentRosterBlock(workspaceRootPath: string | undefined): string {
-  return formatAgentRosterBlock(readAgentRoster(workspaceRootPath));
+export function buildAgentRosterBlock(
+  workspaceRootPath: string | undefined,
+  options: { lane?: 'user' | 'task' } = {},
+): string {
+  return formatAgentRosterBlock(readAgentRoster(workspaceRootPath), options);
 }

@@ -106,7 +106,7 @@ export async function handleDispatch(
   // allowed to omit it because that session may already be working on a task.
   if (target.kind === 'new' && !args.attachTaskId?.trim()) {
     return errorResponse(
-      'attachTaskId is required when dispatching to a new session. Call task_create first, then dispatch to that task id — work with no task leaves no acceptance, no board entry, and nothing to point at afterwards.',
+      'attachTaskId is required when dispatching to a new session. Tasks come from a person’s words through the user lane, not from this one — find the task with task_get, then dispatch with its id. Work with no task leaves no acceptance, no board entry, and nothing to point at afterwards.',
     );
   }
 

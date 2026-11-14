@@ -844,7 +844,7 @@ export class SupervisorRuntime {
       // unanswerable afterwards.
       if (!params.attachTaskId) {
         throw new DispatchRefused(
-          '新会话必须挂到一条任务上（attachTaskId）。先 task_create，再 dispatch：没有任务的活做完也没人知道它发生过。',
+          '新会话必须挂到一条任务上（attachTaskId）。任务记录来自用户的原话（用户车道登记），不在这条车道上新建：先用 task_get 找到那条任务，再 dispatch 时带上它的 id。没有任务的活做完也没人知道它发生过。',
         );
       }
       // The path that bypassed everything.
@@ -876,7 +876,7 @@ export class SupervisorRuntime {
       const hasRecord = Boolean(params.attachTaskId || targetSession?.taskId);
       if (!hasRecord) {
         throw new DispatchRefused(
-          `会话 ${existingSessionId} 没有挂任务，不能直接给它派活。先 task_create 建一条任务，再 dispatch 到该任务。`,
+          `会话 ${existingSessionId} 没有挂任务，不能直接给它派活。先 task_get 找到要对应用户请求的那条任务，再 dispatch 时用 attachTaskId 带上它。任务记录由用户车道从用户原话登记，不在这条车道上新建。`,
         );
       }
       // The hand-off travels with the work. Everything recorded about the last

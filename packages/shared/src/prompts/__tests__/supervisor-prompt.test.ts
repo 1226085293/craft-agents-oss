@@ -411,6 +411,27 @@ describe('lane prompts match their tool tables', () => {
     }
   })
 
+  it('names no tool the working lane lacks, except the user lane’s own door', () => {
+    /**
+     * The mirror of the test above, and the one that was missing.
+     *
+     * `task_create` stayed in the working lane's coordination example list long after creation
+     * moved to the user lane, so the section titled 「What you cannot do」 opened with 「your
+     * coordination tools are `task_create`, `dispatch`, …」 — a capability claim, in the one
+     * paragraph written to stop the model reaching for capabilities it lacks. Four lines above it,
+     * the comment describes that exact bug; only the user-lane branch had been fixed.
+     *
+     * `create_task` is the one name this lane may carry without having it: the prompt has to say
+     * where a record comes from, and the answer is 「the user lane's door」.
+     */
+    const laneTools = getSessionToolNames({ role: 'supervisor', supervisorLane: 'task' })
+    const OTHER_LANE_DOOR = new Set(['create_task'])
+    for (const name of mentionedTools(taskLane())) {
+      if (OTHER_LANE_DOOR.has(name)) continue
+      expect({ name, present: laneTools.has(name) }).toEqual({ name, present: true })
+    }
+  })
+
   it('keeps the dispatch tutorial out of the user lane, and in the working lane', () => {
     expect(userLane()).not.toContain('How to hand work out')
     expect(userLane()).not.toContain('dispatch({')

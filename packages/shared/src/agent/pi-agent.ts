@@ -4006,8 +4006,11 @@ ${agentSnapshot.persona.trim()}
             personaBlock,
             // Who can do the work. A task names its executor (assigneeAgentId),
             // so the supervisor has to know the roster before it can choose —
-            // otherwise every task runs as the default profile.
-            agentsBlock: buildAgentRosterBlock(this.config.workspace.rootPath),
+            // otherwise every task runs as the default profile. The lane decides
+            // how the block describes assignment: the user lane does not assign.
+            agentsBlock: buildAgentRosterBlock(this.config.workspace.rootPath, {
+              ...(this.config.session?.supervisorLane ? { lane: this.config.session.supervisorLane } : {}),
+            }),
             eventsBlock: buildEventsBlock(this.config.workspace.rootPath),
             // Which of the two supervisor conversations this is. The rules differ
             // per lane; see `laneRules` in the prompt module.

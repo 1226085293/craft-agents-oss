@@ -123,6 +123,43 @@ describe('agent roster', () => {
     expect(formatAgentRosterBlock([])).toBe('');
   });
 
+  describe('the assignment sentence follows the lane', () => {
+    /**
+     * This block is appended to **both** supervisor prompts, so a sentence naming a tool is a
+     * claim about whichever lane is reading it.
+     *
+     * It said 「`task_create` 的 `assigneeAgentId` …」 for months — a field on a tool no lane has
+     * any more, since creation moved to the user lane's `create_task` (which carries no assignee).
+     * Replacing that with 「`task_update` …」 fixed the working lane and broke the user lane, whose
+     * one rule is 「你不派活」.
+     */
+    const entries = [{ id: 'agent-ui', name: '前端工', gist: '改界面。' }];
+
+    it('tells the working lane which fields choose the executor', () => {
+      const block = formatAgentRosterBlock(entries, { lane: 'task' });
+      expect(block).toContain('assigneeAgentId');
+      expect(block).toContain('dispatch');
+      // The mistake this pins: a tool the working lane lost when creation moved lanes.
+      expect(block).not.toContain('task_create');
+    });
+
+    it('keeps assignment out of the user lane entirely', () => {
+      const block = formatAgentRosterBlock(entries, { lane: 'user' });
+      // The roster is still listed — the lane may be asked 「谁做这个」.
+      expect(block).toContain('`agent-ui`');
+      expect(block).toContain('前端工');
+      // What it must not do is document a tool it does not have.
+      expect(block).not.toContain('task_create');
+      expect(block).not.toContain('assigneeAgentId');
+      expect(block).not.toContain('`dispatch`');
+      expect(block).not.toContain('`task_update`');
+    });
+
+    it('defaults to the working lane, so an existing caller keeps a full block', () => {
+      expect(formatAgentRosterBlock(entries)).toBe(formatAgentRosterBlock(entries, { lane: 'task' }));
+    });
+  });
+
   describe('dispatchHint', () => {
     it('routes on the hint, not on a behavioural first line', () => {
       // The failure this exists to prevent: a persona that opens with a manner

@@ -522,15 +522,17 @@ export class TaskService {
      */
     const continuesRun = Boolean(heldLock?.startsWith('pending:'));
     /**
-     * The run this write belongs to.
+     * A round in progress has already been counted.
      *
-     * A round is identified by when it started (`runStartedAt` survives inside one round and is
-     * cleared when the round closes — `resetRoundState` and `releaseRunRecord` both drop it). So
-     * "same round" means "the record already says a run started, and I am not the one who started
-     * it": the trigger claim starts it, and every later claim of that round reuses its count.
+     * `runStartedAt` is set by the write that starts a round and cleared when that round closes —
+     * `resetRoundState` and `releaseRunRecord` both drop it. So while it is present, this record is
+     * inside a round that has a run on the clock, and any further claim belongs to that same run.
+     *
+     * This is the answer the lock cannot give: `reportHandoff` releases the lock before the verdict
+     * closes the round, so a claim in that window saw 「no lock」 and counted a second run for the
+     * same round. Live: `runs: 3` against `rounds.ok: 1`.
      */
-    const runStamp = task.stats?.runStartedAt;
-    const sameRound = typeof runStamp === 'number' && task.stats?.runsCountedFor === task.stats?.runs;
+    const sameRound = typeof task.stats?.runStartedAt === 'number';
     const countedRuns = (task.stats?.runs ?? 0) + (continuesRun || sameRound ? 0 : 1);
 
     let next: Task = {

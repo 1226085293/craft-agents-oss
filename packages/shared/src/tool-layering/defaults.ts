@@ -50,8 +50,6 @@ export const DEFAULT_TOOL_CATEGORIES: ToolCategoriesConfig = {
         'stop_background_task',
               'send_agent_message',
         'deliver_file',
-        'list_messaging_channels',
-        'unbind_messaging_channel',
         //
         // The task surface itself. Every one of these was uncategorised, which put
         // it in `misc` — and `call_tool` refuses a folded tool from a category that
@@ -66,7 +64,6 @@ export const DEFAULT_TOOL_CATEGORIES: ToolCategoriesConfig = {
         'task_update',
         'task_handoff',
         'dispatch',
-        'report_to_user',
         'ask_user',
       ],
     },

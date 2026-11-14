@@ -186,3 +186,36 @@ describe('loadListeners — non-plugin directories', () => {
     expect(ids).not.toContain('.cache')
   })
 })
+
+describe('config schema number bounds reach the renderer', () => {
+  it('keeps min/max/step on the loaded listener (what the DTO hands over)', () => {
+    writeListener(
+      'ported',
+      manifestFor('ported', {
+        config: {
+          properties: {
+            port: { type: 'number', title: '端口', min: 1, max: 65535, step: 1, default: 8080 },
+            token: { type: 'string', secret: true },
+          },
+          required: ['token'],
+        },
+      }),
+    )
+
+    const [loaded] = loadListeners({ workspaceRoot: root, skipProbes: true })
+    // The detail page reads `configSchema.properties[key].min` — so this is the
+    // end of the line for the additive fields: if they survive loading, the
+    // renderer gets them, because the DTO assigns `configSchema: m.config`.
+    const port = loaded.manifest.config?.properties.port
+    expect(port?.type).toBe('number')
+    expect(port?.min).toBe(1)
+    expect(port?.max).toBe(65535)
+    expect(port?.step).toBe(1)
+    expect(port?.default).toBe(8080)
+    // A field without bounds must not gain any.
+    const token = loaded.manifest.config?.properties.token
+    expect(token?.min).toBeUndefined()
+    expect(token?.secret).toBe(true)
+    expect(loaded.manifest.config?.required).toEqual(['token'])
+  })
+})

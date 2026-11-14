@@ -206,6 +206,37 @@ export interface ManifestParseResult {
 
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/;
 
+/**
+ * Keep the fields the renderer understands, and make the numeric ones honest.
+ *
+ * `config.properties` used to be passed through with a bare type assertion, so
+ * anything a manifest wrote arrived at the renderer as-is — including
+ * `min: "abc"`. The numeric bounds are advisory UI facts, so a wrong value is
+ * dropped rather than turned into a parse error: a plugin must not fail to load
+ * because it mistyped a hint. Non-finite values (`NaN`, `Infinity`) are dropped
+ * for the same reason — they would become `min="NaN"` on a real input.
+ */
+function normalizeConfigProperties(
+  raw: Record<string, unknown>,
+): ListenerConfigSchema['properties'] {
+  const out: ListenerConfigSchema['properties'] = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value !== 'object' || value === null) {
+      out[key] = value as ListenerConfigProperty;
+      continue;
+    }
+    const prop = { ...(value as Record<string, unknown>) };
+    for (const field of ['min', 'max', 'step'] as const) {
+      const candidate = prop[field];
+      if (candidate === undefined) continue;
+      if (typeof candidate === 'number' && Number.isFinite(candidate)) continue;
+      delete prop[field];
+    }
+    out[key] = prop as ListenerConfigProperty;
+  }
+  return out;
+}
+
 export function parseVersion(version: string): [number, number, number] | null {
   const match = SEMVER.exec(version.trim());
   if (!match) return null;
@@ -529,7 +560,7 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
       } else {
         config = {
           type: 'object',
-          properties: cfg.properties as ListenerConfigSchema['properties'],
+          properties: normalizeConfigProperties(cfg.properties as Record<string, unknown>),
           ...(Array.isArray(cfg.required)
             ? { required: cfg.required.filter((v): v is string => typeof v === 'string') }
             : {}),

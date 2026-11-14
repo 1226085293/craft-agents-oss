@@ -245,3 +245,78 @@ describe('parseManifest — ui (plugin-provided HTML config UI)', () => {
     expect(result.manifest?.ui).toBeUndefined()
   })
 })
+
+describe('parseManifest — number bounds (min/max/step)', () => {
+  it('keeps min/max/step on a number field', () => {
+    const result = parseManifest(
+      base({
+        config: {
+          properties: {
+            port: { type: 'number', title: '端口', min: 1, max: 65535, step: 1, default: 8080 },
+          },
+        },
+      }),
+    )
+    expect(result.ok).toBe(true)
+    const port = result.manifest?.config?.properties.port
+    expect(port?.type).toBe('number')
+    expect(port?.min).toBe(1)
+    expect(port?.max).toBe(65535)
+    expect(port?.step).toBe(1)
+    // The default still round-trips: these are additive fields, nothing else moved.
+    expect(port?.default).toBe(8080)
+  })
+
+  it('drops a non-numeric bound instead of failing the plugin load', () => {
+    const result = parseManifest(
+      base({
+        config: {
+          properties: {
+            // A manifest that mistyped a hint must still load: these are
+            // advisory UI facts, not the plugin's contract with the host.
+            port: { type: 'number', min: 'one' as unknown as number, max: 10, step: null as unknown as number },
+          },
+        },
+      }),
+    )
+    expect(result.ok).toBe(true)
+    const port = result.manifest?.config?.properties.port
+    expect(port?.min).toBeUndefined()
+    expect(port?.step).toBeUndefined()
+    expect(port?.max).toBe(10)
+  })
+
+  it('drops non-finite bounds', () => {
+    const result = parseManifest(
+      base({
+        config: {
+          properties: {
+            ratio: { type: 'number', min: Number.NaN, max: Number.POSITIVE_INFINITY },
+          },
+        },
+      }),
+    )
+    expect(result.ok).toBe(true)
+    const ratio = result.manifest?.config?.properties.ratio
+    expect(ratio?.min).toBeUndefined()
+    expect(ratio?.max).toBeUndefined()
+  })
+
+  it('leaves fields without bounds untouched', () => {
+    const result = parseManifest(
+      base({
+        config: {
+          properties: {
+            email: { type: 'string', title: '邮箱' },
+            authCode: { type: 'string', secret: true },
+          },
+          required: ['email'],
+        },
+      }),
+    )
+    expect(result.ok).toBe(true)
+    expect(result.manifest?.config?.properties.email?.title).toBe('邮箱')
+    expect(result.manifest?.config?.properties.email?.min).toBeUndefined()
+    expect(result.manifest?.config?.required).toEqual(['email'])
+  })
+})

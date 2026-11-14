@@ -290,6 +290,18 @@ export interface TaskStats {
    * was actually shown.
    */
   triggersDeliveredAt?: number;
+  /**
+   * The last value written to `runs` — what a second claim of the same round compares against.
+   *
+   * A round can be claimed more than once: the trigger takes the lock (`pending:cron:…`), the
+   * dispatch takes that claim over (`pending:dispatch`), the spawn binds the real session. The lock
+   * alone cannot tell those apart from a new round, because `reportHandoff` releases it before the
+   * verdict closes the round — so a firing in that window used to start a second round and count a
+   * second run. Measured live: `runs: 8` against `rounds.ok: 6`, and `runs` is the budget's clock.
+   *
+   * This field is the answer that survives lock churn: `runs` only moves when this stamp moves.
+   */
+  runsCountedFor?: number;
 }
 
 export interface PendingTrigger {

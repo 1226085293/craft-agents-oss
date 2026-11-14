@@ -521,6 +521,17 @@ export class TaskService {
      * So the only write that counts a run is one that starts from no placeholder at all.
      */
     const continuesRun = Boolean(heldLock?.startsWith('pending:'));
+    /**
+     * The run this write belongs to.
+     *
+     * A round is identified by when it started (`runStartedAt` survives inside one round and is
+     * cleared when the round closes — `resetRoundState` and `releaseRunRecord` both drop it). So
+     * "same round" means "the record already says a run started, and I am not the one who started
+     * it": the trigger claim starts it, and every later claim of that round reuses its count.
+     */
+    const runStamp = task.stats?.runStartedAt;
+    const sameRound = typeof runStamp === 'number' && task.stats?.runsCountedFor === task.stats?.runs;
+    const countedRuns = (task.stats?.runs ?? 0) + (continuesRun || sameRound ? 0 : 1);
 
     let next: Task = {
       ...task,
@@ -548,7 +559,17 @@ export class TaskService {
         // silently erased — `rounds` was reset to nothing on the second round of a recurring task,
         // which made every round look like the first one.
         ...task.stats,
-        runs: (task.stats?.runs ?? 0) + (continuesRun ? 0 : 1),
+        /**
+         * One round is one run, whatever the lock has been through.
+         *
+         * `continuesRun` answers it while the placeholder is alive, but a placeholder does not
+         * always survive: `reportHandoff` releases the lock before the verdict closes the round, and
+         * a firing in that window claimed a second round for the same one (live: `runs: 8` against
+         * `rounds.ok: 6`). The stamp is what survives — the run it belongs to is recorded on the
+         * round, so a second claim of the same round cannot count twice.
+         */
+        runs: countedRuns,
+        runsCountedFor: countedRuns,
         activeMs: task.stats?.activeMs ?? 0,
         lastHeartbeatAt: now,
         lockSessionId: sessionId,

@@ -319,3 +319,48 @@ describe('one round is one run, even when a firing lands mid-round', () => {
     expect(svc.get(task.id)!.stats?.runs).toBe(1)
   })
 })
+
+describe('run counting survives the lock being released mid-round', () => {
+  /**
+   * The lock alone cannot answer 「is this a new run」, because a round releases it before it closes.
+   * `reportHandoff` drops the lock and lets the verdict decide what happens next — deliberately, so a
+   * hand-off ends the worker's run whatever the verdict says. A claim inside that window then looked
+   * like a new round and counted a second run (live: `runs: 8` against `rounds.ok: 6`).
+   *
+   * `runsCountedFor` is what survives: it records the value `runs` reached for this round, so a
+   * second claim of the same round sees its own stamp and reuses the count.
+   */
+  it('does not count a second run for a claim inside the window', () => {
+    const svc = service();
+    const task = recurring(svc);
+    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' });
+    svc.startRun(task.id, 'pending:dispatch');
+    svc.startRun(task.id, 'sess_1');
+    expect(svc.get(task.id)!.stats?.runs).toBe(1);
+
+    // The window: still running, lock released (what `reportHandoff` leaves behind).
+    const path = join(root, 'tasks', `${task.id}.json`)
+    const raw = JSON.parse(readFileSync(path, 'utf8'))
+    raw.status = 'running'
+    raw.stats = { ...raw.stats, lockSessionId: undefined, lockDeadlineAt: undefined }
+    writeFileSync(path, JSON.stringify(raw))
+
+    svc.startRun(task.id, 'pending:dispatch')
+    svc.startRun(task.id, 'sess_2')
+    expect(svc.get(task.id)!.stats?.runs).toBe(1)
+  })
+
+  it('counts the next round, because closing it drops the stamp', () => {
+    // The other half: without this the counter never moves and the budget check is meaningless.
+    const svc = service();
+    const task = recurring(svc);
+    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' });
+    svc.startRun(task.id, 'pending:dispatch');
+    svc.startRun(task.id, 'sess_1');
+    svc.setStatus(task.id, 'backlog');
+    expect(svc.get(task.id)!.stats?.runStartedAt).toBeUndefined()
+
+    svc.claimTrigger(task.id, { kind: 'cron', at: 2000, detail: 'cron:*/1 * * * *' })
+    expect(svc.get(task.id)!.stats?.runs).toBe(2)
+  })
+})

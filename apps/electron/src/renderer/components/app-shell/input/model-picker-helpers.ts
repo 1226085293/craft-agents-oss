@@ -50,10 +50,15 @@ export function getAvailableModels(
 export type ConnectionGroup = [groupName: string, connections: LlmConnection[]]
 
 /**
- * Group connections by provider type for hierarchical picker rendering.
- * Each provider section can contain multiple connections (API Key, OAuth, …).
- * Order is significant for UI: Anthropic, Local, Craft Agents Backend.
- * Empty groups are dropped.
+ * Group connections for hierarchical picker rendering.
+ *
+ * The group is decided by the **auth provider**, not `providerType`. There is one backend now, so
+ * `providerType` is `pi` or `pi_compat` for everything; what used to make a connection
+ * 「Anthropic」 was `providerType === 'anthropic'`, and that value no longer exists. A connection
+ * whose `piAuthProvider` is `anthropic` is the same thing it always was — a connection to
+ * api.anthropic.com — so that field is what the heading follows.
+ *
+ * Order is significant for UI: Anthropic, Local, Craft Agents Backend. Empty groups are dropped.
  */
 export function groupConnectionsByProvider<T extends LlmConnection>(
   connections: readonly T[],
@@ -64,12 +69,13 @@ export function groupConnectionsByProvider<T extends LlmConnection>(
     'Craft Agents Backend': [],
   }
   for (const conn of connections) {
-    const provider = conn.providerType || 'anthropic'
-    if (provider === 'anthropic') {
-      groups['Anthropic'].push(conn)
-    } else if (provider === 'pi_compat' && isLocalConnection(conn)) {
+    const authProvider = conn.piAuthProvider
+    if (conn.providerType === 'pi_compat' && isLocalConnection(conn)) {
       groups['Local'].push(conn)
-    } else if (provider === 'pi' || provider === 'pi_compat') {
+    } else if (authProvider === 'anthropic') {
+      // api.anthropic.com, reached through Pi — this used to be `providerType: 'anthropic'`.
+      groups['Anthropic'].push(conn)
+    } else {
       groups['Craft Agents Backend'].push(conn)
     }
   }

@@ -2168,7 +2168,15 @@ export default function App() {
   // Onboarding state
   // ModalProvider + WindowCloseHandler ensures X button works on Windows
   // (without this, the close IPC message has no listener and window stays open)
-  if (appState === 'onboarding') {
+  //
+  // A settings window opened FROM the wizard must win over this branch.
+  // The welcome screen's only action opens Settings → LLM gateway
+  // (`onOpenLlmSettings`); the new window mounts its own React tree, finds the
+  // same unfinished setup state, and would otherwise render the wizard again —
+  // the person clicks the card and gets a second copy of the welcome page
+  // instead of the settings they asked for. Onboarding belongs to the main
+  // window; a settings window always renders its route.
+  if (appState === 'onboarding' && !settingsWindowMode) {
     return (
       <DismissibleLayerProvider>
         <ModalProvider>
@@ -2178,9 +2186,27 @@ export default function App() {
             onContinue={onboarding.handleContinue}
             onBack={onboarding.handleBack}
             onOpenLlmSettings={() => {
-              // Leave onboarding and open the page that owns connection setup. The wizard no
-              // longer collects credentials itself: the LLM gateway page writes the same records
-              // and is the only place that stays in step with the config schema.
+              /**
+               * The card ends the welcome flow and hands the person to settings.
+               *
+               * Both halves matter. Opening the window alone left this one sitting on the same
+               * welcome page behind it — the person clicks the only button on screen and nothing
+               * appears to happen, because the thing that changed is in another window.
+               * `deferSetup` is the existing "setup is not finished, but stop asking" flag
+               * (`getSetupNeeds` treats it as configured), so the main window leaves the wizard
+               * and the settings window is what they interact with from then on. The flag does
+               * not skip anything: the LLM gateway page is where setup actually completes.
+               */
+              void window.electronAPI
+                .deferSetup()
+                .then(() => {
+                  setSetupNeeds((prev) => (prev ? { ...prev, isFullyConfigured: true } : prev))
+                  setAppState('ready')
+                })
+                .catch((error) => {
+                  // Leave the wizard in place: without the flag the setup really is unfinished.
+                  console.error('[Onboarding] Failed to defer setup:', error)
+                })
               void openSettingsWindow('llm', windowWorkspaceId)
             }}
             onFinish={onboarding.handleFinish}

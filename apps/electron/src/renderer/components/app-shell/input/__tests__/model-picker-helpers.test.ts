@@ -98,24 +98,25 @@ describe('groupConnectionsByProvider', () => {
     expect(groupConnectionsByProvider([])).toEqual([])
   })
 
-  test('groups anthropic providers into "Anthropic"', () => {
-    const a = conn('a', 'anthropic')
-    const b = conn('b', 'anthropic')
+  test('groups connections pinned to the anthropic auth provider into "Anthropic"', () => {
+    // `providerType` is `pi` for everything now; the heading follows `piAuthProvider`.
+    const a = conn('a', 'pi', { piAuthProvider: 'anthropic' })
+    const b = conn('b', 'pi', { piAuthProvider: 'anthropic' })
     const result = groupConnectionsByProvider([a, b])
     expect(result).toEqual([['Anthropic', [a, b]]])
   })
 
   test('preserves intra-group order', () => {
-    const a = conn('first', 'anthropic')
-    const b = conn('second', 'anthropic')
-    const c = conn('third', 'anthropic')
+    const a = conn('first', 'pi', { piAuthProvider: 'anthropic' })
+    const b = conn('second', 'pi', { piAuthProvider: 'anthropic' })
+    const c = conn('third', 'pi', { piAuthProvider: 'anthropic' })
     const result = groupConnectionsByProvider([a, b, c])
     expect(result[0][1].map(c => c.slug)).toEqual(['first', 'second', 'third'])
   })
 
   test('places "Anthropic" group before pi groups (display order)', () => {
     const piConn = conn('pi-1', 'pi')
-    const anth = conn('anthropic-1', 'anthropic')
+    const anth = conn('anthropic-1', 'pi', { piAuthProvider: 'anthropic' })
     const result = groupConnectionsByProvider([piConn, anth])
     expect(result.map(([k]) => k)).toEqual(['Anthropic', 'Craft Agents Backend'])
   })
@@ -133,15 +134,15 @@ describe('groupConnectionsByProvider', () => {
   })
 
   test('drops empty groups from the output', () => {
-    const a = conn('a', 'anthropic')
+    const a = conn('a', 'pi', { piAuthProvider: 'anthropic' })
     const result = groupConnectionsByProvider([a])
     // Only "Anthropic" appears; "Local" and "Craft Agents Backend" are dropped.
     expect(result.length).toBe(1)
     expect(result[0][0]).toBe('Anthropic')
   })
 
-  test('full mixed input — anthropic + local + remote pi_compat + pi', () => {
-    const anth = conn('a', 'anthropic')
+  test('full mixed input — anthropic auth + local + remote pi_compat + pi', () => {
+    const anth = conn('a', 'pi', { piAuthProvider: 'anthropic' })
     const local = conn('ollama', 'pi_compat', { baseUrl: 'http://127.0.0.1:1234' })
     const remote = conn('or', 'pi_compat', { baseUrl: 'https://openrouter.ai' })
     const pi = conn('p', 'pi')

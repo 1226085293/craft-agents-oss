@@ -75,7 +75,7 @@ describe('createBuiltInConnection', () => {
   it('creates anthropic-api with correct defaults', () => {
     const conn = createBuiltInConnection('anthropic-api')
     expect(conn.slug).toBe('anthropic-api')
-    expect(conn.providerType).toBe('anthropic')
+    expect(conn.providerType).toBe('pi')
     expect(conn.authType).toBe('api_key')
     expect(conn.name).toBe('Anthropic (API Key)')
   })
@@ -103,7 +103,7 @@ describe('createBuiltInConnection', () => {
   it('handles numeric suffix slugs (anthropic-api-2) by deriving from base template', () => {
     const conn = createBuiltInConnection('anthropic-api-2')
     expect(conn.slug).toBe('anthropic-api-2')
-    expect(conn.providerType).toBe('anthropic')
+    expect(conn.providerType).toBe('pi')
     expect(conn.name).toBe('Anthropic (API Key) 2')
   })
 
@@ -149,12 +149,17 @@ describe('validateSetupTestInput', () => {
     expect(result.valid).toBe(true)
   })
 
-  it('accepts anthropic custom endpoint without piAuthProvider', () => {
+  /**
+   * `provider: 'anthropic'` used to be exempt from this rule — it meant a direct api.anthropic.com
+   * connection with a fixed endpoint. That provider type is gone, so every custom endpoint now
+   * needs a preset, and a baseUrl without `piAuthProvider` is rejected for all of them.
+   */
+  it('rejects a pi custom endpoint without a preset, for every connection now', () => {
     const result = validateSetupTestInput({
       provider: 'pi',
       baseUrl: 'https://custom.endpoint.com',
     })
-    expect(result.valid).toBe(true)
+    expect(result.valid).toBe(false)
   })
 })
 

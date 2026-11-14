@@ -236,4 +236,34 @@ describe('event center bindings', () => {
       expect(typeof ctx[prop]).toBe('function');
     }
   });
+
+  /**
+   * The same gap as the event bindings above, one feature over.
+   *
+   * `SessionManager` registers `listPluginActionsFn` / `callPluginActionFn` on the session-scoped
+   * registry, and both tools sit in every supervisor's table — but nothing copied them onto the
+   * tool context. So `list_plugin_actions` failed its own `if (!ctx.listPluginActionsFn)` guard
+   * with 「not available in this context』 while the model could plainly see the tool and had been
+   * told to call it. Reported from a live dev session; this pins the fix.
+   */
+  it('binds the plugin action callbacks so the tools are callable', async () => {
+    registerSessionScopedToolCallbacks(sessionId, {
+      listPluginActionsFn: () => [
+        { plugin: 'demo', name: 'send', description: 'Send a message', input: { type: 'object' } },
+      ],
+      callPluginActionFn: async () => ({ ok: true, message: 'delivered' }),
+    });
+
+    const ctx = createBaseContext(sessionId);
+    attachSessionSelfManagementBindings(ctx, sessionId);
+
+    expect(typeof ctx.listPluginActionsFn).toBe('function');
+    expect(typeof ctx.callPluginActionFn).toBe('function');
+
+    // The guard that actually failed reads `ctx`, not the registry entry.
+    const handler = SESSION_TOOL_REGISTRY.get('list_plugin_actions')!.handler!;
+    const result = await handler(ctx, {});
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0]!.text).toContain('demo');
+  });
 });

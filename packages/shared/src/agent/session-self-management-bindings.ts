@@ -174,6 +174,32 @@ export function attachSessionSelfManagementBindings(
     enumerable: true,
   });
 
+  /**
+   * Plugin actions — the same gap the event bindings below were added for.
+   *
+   * `SessionManager` registers both functions on the session-scoped registry, and both tools sit
+   * in every supervisor's table, but nothing copied them onto the tool context. So
+   * `list_plugin_actions` failed its own `if (!ctx.listPluginActionsFn)` guard with 「not available
+   * in this context》 while the model could see the tool and was told to call it — the exact shape
+   * that made `get_event` unreachable, one layer over. The comment further down describes that
+   * incident; this is the same fix for the plugin pair.
+   */
+  Object.defineProperty(context, 'listPluginActionsFn', {
+    get() {
+      return getSessionScopedToolCallbacks(sessionId)?.listPluginActionsFn;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
+  Object.defineProperty(context, 'callPluginActionFn', {
+    get() {
+      return getSessionScopedToolCallbacks(sessionId)?.callPluginActionFn;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
   // getSessionInfo needs wrapping to default sid → sessionId
   Object.defineProperty(context, 'getSessionInfo', {
     get() {

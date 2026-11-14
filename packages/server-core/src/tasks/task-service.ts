@@ -2415,13 +2415,19 @@ export class TaskService {
      */
     next = this.releaseRunRecord(next, now);
     /**
-     * Keep the round open only when the branches below will close it.
+     * Keep the round open exactly when a branch below closes it in this call.
      *
-     * `delivered` is the one outcome that reaches `closeRound` in this call; every other outcome
-     * parks the task (a question, another executor, a failure) and that park ends the round — so the
-     * marker goes with it, or the next legitimate run would not be counted at all.
+     * Two shapes do: `delivered`, and `handoff` with the plan finished — a worker that did every
+     * step and filed 「someone else continues」 is describing a closed round, and the branch below
+     * closes it. Every other outcome parks the task (a question, more work, a failure), and a park
+     * ends the round, so the marker goes with it or the next legitimate run is never counted.
+     *
+     * Getting this wrong in the other direction is what produced `runs: 3` against `rounds.ok: 1`:
+     * the marker was dropped on a hand-off that then closed the round, and the next cron claim
+     * counted a second run for the same one.
      */
-    if (handoff.outcome === 'delivered') {
+    const closesHere = handoff.outcome === 'delivered' || (handoff.outcome === 'handoff' && !planOpen)
+    if (closesHere) {
       next = { ...next, stats: { ...(next.stats ?? { runs: 0, activeMs: 0 }), runStartedAt: task.stats?.runStartedAt } }
     }
     this.disposeRun(task.id, 'ended');

@@ -194,6 +194,42 @@ describe('the summary the supervisor reads', () => {
     expect(svc.triggerSummary(task.id, { excludeLast: true })).toContain('定时：1 次');
   });
 
+  it('keeps what arrived after the message went out', () => {
+    // Live at 11:5x: a per-minute task added a trigger every minute while the supervisor's turn ran.
+    // The message reported 「定时：2 次（11:52–11:53）」, then the reply cleared the whole list — 11:54
+    // and 11:55 were never shown to anyone and never settled by anyone either.
+    const svc = service();
+    const task = recurring(svc);
+    const shown = [1000, 2000];
+    for (const at of shown) svc.claimTrigger(task.id, { kind: 'cron', at, detail: 'cron:* * * * *' });
+
+    // The message is composed and stamped; then two more minutes fire before the turn ends.
+    svc.markTriggersDelivered(task.id, 2000);
+    svc.recordTrigger(task.id, { kind: 'cron', at: 3000, detail: 'cron:* * * * *' });
+    svc.recordTrigger(task.id, { kind: 'cron', at: 4000, detail: 'cron:* * * * *' });
+
+    svc.clearTriggers(task.id);
+
+    const after = svc.get(task.id)!;
+    expect((after.stats?.pendingTriggers ?? []).map((entry) => entry.at)).toEqual([3000, 4000]);
+    // They have not been shown yet, so the next turn must not settle them either.
+    expect(after.stats?.triggersDeliveredAt).toBeUndefined();
+  });
+
+  it('resets the no-reply counter only when nothing is left owed', () => {
+    // The counter means 「the supervisor was woken and never answered」. Resetting it while entries
+    // are still outstanding would hide exactly that.
+    const svc = service();
+    const task = recurring(svc);
+    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:* * * * *' });
+    svc.markTriggersDelivered(task.id, 1000);
+    svc.noteWakeWithoutReply(task.id);
+    svc.recordTrigger(task.id, { kind: 'cron', at: 2000, detail: 'cron:* * * * *' });
+
+    svc.clearTriggers(task.id);
+    expect(svc.get(task.id)!.stats?.wakeFailures).toBe(1);
+  });
+
   it('clears only when it is delivered', () => {
     const svc = service();
     const task = recurring(svc);

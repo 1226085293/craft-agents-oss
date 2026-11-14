@@ -148,12 +148,16 @@ describe('a round hands its data to the next round', () => {
     svc.startRun(task.id, 'w1')
 
     for (const summary of ['第一次尝试', '第二次尝试', '第三次尝试']) {
-      await svc.reportHandoff(task.id, {
-        outcome: 'handoff',
-        summary,
-        stepId: '1.1',
-        artifacts: [{ path: artifact }],
-      })
+      await svc.reportHandoff(
+        task.id,
+        {
+          outcome: 'handoff',
+          summary,
+          stepId: '1.1',
+          artifacts: [{ path: artifact }],
+        },
+        'w1',
+      )
     }
 
     const handoffs = svc.get(task.id)!.handoffs

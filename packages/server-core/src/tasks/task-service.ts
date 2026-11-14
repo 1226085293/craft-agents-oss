@@ -1097,17 +1097,34 @@ export class TaskService {
     );
   }
 
+  /**
+   * Settle the backlog this turn was shown — not everything that happens to be in it.
+   *
+   * The list used to be emptied whole. A per-minute task adds a trigger every minute while a
+   * supervisor turn is still running, so the entries that arrived *after* the message was composed
+   * were cleared unseen: live at 11:5x, the message reported 「定时：2 次（11:52–11:53）」 and 11:54 and
+   * 11:55 vanished with it. Nobody was ever asked about them.
+   *
+   * `triggersDeliveredAt` is the watermark of what the message contained, so everything up to it is
+   * settled and everything after it stays owed. When something stays, the watermark is cleared with
+   * it: those entries have not been shown yet, and the next turn must not settle them either.
+   */
   clearTriggers(id: string, now = this.now()): void {
     const task = this.require(id);
-    if (!task.stats?.pendingTriggers?.length) return;
+    const pending = task.stats?.pendingTriggers ?? [];
+    if (pending.length === 0) return;
+    const deliveredAt = task.stats?.triggersDeliveredAt ?? now;
+    const remaining = pending.filter((entry) => entry.at > deliveredAt);
     const cleared = this.endTriggerClaim(task, now);
     this.save(
       {
         ...cleared,
         stats: {
           ...(cleared.stats ?? { runs: 0, activeMs: 0 }),
-          pendingTriggers: [],
-          wakeFailures: 0,
+          pendingTriggers: remaining,
+          // Only reset when nothing is owed: a wake that was answered by someone else must not
+          // silence 「the supervisor was woken and never replied」 for the entries still waiting.
+          ...(remaining.length ? {} : { wakeFailures: 0 }),
           // Reset with the list it describes: a stale mark made the NEXT round's backlog look
           // already-delivered, so a turn that never saw it could settle it.
           triggersDeliveredAt: undefined,
@@ -1115,7 +1132,11 @@ export class TaskService {
       },
       { silentTerminal: true },
     );
-    appendJournal(this.root, id, { type: 'trigger_delivered', at: now, data: { cleared: 1 } });
+    appendJournal(this.root, id, {
+      type: 'trigger_delivered',
+      at: now,
+      data: { cleared: pending.length - remaining.length, kept: remaining.length },
+    });
   }
   /** A turn with no final reply leaves the backlog owed; three in a row is a fault. */
   noteWakeWithoutReply(id: string, now = this.now()): number {
@@ -2582,8 +2603,18 @@ export class TaskService {
        * here. Deferring them to the next tick would ask the same question a minute later with the
        * person waiting in between.
        */
+      /**
+       * The watermark is taken before the summary is read, not after.
+       *
+       * `clearTriggers` settles what the message contained by comparing each entry against this
+       * instant. Reading the list first and stamping later left the window between the two open: a
+       * trigger arriving in it was neither in the message nor above the watermark, so it was cleared
+       * unseen. Stamping first can only over-deliver (an entry listed and kept one round), which is
+       * recoverable; under-delivering loses a firing the person asked for.
+       */
+      const backlogReadAt = this.now()
       const triggerBacklog = this.triggerSummary(id)
-      if (triggerBacklog) this.markTriggersDelivered(id, now)
+      if (triggerBacklog) this.markTriggersDelivered(id, backlogReadAt)
       const triggerHint = triggerBacklog
         ? `。\n\n本轮期间累计的触发：\n${triggerBacklog}\n要接着跑就 dispatch；不跑也没关系，下一轮到点会再问你。`
         : ''

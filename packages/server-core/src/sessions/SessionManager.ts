@@ -8443,6 +8443,11 @@ ${request.prompt}`;
             if (!lane) return { ok: false, reason: 'no task-lane supervisor' }
             // The trigger that opened this wake is appended to the backlog by the claim itself; it is
             // this message's subject, not something still waiting for an answer.
+            //
+            // The watermark is taken first: `clearTriggers` settles what this message contained by
+            // comparing against it, so stamping after the read left a window where a trigger that
+            // arrived in between was in neither the message nor above the mark, and was cleared unseen.
+            const backlogReadAt = Date.now()
             const summary = service.triggerSummary(task.id, { excludeLast: true })
             const last = task.stats?.lastRound
             /**
@@ -8494,7 +8499,7 @@ ${request.prompt}`;
             }
             this.notifySupervisor(lane.id, `trigger:${task.id}`, text)
             // Recorded so a turn that ends can settle exactly the tasks it was shown — and only those.
-            service.markTriggersDelivered(task.id)
+            service.markTriggersDelivered(task.id, backlogReadAt)
             return { ok: true }
           } catch (error) {
             return { ok: false, reason: error instanceof Error ? error.message : String(error) }

@@ -44,26 +44,23 @@ describe('LlmGateway stream gap', () => {
     }
   })
 
-  it('turns a silent stream into a retryable refusal before the total timeout', async () => {
+  /**
+   * A stream that stops sending is a gap; a stream that ends in an error is not.
+   *
+   * Both used to arrive as 「upstream stream went silent for 60s」, because `readChunkWithGap`
+   * reported every rejection as a gap timeout. Measured on 261115-steady-gecko: four failures
+   * carrying that sentence had each lasted 5.5–7.1 seconds, and the real first failure on the same
+   * route was `transport error: fetch failed`. These two cases are what keeps the sentence honest.
+   */
+  async function runWith(
+    bodyFactory: (encoder: TextEncoder) => ReadableStream<Uint8Array>,
+  ): Promise<{ text: string; aborted: boolean; elapsedMs: number }> {
     const encoder = new TextEncoder()
     let aborted = false
     const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
-      const body = new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ id: 'cmpl_1', choices: [{ index: 0, delta: { content: 'partial' } }] })}\n\n`,
-            ),
-          )
-          init?.signal?.addEventListener('abort', () => {
-            aborted = true
-            try {
-              controller.error(new Error('aborted'))
-            } catch {
-              // Already closed.
-            }
-          })
-        },
+      const body = bodyFactory(encoder)
+      init?.signal?.addEventListener('abort', () => {
+        aborted = true
       })
       return new Response(body, {
         status: 200,
@@ -90,12 +87,56 @@ describe('LlmGateway stream gap', () => {
       }),
     })
     const text = await res.text()
+    return { text, aborted, elapsedMs: Date.now() - started }
+  }
+
+  const partialChunk = (encoder: TextEncoder): Uint8Array =>
+    encoder.encode(
+      `data: ${JSON.stringify({ id: 'cmpl_1', choices: [{ index: 0, delta: { content: 'partial' } }] })}\n\n`,
+    )
+
+  it('turns a silent stream into a retryable refusal before the total timeout', async () => {
+    // No error, no close: one chunk arrives and then nothing does. This is the real gap, and the
+    // gap budget (0.2s here) must abort it long before the total budget (30s).
+    const { text, aborted, elapsedMs } = await runWith(
+      (encoder) =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(partialChunk(encoder))
+            // Deliberately never closes and never errors.
+          },
+        }),
+    )
 
     expect(text).toContain('CRAFT_GATEWAY_STREAM_TRUNCATION_RETRY')
     expect(text).toContain('went silent')
     expect(text).toContain('"stop_reason":"refusal"')
     expect(aborted).toBe(true)
-    expect(Date.now() - started).toBeLessThan(3_000)
+    expect(elapsedMs).toBeLessThan(3_000)
   })
 
+  it('names the read failure instead of calling it silence', async () => {
+    // The upstream ends the body in an error — a reset connection, or the request being aborted.
+    // Reporting this as 「went silent」 invented a timeout that never happened, and spent the retry
+    // budget a genuinely stalled stream was meant to have.
+    const { text, elapsedMs } = await runWith(
+      (encoder) =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(partialChunk(encoder))
+          },
+          pull(controller) {
+            // The first read got the chunk above; this is the second read — the connection drops.
+            controller.error(new Error('terminated'))
+          },
+        }),
+    )
+
+    expect(text).toContain('CRAFT_GATEWAY_STREAM_TRUNCATION_RETRY')
+    expect(text).toContain('upstream stream read failed: terminated')
+    expect(text).not.toContain('went silent')
+    expect(text).toContain('"stop_reason":"refusal"')
+    // It must fail on the error itself, not wait out the gap budget.
+    expect(elapsedMs).toBeLessThan(3_000)
+  })
 })

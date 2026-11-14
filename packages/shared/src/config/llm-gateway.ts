@@ -2785,7 +2785,7 @@ export class LlmGateway {
 
     try {
       for (;;) {
-        const chunk: { done: boolean; value?: Uint8Array; gapTimeout?: boolean } = pending
+        const chunk: { done: boolean; value?: Uint8Array; gapTimeout?: boolean; readError?: string } = pending
           ? { done: false, value: pending }
           : parser
             ? await this.readChunkWithGap(reader, guard.streamGapMs, abort)
@@ -2795,6 +2795,15 @@ export class LlmGateway {
           streamFailure = {
             kind: 'truncated',
             message: `upstream stream went silent for ${Math.round((guard.streamGapMs ?? 0) / 1000)}s`,
+          };
+          break;
+        }
+        if (chunk.readError) {
+          // The body ended in an error, not in silence. `truncated` still describes what the client
+          // has to do — the message is incomplete — but the reason has to be the real one.
+          streamFailure = {
+            kind: 'truncated',
+            message: `upstream stream read failed: ${chunk.readError}`,
           };
           break;
         }
@@ -2840,12 +2849,34 @@ export class LlmGateway {
   }
 
   /** Read one chunk, aborting when the stream stays silent past `gapMs`. */
+  /**
+   * Read one body chunk, giving up after `gapMs` of silence.
+   *
+   * The gap and a read error are different facts and must stay different.
+   *
+   * They used to be one: `catch` turned every rejection into `gapTimeout`, so a connection reset by
+   * the upstream — or the request being aborted — was reported as 「upstream stream went silent for
+   * 60s」. Measured 2026-11-15 on 261115-steady-gecko: four attempts carrying that sentence, each of
+   * which had lasted 5.5–7.1 seconds and produced a first byte after 4.7–6.7. The real first failure
+   * on the same route was `upstream commandcode transport error: fetch failed`, and the sentence
+   * that reached the person named a timeout that never happened.
+   *
+   * The mislabel was not only cosmetic: the failure is counted against the stream retry budget and
+   * cools the key, so a relay that drops connections spent the budget that a genuinely stalled
+   * stream would have spent — and a single-unit strategy reached 「no usable unit」 in three tries.
+   */
   private async readChunkWithGap(
     reader: { read(): Promise<{ done: boolean; value?: Uint8Array }> },
     gapMs: number | undefined,
     abort: () => void,
-  ): Promise<{ done: boolean; value?: Uint8Array; gapTimeout?: boolean }> {
-    if (!gapMs || gapMs <= 0) return reader.read();
+  ): Promise<{ done: boolean; value?: Uint8Array; gapTimeout?: boolean; readError?: string }> {
+    if (!gapMs || gapMs <= 0) {
+      try {
+        return await reader.read();
+      } catch (err) {
+        return { done: true, readError: describeError(err) };
+      }
+    }
     const read = reader.read();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<{ done: true; gapTimeout: true }>((resolve) => {
@@ -2856,8 +2887,8 @@ export class LlmGateway {
     });
     try {
       return await Promise.race([read, timeout]);
-    } catch {
-      return { done: true, gapTimeout: true };
+    } catch (err) {
+      return { done: true, readError: describeError(err) };
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -3041,6 +3072,13 @@ export class LlmGateway {
           failure = {
             kind: 'truncated',
             message: `upstream stream went silent for ${Math.round((guard.streamGapMs ?? 0) / 1000)}s`,
+          };
+          break;
+        }
+        if (chunk.readError) {
+          failure = {
+            kind: 'truncated',
+            message: `upstream stream read failed: ${chunk.readError}`,
           };
           break;
         }

@@ -704,13 +704,10 @@ describe('gateway transcoding — pass-through intact', () => {
                   'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n',
               ),
             );
+            // Must record the abort without ending the body in an error: an errored read is a
+            // different fact from a gap, and is reported as such (see the stream-gap suite).
             init?.signal?.addEventListener('abort', () => {
               aborted = true;
-              try {
-                controller.error(new Error('aborted'));
-              } catch {
-                // Already closed.
-              }
             });
           },
         });

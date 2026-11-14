@@ -29,6 +29,9 @@ import {
 import { useAtomValue } from 'jotai'
 import { cn } from '@/lib/utils'
 import { planProgress } from '@craft-agent/shared/tasks/plan'
+// The `cron` subpath, not the barrel: `@craft-agent/shared/tasks` re-exports the on-disk store, and
+// pulling `node:fs` into the renderer took the whole window down once already.
+import { describeCron } from '@craft-agent/shared/tasks/cron'
 import { sessionMetaMapAtom } from '@/atoms/sessions'
 import { agentLabelMap } from './agent-label'
 import { pauseReasonLabel } from './TaskBoardPanel'
@@ -527,13 +530,16 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
   const describeRule = (rule: TaskTriggerValue): string => {
     if (rule.kind === 'cron') {
       /**
-       * The expression goes in backticks, not bare.
+       * The words first, the expression in backticks after them.
        *
-       * `* * * * *` in Markdown is emphasis: the meta line rendered it as `****`, so every cron task
-       * read as 「定时 · **** (Asia/Shanghai)」 and the person could not tell one cadence from another.
-       * Code span keeps the asterisks literal.
+       * `* * * * *` is a complete expression — every field is a wildcard, so it fires every minute —
+       * but bare it reads like a template nobody filled in. The label says what it means; the code
+       * span keeps the exact expression for anyone who needs it, and keeps the asterisks literal:
+       * in Markdown `* * * * *` is emphasis and rendered as `****`.
        */
-      return `定时 · \`${rule.expr}\`${rule.timezone ? ` (${rule.timezone})` : ''}${rule.enabled === false ? '（已停用）' : ''}`
+      const schedule = describeCron(rule.expr)
+      const short = schedule === rule.expr ? `\`${rule.expr}\`` : `${schedule}（\`${rule.expr}\`）`
+      return `定时 · ${short}${rule.timezone ? ` (${rule.timezone})` : ''}${rule.enabled === false ? '（已停用）' : ''}`
     }
     if (rule.kind === 'event') {
       const types = rule.types?.length ? `/${rule.types.join(',')}` : ''

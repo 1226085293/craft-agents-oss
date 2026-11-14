@@ -479,6 +479,18 @@ describe('the trigger is editable from the page', () => {
     expect(html).not.toMatch(/定时 · \*\*\*\*/)
   })
 
+  it('says the cadence in words before the expression', () => {
+    // `* * * * *` is complete but reads like a value nobody filled in, so the label says what it means
+    // and the expression follows for anyone who wants it exactly. A near-miss cadence keeps its own
+    // words out of it — `describeCron` returns the expression when it does not recognise the shape.
+    const everyMinute = renderDetail({ ...detail, trigger: { kind: 'cron', expr: '* * * * *', timezone: 'Asia/Shanghai', enabled: true } })
+    expect(everyMinute).toContain('每分钟')
+
+    const weekdays = renderDetail({ ...detail, trigger: { kind: 'cron', expr: '0 9 * * 1-5', timezone: 'Asia/Shanghai', enabled: true } })
+    expect(weekdays).toContain('0 9 * * 1-5')
+    expect(weekdays).not.toContain('每分钟')
+  })
+
   it('says so when the schedule is switched off', () => {
     // A stopped timer must not look like a running one: 「定时 · 0 9 * * *」 with no marker reads as
     // "this will fire at nine", and the task would sit waiting for a run that never comes.

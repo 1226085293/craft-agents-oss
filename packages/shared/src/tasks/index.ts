@@ -65,7 +65,7 @@ export {
   type TaskAcceptanceVerdict,
 } from './state.ts';
 
-export { matchesCron } from './cron.ts';
+export { matchesCron, describeCron } from './cron.ts';
 
 export {
   applyPlanPatch,

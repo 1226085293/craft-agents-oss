@@ -10,6 +10,7 @@
 import type { SessionToolContext } from '../context.ts';
 import type { ToolResult } from '../types.ts';
 import { errorResponse, successResponse } from '../response.ts';
+import { describeCron } from '@craft-agent/shared/tasks/cron';
 import type {
   AskUserInput,
   CreateTaskInput,
@@ -385,7 +386,27 @@ export async function handleTaskGet(
   try {
     const task = await ctx.taskTools.get(args.identifier, args.includeJournal === true);
     if (!task) return errorResponse(`Task not found: ${args.identifier}`);
-    return successResponse(JSON.stringify(task, null, 2));
+    /**
+     * The record keeps `expr` — it is what `matchesCron` runs — and gains `schedule` beside it.
+     *
+     * `* * * * *` is a complete expression, but read bare it looks like a template nobody filled in;
+     * the supervisor quoted it back as 「cron:* * * * *」. The words say the same thing without asking
+     * the reader to know cron syntax, and the expression stays for anything that needs it exactly.
+     */
+    const withSchedule = (source: unknown): unknown => {
+      if (!source || typeof source !== 'object') return source;
+      const record = source as Record<string, unknown>;
+      const expr = typeof record.expr === 'string' ? record.expr : undefined;
+      return expr ? { ...record, schedule: describeCron(expr) } : source;
+    };
+    const readable = (() => {
+      const record = task as Record<string, unknown>;
+      const triggers = record.triggers;
+      if (Array.isArray(triggers)) return { ...record, triggers: triggers.map(withSchedule) };
+      if (record.trigger) return { ...record, trigger: withSchedule(record.trigger) };
+      return record;
+    })();
+    return successResponse(JSON.stringify(readable, null, 2));
   } catch (error) {
     return errorResponse(`Failed to read the task: ${error instanceof Error ? error.message : 'unknown error'}`);
   }

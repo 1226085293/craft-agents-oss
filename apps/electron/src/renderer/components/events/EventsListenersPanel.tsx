@@ -1,8 +1,9 @@
 /**
  * Events navigator column, "listeners" section — the plugin list.
  *
- * Cards list every plugin found under `<workspace>/events/`, its light, and
- * its state. Picking one opens the detail page (intro, config, dependencies).
+ * Cards list every plugin found under `<workspace>/events/`: name, version,
+ * description, enabled state and manifest errors. They carry no status light —
+ * that reading lives on the detail page. Picking a card opens that page.
  *
  * No section header of its own: the navigator's PanelHeader already prints the
  * title (插件) with the refresh action on the SAME row, and a second title row
@@ -31,7 +32,6 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import type { ListenerDto } from '@craft-agent/shared/protocol/dto'
-import { ListenerStatusLight } from './ListenerStatusLight'
 
 /**
  * Manifest icon name → component.
@@ -133,8 +133,9 @@ export function EventsListenersPanel({
     )
   }, [listeners])
 
-  // The process side of the lights: start / running / degraded / failed /
-  // stop events flip the card's dot without a reload.
+  // The process side: start / running / degraded / failed / stop events keep
+  // the cached status current without a reload — the startup summary and the
+  // failure toast below read it.
   React.useEffect(() => {
     if (!workspaceId) return
     // Remember which plugins we have already warned about, so a restart loop
@@ -147,7 +148,7 @@ export function EventsListenersPanel({
       )
 
       // A plugin that fails to start is still enabled — Craft does not silently
-      // switch it off. Tell the user instead of leaving a quiet amber dot: the
+      // switch it off. Say so: nothing else on this list reports it, and the
       // failure reason is only visible on the detail page otherwise.
       if (status.state === 'failed' && !warned.has(status.id)) {
         warned.add(status.id)
@@ -166,7 +167,7 @@ export function EventsListenersPanel({
   // The on-disk side: the detail page toggling the enable switch, saving
   // config, or installing a dependency changes facts a status event cannot
   // carry. The server pushes listener-changed; re-reading the list (cheap,
-  // probe-free) keeps every card's light and chip on what is true now.
+  // probe-free) keeps every card's chip and errors on what is true now.
   React.useEffect(() => {
     if (!workspaceId) return
     const off = window.electronAPI.onEventListenerChanged((wsId) => {
@@ -235,8 +236,6 @@ export function EventsListenersPanel({
                 <span className="text-[11px] text-muted-foreground shrink-0 tabular-nums">
                   v{listener.version}
                 </span>
-                {/* One shared mapping with the detail page title bar. */}
-                <ListenerStatusLight listener={listener} />
               </div>
               {listener.description && (
                 <p className="text-[12px] leading-4 text-foreground/55 line-clamp-2 mt-1">

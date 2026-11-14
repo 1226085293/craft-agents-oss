@@ -1,7 +1,8 @@
 /**
- * The plugin status light — one mapping (pluginStatusReading, shared) behind
- * both the plugin list cards and the detail page title bar, so the two
- * columns can never disagree about what is wrong with a plugin.
+ * The plugin status light — the detail page's reading of a plugin
+ * (pluginStatusReading, shared), drawn in its title bar and on the process log
+ * tab. The plugin list deliberately draws no light: a card carries the name,
+ * version, description, enabled chip and manifest errors instead.
  *
  * Tone → theme token (no raw colors in components):
  *   ok   → --success (running + ready)
@@ -47,10 +48,9 @@ export function ListenerStatusLight({
   showLabel?: boolean
   className?: string
 }): React.ReactElement {
-  // The list view loads without dependency probes, so its dependencies array
-  // is empty, `ready` reflects runtime-only, and controlDeps is absent — the
-  // mapping simply skips facts that view does not carry. The detail view, which
-  // has the probed states, computes the full reading from the same function.
+  // The detail view carries the probed dependency states, so this reading is
+  // the full one; the mapping still skips any fact a payload does not carry,
+  // which is why those inputs stay optional.
   const reading = pluginStatusReading({
     enabled: listener.enabled,
     status: listener.status,

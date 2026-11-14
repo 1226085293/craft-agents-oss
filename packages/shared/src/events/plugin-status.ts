@@ -1,6 +1,6 @@
 /**
- * The plugin status light — one pure mapping shared by the plugin list (left
- * column) and the plugin detail page, so both columns can never disagree.
+ * The plugin status light — one pure mapping behind the plugin detail page's
+ * status light, plus the config-section helpers used by the same page.
  *
  * Tones (theme tokens, never raw colors):
  *   bad  — red (--destructive). Something blocks or broke: a manifest/IO
@@ -19,10 +19,9 @@
  * (缺了先报红). Within the amber tier the order is deterministic:
  * starting → degraded → not-ready → unauthorized.
  *
- * The input is deliberately structural (not the full DTO) so the list panel —
- * which loads without dependency probes — can compute the tones it knows, and
- * the detail panel — which has the probed dependency states — can compute the
- * full set. Same function, same wording, more facts available.
+ * The input is deliberately structural (not the full DTO): a caller passes the
+ * facts it holds and the mapping skips the rest, so an absent optional field
+ * never turns into a failure reading.
  */
 
 import type { ListenerStatusDto } from '../protocol/dto.ts'

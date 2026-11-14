@@ -369,20 +369,24 @@ describe('a repeating task plans one round', () => {
   /**
    * Live, one per-minute task wrote outline `1`, then `1`+`2`, then `3`+`4`, then `1`+`2`+`3` —
    * numbering rounds instead of describing one — and each round ran more steps than the last while
-   * writing the same single file. The prompt says the rule in one sentence; this is the wall behind
-   * the sentence.
+   * writing the same single file.
+   *
+   * The rule lives in the prompt, and the wall behind it is `closeRound` clearing the plan: each
+   * round starts from an empty plan, so outlines cannot accumulate across rounds.
+   *
+   * This used to be enforced by refusing a second outline on a recurring task, which was too
+   * strong — a round may genuinely need several outlines (`1` gather, `2` write, `3` clean up),
+   * exactly like a one-off task. The mistake worth preventing is one outline *per round*, not a
+   * second outline in one round.
    */
-  it('refuses a second outline', () => {
+  it('accepts several outlines within one round, like any other task', () => {
     const svc = service();
     const task = recurring(svc);
-    // Build the real shape first: the fixture's plan has only `1.1`, so add the outline it hangs
-    // under — otherwise 「one outline」 is trivially true and the test proves nothing.
-    expect(svc.updatePlan(task.id, { id: '1', title: '第一轮' }).ok).toBe(true)
-    const second = svc.updatePlan(task.id, { id: '2', title: '第二轮' })
-    expect(second.ok).toBe(false)
-    expect(second.error).toContain('只能有一个大纲')
-    // And nothing was written.
-    expect((svc.get(task.id)!.spec?.plan ?? []).every((s) => !s.id.startsWith('2'))).toBe(true)
+    expect(svc.updatePlan(task.id, { id: '1', title: '收集' }).ok).toBe(true)
+    expect(svc.updatePlan(task.id, { id: '2', title: '写文件' }).ok).toBe(true)
+    expect(svc.updatePlan(task.id, { id: '3', title: '收尾' }).ok).toBe(true)
+    // All three landed, next to the sub-step the fixture already had.
+    expect((svc.get(task.id)!.spec?.plan ?? []).map((s) => s.id)).toEqual(['1.1', '1', '2', '3'])
   })
 
   it('leaves a one-off task alone, because its plan is the whole job', () => {

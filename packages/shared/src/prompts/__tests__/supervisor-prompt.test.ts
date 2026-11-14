@@ -215,14 +215,17 @@ describe('supervisor prompt', () => {
     const text = getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane: 'task' })
     expect(text).toContain('plans one round, not the whole future')
     /**
-     * The rule is one sentence, because the previous three-paragraph version did not survive contact
-     * with a live run: round 3 of a per-minute task wrote outlines `3` and `4`, round 4 wrote `5` and
-     * `6` — numbering rounds instead of describing one — and neither paragraph covered it. What the
-     * model has to be told is simply that repeating is the trigger's job.
+     * The rule is about **rounds, not outlines**.
+     *
+     * It used to read 「the plan must not repeat: it holds one round's work only … stop at `1`」, and
+     * the code behind it refused a second outline on a recurring task. Both were too strong: a
+     * round may need several outlines (`1` gather, `2` write, `3` clean up) exactly like a one-off
+     * task. What must not happen is one outline *per round* — that is numbering history.
      */
-    expect(text).toContain('plan must not repeat')
-    // The sentence wraps in the source, so match the words, not the line.
-    expect(text.replace(/\s+/g, ' ')).toContain("Repeating is the trigger's job, not the plan's")
+    expect(text).toContain('Repeating is the trigger')
+    expect(text.replace(/\s+/g, ' ')).toContain('a rule about **rounds, not outlines**')
+    // The old unconditional prohibition must not come back: this lane may write outlines 1, 2, 3.
+    expect(text).not.toContain('stop at \`1\`')
     expect(text).toContain('lastRound')
   })
 

@@ -736,31 +736,6 @@ export class TaskService {
     if (result.error) return { ok: false, error: result.error };
     if (!result.changed) return { ok: true, plan: result.plan };
 
-    /**
-     * A repeating task's plan is one round's work, so it has one outline.
-     *
-     * The prompt says this in one sentence now, and it still was not enough: live, a per-minute task
-     * wrote outline `1`, then `1`+`2`, then `3`+`4`, then `1`+`2`+`3` — numbering rounds instead of
-     * describing one — and each round ran more steps than the last while writing the same single
-     * file. The count is what makes it visible; the rule is what makes it wrong.
-     *
-     * Refused rather than trimmed: silently deleting a step the model wrote would leave it thinking
-     * the plan says something it does not, and it would dispatch a stepId that no longer exists.
-     */
-    if (isRecurring(task)) {
-      const outlines = result.plan.filter((step) => !step.id.includes('.'))
-      if (outlines.length > 1) {
-        return {
-          ok: false,
-          error:
-            `周期性任务的计划只能有一个大纲（当前 ${outlines.length} 个：${outlines
-              .map((step) => step.id)
-              .join('、')}）。` +
-            '每轮都从第 1 步重放，重复由触发器负责——不要再写 2、3、4，那是在给已经跑过的轮次编号。',
-        }
-      }
-    }
-
     let next: Task = {
       ...task,
       spec: { ...(task.spec ?? {}), plan: result.plan },

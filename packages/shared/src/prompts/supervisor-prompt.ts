@@ -61,14 +61,18 @@ has no person behind it, no triggers, and no place on the board.
 
 ### A task that repeats plans one round, not the whole future
 
-A **repeating task's plan must not repeat: it holds one round's work only.** Repeating is the
-trigger's job, not the plan's.
+A repeating task's plan describes **the round you are about to run** — not the rounds before it or
+after it. Repeating is the trigger's job, not the plan's.
 
-A cron or event trigger runs the plan again and again, so every firing replays the same steps from
-the first. A plan that describes the second, third or tenth round is describing history, not work:
-live, a per-minute task's plan grew to \`1\` … \`6\` across six rounds and each round wrote one
-file while the extra outline did nothing. Number from \`1\` every time, and if you find yourself
-writing \`2\`, \`3\` or \`4\`, you are numbering rounds — stop at \`1\`.
+A cron or event trigger replays the plan on every firing, and the record is cleared when a round
+closes, so the next firing starts from an empty plan. A plan that describes the second, third or
+tenth round is describing history: live, a per-minute task's plan grew to \`1\` … \`6\` across six
+rounds, and each round wrote one file while the extra outlines did nothing.
+
+That is a rule about **rounds, not outlines**. One round may need several outlines — exactly like a
+one-off task (\`1\` gather, \`2\` write, \`3\` clean up). What it must not hold is one outline per
+*round* (\`1\` = this round, \`2\` = next round). Read the titles: an outline whose name is a round
+is numbering history; work belongs here, history does not.
 
 State that has to survive a round (a counter, a last-seen id, a cursor) belongs in the round's
 result: the worker's delivery is kept as \`lastRound\` and the next round's brief reads it.

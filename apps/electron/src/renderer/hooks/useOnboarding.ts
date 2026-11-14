@@ -15,7 +15,6 @@ import type {
   OnboardingStep,
   ApiSetupMethod,
 } from '@/components/onboarding'
-import type { ProviderChoice } from '@/components/onboarding/ProviderSelectStep'
 import type { LocalModelSubmitData } from '@/components/onboarding/LocalModelStep'
 import type { ApiKeySubmitData } from '@/components/apisetup'
 import type { CustomEndpointConfig } from '@config/llm-connections'
@@ -49,9 +48,6 @@ interface UseOnboardingReturn {
   handleContinue: () => void
   handleBack: () => void
 
-  // Provider select (new flow)
-  handleSelectProvider: (choice: ProviderChoice) => void
-
   // API Setup (legacy — kept for direct edit)
   handleSelectApiSetupMethod: (method: ApiSetupMethod) => void
 
@@ -68,7 +64,6 @@ interface UseOnboardingReturn {
   handleClearError: () => void
 
   // Skip setup ("Setup later")
-  handleSkipSetup: () => void
 
   // Completion
   handleFinish: () => void
@@ -292,10 +287,6 @@ export function useOnboarding({
   // Continue to next step
   const handleContinue = useCallback(async () => {
     switch (state.step) {
-      case 'provider-select':
-        // Handled by handleSelectProvider (card click navigates directly)
-        break
-
       case 'welcome':
         // On Windows, check if Git Bash is needed
         if (state.gitBashStatus?.platform === 'win32' && !state.gitBashStatus?.found) {
@@ -502,36 +493,6 @@ export function useOnboarding({
 
 
 
-  // Map ProviderChoice → ApiSetupMethod and navigate to the right step
-  const handleSelectProvider = useCallback((choice: ProviderChoice) => {
-    // OAuth providers (Claude Max, ChatGPT Plus, GitHub Copilot) were removed,
-    // so every remaining choice maps to the API-key path.
-    const CHOICE_TO_METHOD: Record<Exclude<ProviderChoice, 'local'>, ApiSetupMethod> = {
-      claude: 'anthropic_api_key',
-      chatgpt: 'pi_api_key',
-      copilot: 'pi_api_key',
-      api_key: 'pi_api_key',
-    }
-
-    if (choice === 'local') {
-      // Local uses anthropic_api_key with custom endpoint (Ollama doesn't need an API key)
-      setState(s => ({ ...s, step: 'local-model', apiSetupMethod: 'anthropic_api_key', credentialStatus: 'idle', errorMessage: undefined }))
-      return
-    }
-
-    const method = CHOICE_TO_METHOD[choice]
-    setState(s => ({
-      ...s,
-      apiSetupMethod: method,
-      step: 'credentials',
-      credentialStatus: 'idle',
-      errorMessage: undefined,
-    }))
-
-    // OAuth setup methods were removed, so no flow is started implicitly.
-  }, [])
-
-
   // Submit local model configuration (Ollama or any OpenAI-compatible local server)
   const handleSubmitLocalModel = useCallback(async (data: LocalModelSubmitData) => {
     setState(s => ({ ...s, credentialStatus: 'validating', errorMessage: undefined }))
@@ -603,16 +564,6 @@ export function useOnboarding({
     setState(s => ({ ...s, errorMessage: undefined }))
   }, [])
 
-  // Skip setup — user chose "Setup later"
-  const handleSkipSetup = useCallback(async () => {
-    try {
-      await window.electronAPI.deferSetup()
-    } catch (error) {
-      console.error('[Onboarding] Failed to defer setup:', error)
-    }
-    onComplete()
-  }, [onComplete])
-
   // Finish onboarding
   const handleFinish = useCallback(() => {
     onComplete()
@@ -651,7 +602,6 @@ export function useOnboarding({
     state,
     handleContinue,
     handleBack,
-    handleSelectProvider,
     handleSelectApiSetupMethod,
     handleSubmitCredential,
     handleSubmitLocalModel,
@@ -660,7 +610,6 @@ export function useOnboarding({
     handleUseGitBashPath,
     handleRecheckGitBash,
     handleClearError,
-    handleSkipSetup,
     handleFinish,
     handleCancel,
     jumpToCredentials,

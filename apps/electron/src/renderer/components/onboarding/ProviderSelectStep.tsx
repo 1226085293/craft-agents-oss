@@ -1,82 +1,31 @@
 import { useTranslation } from "react-i18next"
 import { cn } from "@/lib/utils"
-import { Key, Monitor } from "lucide-react"
+import { Settings2 } from "lucide-react"
 import { CraftAgentsSymbol } from "@/components/icons/CraftAgentsSymbol"
 import { StepFormLayout } from "./primitives"
 
-import claudeIcon from "@/assets/provider-icons/claude.svg"
-import openaiIcon from "@/assets/provider-icons/openai.svg"
-import copilotIcon from "@/assets/provider-icons/copilot.svg"
-
-/**
- * The high-level provider choice the user makes on first launch.
- * This maps to one or more ApiSetupMethods downstream.
- */
-export type ProviderChoice = 'claude' | 'chatgpt' | 'copilot' | 'api_key' | 'local'
-
-interface ProviderOption {
-  id: ProviderChoice
-  name: string
-  description: string
-  icon: React.ReactNode
-}
-
-const PROVIDER_ICONS: Record<ProviderChoice, React.ReactNode> = {
-  claude: <img src={claudeIcon} alt="" className="size-5 rounded-[3px]" />,
-  chatgpt: <img src={openaiIcon} alt="" className="size-5 rounded-[3px]" />,
-  copilot: <img src={copilotIcon} alt="" className="size-5 rounded-[3px]" />,
-  api_key: <Key className="size-5" />,
-  local: <Monitor className="size-5" />,
-}
-
 interface ProviderSelectStepProps {
-  /** Called when the user selects a provider */
-  onSelect: (choice: ProviderChoice) => void
-  /** Called when the user chooses to skip setup */
-  onSkip?: () => void
+  /**
+   * Open the LLM settings page.
+   *
+   * The wizard no longer offers a choice of provider here. Every provider it used to list
+   * (Claude / ChatGPT / Copilot / API key / local) is now configured in one place — Settings →
+   * LLM gateway — and duplicating that list in the welcome flow meant two code paths writing the
+   * same connection records, one of which was already out of date. So this screen has exactly one
+   * action: take the person to the real settings page.
+   */
+  onOpenLlmSettings: () => void
 }
 
 /**
- * ProviderSelectStep — First screen after install.
+ * ProviderSelectStep — first screen after install.
  *
- * Welcomes the user and asks them to pick their provider / auth method.
- * Selecting a card immediately advances to the next step.
+ * One card, one button. It used to be five cards (Claude, ChatGPT, GitHub Copilot, other
+ * provider, local model), each of which opened its own credential sub-flow; the LLM gateway
+ * settings page supersedes all of them.
  */
-export function ProviderSelectStep({ onSelect, onSkip }: ProviderSelectStepProps) {
+export function ProviderSelectStep({ onOpenLlmSettings }: ProviderSelectStepProps) {
   const { t } = useTranslation()
-
-  const PROVIDER_OPTIONS: ProviderOption[] = [
-    {
-      id: 'claude',
-      name: t("onboarding.providerSelect.claudeProMax"),
-      description: t("onboarding.providerSelect.claudeProMaxDesc"),
-      icon: PROVIDER_ICONS.claude,
-    },
-    {
-      id: 'chatgpt',
-      name: t("onboarding.providerSelect.codexChatGPT"),
-      description: t("onboarding.providerSelect.codexChatGPTDesc"),
-      icon: PROVIDER_ICONS.chatgpt,
-    },
-    {
-      id: 'copilot',
-      name: t("onboarding.providerSelect.githubCopilot"),
-      description: t("onboarding.providerSelect.githubCopilotDesc"),
-      icon: PROVIDER_ICONS.copilot,
-    },
-    {
-      id: 'api_key',
-      name: t("onboarding.providerSelect.otherProvider"),
-      description: 'Anthropic, AWS Bedrock, OpenRouter, Google or any compatible provider.',
-      icon: PROVIDER_ICONS.api_key,
-    },
-    {
-      id: 'local',
-      name: t("onboarding.providerSelect.localModel"),
-      description: 'Run models locally with Ollama.',
-      icon: PROVIDER_ICONS.local,
-    },
-  ]
 
   return (
     <StepFormLayout
@@ -88,44 +37,28 @@ export function ProviderSelectStep({ onSelect, onSkip }: ProviderSelectStepProps
       title={t("onboarding.providerSelect.title")}
       description={t("onboarding.providerSelect.description")}
     >
-      <div className="space-y-2 sm:space-y-3">
-        {PROVIDER_OPTIONS.map((option) => (
-          <button
-            key={option.id}
-            onClick={() => onSelect(option.id)}
-            className={cn(
-              "flex w-full items-center gap-3 rounded-xl bg-foreground-2 p-3 text-left transition-all",
-              "sm:items-start sm:gap-4 sm:p-4",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              "hover:bg-foreground/[0.02] shadow-minimal",
-            )}
-          >
-            {/* Icon */}
-            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-              {option.icon}
-            </div>
-
-            {/* Content */}
-            <div className="flex-1 min-w-0">
-              <span className="font-medium text-sm">{option.name}</span>
-              <p className="mt-0 hidden sm:block text-xs text-muted-foreground">
-                {option.description}
-              </p>
-            </div>
-          </button>
-        ))}
-      </div>
-
-      {onSkip && (
-        <div className="mt-4 text-center">
-          <button
-            onClick={onSkip}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            {t("onboarding.providerSelect.setupLater")}
-          </button>
+      {/* Same card shape the provider options used, so the screen reads the same — one row now
+          instead of five. */}
+      <button
+        onClick={onOpenLlmSettings}
+        className={cn(
+          "flex w-full items-center gap-3 rounded-xl bg-foreground-2 p-3 text-left transition-all",
+          "sm:items-start sm:gap-4 sm:p-4",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          "hover:bg-foreground/[0.02] shadow-minimal",
+        )}
+      >
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+          <Settings2 className="size-5" />
         </div>
-      )}
+
+        <div className="flex-1 min-w-0">
+          <span className="font-medium text-sm">{t("onboarding.providerSelect.openLlmSettings")}</span>
+          <p className="mt-0 hidden sm:block text-xs text-muted-foreground">
+            {t("onboarding.providerSelect.openLlmSettingsDesc")}
+          </p>
+        </div>
+      </button>
     </StepFormLayout>
   )
 }

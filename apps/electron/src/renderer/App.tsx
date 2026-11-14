@@ -2177,8 +2177,12 @@ export default function App() {
             state={onboarding.state}
             onContinue={onboarding.handleContinue}
             onBack={onboarding.handleBack}
-            onSelectProvider={onboarding.handleSelectProvider}
-            onSkipSetup={onboarding.handleSkipSetup}
+            onOpenLlmSettings={() => {
+              // Leave onboarding and open the page that owns connection setup. The wizard no
+              // longer collects credentials itself: the LLM gateway page writes the same records
+              // and is the only place that stays in step with the config schema.
+              void openSettingsWindow('llm', windowWorkspaceId)
+            }}
             onSelectApiSetupMethod={onboarding.handleSelectApiSetupMethod}
             onSubmitCredential={onboarding.handleSubmitCredential}
             onSubmitLocalModel={onboarding.handleSubmitLocalModel}

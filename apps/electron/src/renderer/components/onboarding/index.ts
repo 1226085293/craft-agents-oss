@@ -10,7 +10,7 @@ export {
 } from './primitives'
 
 // Individual steps
-export { ProviderSelectStep, type ProviderChoice } from './ProviderSelectStep'
+export { ProviderSelectStep } from './ProviderSelectStep'
 export { WelcomeStep } from './WelcomeStep'
 export { APISetupStep, type ApiSetupMethod } from './APISetupStep'
 export { CredentialsStep, type CredentialStatus } from './CredentialsStep'

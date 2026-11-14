@@ -9,7 +9,7 @@
 import { useState, useCallback, useEffect } from 'react'
 import { ensureMockElectronAPI } from '../mock-utils'
 import { WelcomeStep } from '@/components/onboarding/WelcomeStep'
-import { ProviderSelectStep, type ProviderChoice } from '@/components/onboarding/ProviderSelectStep'
+import { ProviderSelectStep } from '@/components/onboarding/ProviderSelectStep'
 import { CredentialsStep } from '@/components/onboarding/CredentialsStep'
 import { LocalModelStep } from '@/components/onboarding/LocalModelStep'
 import { CompletionStep } from '@/components/onboarding/CompletionStep'
@@ -17,15 +17,6 @@ import type { ApiSetupMethod } from '@/components/onboarding/APISetupStep'
 import type { CredentialStatus } from '@/components/onboarding/CredentialsStep'
 
 type DemoStep = 'welcome' | 'provider-select' | 'credentials' | 'local-model' | 'complete'
-
-/** Map ProviderChoice → ApiSetupMethod for the credentials step */
-// OAuth setup methods were removed; every provider choice maps to an API key.
-const CHOICE_TO_METHOD: Record<Exclude<ProviderChoice, 'local'>, ApiSetupMethod> = {
-  claude: 'anthropic_api_key',
-  chatgpt: 'pi_api_key',
-  copilot: 'pi_api_key',
-  api_key: 'pi_api_key',
-}
 
 export function OnboardingFlowDemo() {
   useEffect(() => { ensureMockElectronAPI() }, [])
@@ -36,22 +27,15 @@ export function OnboardingFlowDemo() {
   const [localStatus, setLocalStatus] = useState<'idle' | 'validating' | 'success' | 'error'>('idle')
   const [errorMessage, setErrorMessage] = useState<string | undefined>()
 
-  // Track history for the step indicator
-  const [providerChoice, setProviderChoice] = useState<ProviderChoice | null>(null)
-
-  const handleProviderSelect = useCallback((choice: ProviderChoice) => {
-    setProviderChoice(choice)
+  // The real screen has one action now: open the LLM gateway settings page. The demo keeps the
+  // credentials step reachable so that screen still has a preview — nothing in production
+  // navigates here any more.
+  const handleOpenLlmSettings = useCallback(() => {
     setCredStatus('idle')
     setLocalStatus('idle')
     setErrorMessage(undefined)
-
-    if (choice === 'local') {
-      setMethod(null)
-      setStep('local-model')
-    } else {
-      setMethod(CHOICE_TO_METHOD[choice])
-      setStep('credentials')
-    }
+    setMethod('pi_api_key')
+    setStep('credentials')
   }, [])
 
   const handleBack = useCallback(() => {
@@ -96,18 +80,10 @@ export function OnboardingFlowDemo() {
   const handleRestart = useCallback(() => {
     setStep('welcome')
     setMethod(null)
-    setProviderChoice(null)
     setCredStatus('idle')
     setLocalStatus('idle')
     setErrorMessage(undefined)
   }, [])
-
-  const handleSkip = useCallback(() => {
-    console.log('[Playground] Setup deferred — dismissing onboarding')
-    // In the real app this calls onComplete() which dismisses onboarding
-    // and shows the main app. In the playground we restart the demo.
-    handleRestart()
-  }, [handleRestart])
 
   // Step labels for the breadcrumb
   const activeStepLabel = step === 'local-model' ? 'Local Model' : 'Credentials'
@@ -160,7 +136,7 @@ export function OnboardingFlowDemo() {
         )}
 
         {step === 'provider-select' && (
-          <ProviderSelectStep onSelect={handleProviderSelect} onSkip={handleSkip} />
+          <ProviderSelectStep onOpenLlmSettings={handleOpenLlmSettings} />
         )}
 
         {step === 'credentials' && method && (

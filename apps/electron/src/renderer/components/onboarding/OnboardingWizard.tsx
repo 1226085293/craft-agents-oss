@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils"
 import { WelcomeStep } from "./WelcomeStep"
 import type { ApiSetupMethod } from "./APISetupStep"
-import { ProviderSelectStep, type ProviderChoice } from "./ProviderSelectStep"
+import { ProviderSelectStep } from "./ProviderSelectStep"
 import { CredentialsStep, type CredentialStatus } from "./CredentialsStep"
 import { LocalModelStep, type LocalModelSubmitData } from "./LocalModelStep"
 import { CompletionStep } from "./CompletionStep"
@@ -49,10 +49,14 @@ interface OnboardingWizardProps {
   onRecheckGitBash?: () => void
   onClearError?: () => void
 
-  // Provider select (new flow)
-  onSelectProvider?: (choice: ProviderChoice) => void
-  /** Called when user chooses "Setup later" on provider select */
-  onSkipSetup?: () => void
+  // Provider select
+  /**
+   * Open the LLM gateway settings page.
+   *
+   * The wizard used to branch into five provider-specific credential flows; all of them are
+   * replaced by that one page, so the callback is all this screen needs.
+   */
+  onOpenLlmSettings?: () => void
 
   // Local model
   onSubmitLocalModel?: (data: LocalModelSubmitData) => void
@@ -92,9 +96,8 @@ export function OnboardingWizard({
   onUseGitBashPath,
   onRecheckGitBash,
   onClearError,
-  // Provider select (new flow)
-  onSelectProvider,
-  onSkipSetup,
+  // Provider select
+  onOpenLlmSettings,
   // Local model
   onSubmitLocalModel,
   // Edit mode
@@ -127,12 +130,7 @@ export function OnboardingWizard({
         )
 
       case 'provider-select':
-        return (
-          <ProviderSelectStep
-            onSelect={onSelectProvider!}
-            onSkip={onSkipSetup}
-          />
-        )
+        return <ProviderSelectStep onOpenLlmSettings={onOpenLlmSettings!} />
 
       case 'local-model':
         return (

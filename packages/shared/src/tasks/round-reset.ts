@@ -136,8 +136,7 @@ export function resetRoundState(task: Task, options: RoundResetOptions): RoundRe
    * starts clean still shows the last one's failure, and `deriveGateReason` reads it back as current.
    */
   if (task.lifecycle) {
-    const { lastError: _error, lastPausedAt: _pausedAt, lastRecoveredAt: _recovered, ...lifecycleRest } =
-      task.lifecycle;
+    const { lastError: _error, lastPausedAt: _pausedAt, ...lifecycleRest } = task.lifecycle;
     next.lifecycle = lifecycleRest;
   }
 

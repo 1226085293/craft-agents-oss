@@ -42,7 +42,15 @@ const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   // finished and the task is waiting for the next trigger. Staying `running` would claim a live
   // run that nobody is holding.
   running: ['running', 'backlog', 'paused', 'completed', 'failed', 'canceled'],
-  paused: ['running', 'canceled', 'failed'],
+  /**
+   * `paused → completed` is reachable because a pause is not the end of the story.
+   *
+   * The supervisor is the one who says a task is done, and the moment it becomes sure is usually right
+   * after reading why the task paused (a failure report, a budget stop, a worker that went quiet). With
+   * no edge here, that decision was refused by the state machine — the task was stuck in `paused` with
+   * no way to reach a terminal state except `canceled`, which says something different.
+   */
+  paused: ['running', 'completed', 'canceled', 'failed'],
   completed: [],
   failed: ['backlog', 'running', 'canceled'],
   canceled: [],
@@ -190,9 +198,6 @@ export function applyTransition(
     next.stats = resetPauseAnnouncement(task.stats);
   } else if (to === 'running') {
     next.pauseReason = null;
-    if (task.status === 'paused') {
-      next.lifecycle = { ...task.lifecycle, lastRecoveredAt: options.now };
-    }
   } else if (to === 'failed') {
     next.lifecycle = {
       ...task.lifecycle,
@@ -573,7 +578,6 @@ export function recordRunResult(
       ...lifecycle,
       consecutiveFailures: 0,
       lastError: undefined,
-      lastRecoveredAt: lifecycle.lastError ? now : lifecycle.lastRecoveredAt,
     };
   }
   return {

@@ -501,7 +501,6 @@ export interface TaskLifecycle {
   errorCount: number;
   lastError?: string;
   lastPausedAt?: number;
-  lastRecoveredAt?: number;
   /** Consecutive failures; resets on a clean run. Drives the 3-strike fuse. */
   consecutiveFailures: number;
 }

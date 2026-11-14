@@ -70,6 +70,16 @@ describe('state machine', () => {
     expect(() => assertTransition('completed', 'running')).toThrow(IllegalTransitionError);
   });
 
+  it('lets a paused task be closed, because the pause is what the person decides on', () => {
+    // The supervisor learns a task is done by reading why it paused (a failure, a budget stop, a
+    // worker that went quiet). Without this edge that decision was refused by the state machine and
+    // the task could only reach `canceled` — which says 「never mind」, not 「finished」.
+    const paused = applyTransition(task(), 'paused', { now: 10, pauseReason: 'budget' }).task;
+    const done = applyTransition(paused, 'completed', { now: 20 });
+    expect(done.changed).toBe(true);
+    expect(done.task.status).toBe('completed');
+  });
+
   it('records the pause reason and clears it on resume', () => {
     const paused = applyTransition(task(), 'paused', { now: 10, pauseReason: 'budget' }).task;
     expect(paused.pauseReason).toBe('budget');
@@ -77,7 +87,9 @@ describe('state machine', () => {
 
     const resumed = applyTransition(paused, 'running', { now: 20 }).task;
     expect(resumed.pauseReason).toBeNull();
-    expect(resumed.lifecycle.lastRecoveredAt).toBe(20);
+    // `lastRecoveredAt` used to be stamped here and never read by anyone. It is gone; what resumes a
+    // task is the status itself.
+    expect(resumed.lifecycle.lastPausedAt).toBe(10);
   });
 
   it('counts failures on the failed transition', () => {
@@ -176,7 +188,7 @@ describe('budget and fuse', () => {
   });
 
   it('trips the fuse after three consecutive failures and resets on success', () => {
-    let lifecycle: { errorCount: number; consecutiveFailures: number; lastError?: string; lastRecoveredAt?: number } = {
+    let lifecycle: { errorCount: number; consecutiveFailures: number; lastError?: string } = {
       errorCount: 0,
       consecutiveFailures: 0,
     };

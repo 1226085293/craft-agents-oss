@@ -38,7 +38,6 @@ function finishedRound(overrides: Partial<Task> = {}): Task {
       consecutiveFailures: 2,
       lastError: '上一轮失败了',
       lastPausedAt: NOW - 5000,
-      lastRecoveredAt: NOW - 4000,
     },
     spec: {
       plan: [{ id: '1.1', title: '发问候', status: 'done', agent: 'builtin-default' }],
@@ -156,7 +155,6 @@ describe('what a round takes with it (cleared)', () => {
     const { task } = reset();
     expect(task.lifecycle?.lastError).toBeUndefined();
     expect(task.lifecycle?.lastPausedAt).toBeUndefined();
-    expect(task.lifecycle?.lastRecoveredAt).toBeUndefined();
   });
 
   it('clears the wake bookkeeping, which counts nudges within one round', () => {

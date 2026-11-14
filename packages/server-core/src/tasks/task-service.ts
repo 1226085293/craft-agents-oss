@@ -550,7 +550,7 @@ export class TaskService {
       updatedAt: now,
     };
     if (task.status === 'paused') {
-      next = { ...next, lifecycle: { ...task.lifecycle, lastRecoveredAt: now } };
+      next = { ...next, lifecycle: task.lifecycle };
     }
     this.save(next);
     this.registerRun(id, sessionId);

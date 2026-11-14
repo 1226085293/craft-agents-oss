@@ -6268,6 +6268,33 @@ export class SessionManager implements ISessionManager {
              */
             const taskLaneId = (await this.ensureSupervisorSession(managed.workspace.id, 'task')).id
             const request = payload.request.trim()
+            /**
+             * The same words, twice, is one task.
+             *
+             * `create_task` is a write with side effects — a record, a supervisor wake, a dispatch —
+             * and the model cannot tell 「did it land?」 from a lost answer, so it retries. Live, two
+             * identical calls 34ms apart made T-1 and T-2 from one sentence: two rounds competing for
+             * the same plan, two supervisors, and both task lanes reporting the same work.
+             *
+             * Same words + same lane + nothing changed since = the retry it is. Answered with the id
+             * that already exists, which is what the retry was asking for.
+             */
+            const duplicate = this.getTasks(managed.workspace.id)
+              .list()
+              .find(
+                (candidate) =>
+                  candidate.instruction.trim() === request &&
+                  (candidate.supervisorSessionId ?? '') !== '' &&
+                  candidate.status !== 'completed' &&
+                  candidate.status !== 'canceled',
+              )
+            if (duplicate) {
+              sessionLog.info(`[tasks] create_task is a retry of ${duplicate.id}; nothing created`, { request: request.slice(0, 60) })
+              return {
+                taskId: duplicate.id,
+                message: `这几句话已经是 ${duplicate.id} 了，没有再建一条。`,
+              }
+            }
             if (payload.taskId?.trim()) {
               const taskId = payload.taskId.trim()
               /**

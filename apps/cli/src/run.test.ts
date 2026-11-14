@@ -382,7 +382,7 @@ describe('run command', () => {
     await client.invoke('LLM_Connection:save', {
       slug: 'anthropic-api',
       name: 'Anthropic',
-      providerType: 'anthropic',
+      providerType: 'pi',
       authType: 'api_key',
       createdAt: 123,
     })

@@ -595,8 +595,10 @@ async function setupLlmConnection(
     }
     setupPayload.defaultModel = provider === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o'
   } else if (provider === 'anthropic') {
-    providerType = 'anthropic'
+    // The direct Anthropic backend is gone; Pi reaches api.anthropic.com with this auth provider.
+    providerType = 'pi'
     authType = 'api_key'
+    setupPayload.piAuthProvider = 'anthropic'
   } else if (provider === 'amazon-bedrock') {
     // Bedrock uses IAM credentials, not a single API key
     const accessKeyId = process.env.AWS_ACCESS_KEY_ID
@@ -1090,7 +1092,7 @@ export function getValidateSteps(): ValidateStep[] {
           return `0 connections (${error instanceof Error ? error.message : 'missing API key'})`
         }
         const slug = `${provider}-cli`
-        const providerType = provider === 'anthropic' ? 'anthropic' : 'pi'
+        const providerType = 'pi'
         const authType = 'api_key'
         await client.invoke('LLM_Connection:save', {
           slug,

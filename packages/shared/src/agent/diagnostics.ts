@@ -11,7 +11,6 @@ import { type AuthType, getDefaultLlmConnection, getLlmConnection } from '../con
 import { getCredentialManager } from '../credentials/index.ts';
 import { validateAnthropicConnection } from '../config/llm-validation.ts';
 import type { LlmProviderType } from '../config/llm-connections.ts';
-import { isAnthropicProvider } from '../config/llm-connections.ts';
 
 export type DiagnosticCode =
   | 'billing_error'         // HTTP 402 from API
@@ -134,7 +133,6 @@ function getProviderLabel(baseUrl: string): string {
 function getProviderLabelFromType(providerType?: LlmProviderType, baseUrl?: string): string {
   if (providerType) {
     switch (providerType) {
-      case 'anthropic': return 'Anthropic';
       case 'pi':
       case 'pi_compat': return 'Craft Agents Backend';
     }
@@ -387,9 +385,9 @@ export async function runErrorDiagnostics(config: DiagnosticConfig): Promise<Dia
   // This is provider-agnostic — HTTP status codes are universal.
   checks.push(withTimeout(checkCapturedApiError(providerLabel), 1000, defaultResult));
 
-  // Provider-specific checks: only run for Anthropic-based providers
-  // Codex, Copilot, and Pi handle auth internally — no env-var-based checks apply.
-  const isAnthropic = !providerType || isAnthropicProvider(providerType);
+  // Provider checks: every connection now terminates in the Pi subprocess, so the
+  // env-var-based auth checks below apply to all of them.
+  const isAnthropic = true;
 
   if (isAnthropic) {
     // 1. API endpoint availability check (uses explicit baseUrl or env var)

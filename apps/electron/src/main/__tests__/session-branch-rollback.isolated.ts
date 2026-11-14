@@ -109,7 +109,6 @@ mock.module('@craft-agent/shared/config', () => ({
   setDefaultLlmConnection: async () => {},
   touchLlmConnection: async () => {},
   isCompatProvider: () => false,
-  isAnthropicProvider: () => true,
 }))
 
 mock.module('@craft-agent/shared/workspaces', () => ({
@@ -144,13 +143,13 @@ mock.module('@craft-agent/shared/agent/backend', () => ({
   resolveBackendContext: () => ({
     provider: mockedProvider,
     resolvedModel: mockedProvider === 'anthropic' ? 'claude-sonnet-4-20250514' : 'pi/gpt-5',
-    connection: { providerType: mockedProvider === 'anthropic' ? 'anthropic' : 'pi' },
+    connection: { providerType: 'pi' },
   }),
   createBackendFromResolvedContext: () => {
     throw new Error('not used in this test')
   },
   cleanupSourceRuntimeArtifacts: async () => {},
-  providerTypeToAgentProvider: () => 'anthropic',
+  providerTypeToAgentProvider: () => 'pi',
   fetchBackendModels: async () => ({ models: [] }),
   initializeBackendHostRuntime: () => {},
   resolveBackendHostTooling: () => ({

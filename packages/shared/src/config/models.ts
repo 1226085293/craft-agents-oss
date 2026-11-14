@@ -90,7 +90,11 @@ export function normalizeDeprecatedModelId(modelId: string): string {
 // ============================================
 
 /**
- * Provider identifier for AI backends.
+ * Which model family a registry entry belongs to.
+ *
+ * This is **not** the backend selector — there is one backend (Pi), and `LlmProviderType` decides
+ * how a connection reaches its endpoint. This tag groups entries in the catalog and answers
+ * 「is this a Claude model or a Bedrock-native one」 for `getModelsByProvider` / `getModelProvider`.
  */
 export type ModelProvider = 'anthropic' | 'pi';
 
@@ -253,7 +257,8 @@ export function getModelsByProvider(provider: ModelProvider): ModelDefinition[] 
   return MODEL_REGISTRY.filter(m => m.provider === provider);
 }
 
-/** All Anthropic Claude models */
+/** The Claude family — every entry in the static registry. Bedrock/Pi catalog models arrive at
+ *  runtime through the model resolver, not this list. */
 export const ANTHROPIC_MODELS = getModelsByProvider('anthropic');
 
 

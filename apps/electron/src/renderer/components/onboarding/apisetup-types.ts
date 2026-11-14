@@ -10,9 +10,6 @@
 
 import type { CustomEndpointConfig, LlmAuthType, LlmProviderType } from '@craft-agent/shared/config/llm-connections'
 
-/** Provider segment for the segmented control */
-export type ProviderSegment = 'anthropic' | 'pi'
-
 /**
  * What the credential form submits.
  *
@@ -70,7 +67,6 @@ export function apiSetupMethodToConnectionTypes(method: ApiSetupMethod): {
   // API-key methods remain.
   switch (method) {
     case 'anthropic_api_key':
-      return { providerType: 'anthropic', authType: 'api_key' }
     case 'pi_api_key':
       return { providerType: 'pi', authType: 'api_key' }
   }

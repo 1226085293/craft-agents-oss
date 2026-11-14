@@ -115,8 +115,6 @@ export function getBackendRuntime(config: BackendConfig): BackendRuntimePayload 
 
 export function getDefaultProviderType(provider: AgentProvider): LlmProviderType {
   switch (provider) {
-    case 'anthropic':
-      return 'anthropic';
     case 'pi':
       return 'pi';
   }

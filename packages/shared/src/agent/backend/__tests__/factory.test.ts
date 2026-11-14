@@ -17,7 +17,6 @@ import {
   getAvailableProviders,
   initializeBackendHostRuntime,
   isProviderAvailable,
-  connectionTypeToProvider,
   connectionAuthTypeToBackendAuthType,
   providerTypeToAgentProvider,
   resolveModelForProvider,
@@ -55,7 +54,7 @@ function createTestSession(): Session {
 
 function createTestConfig(overrides: Partial<BackendConfig> = {}): BackendConfig {
   return {
-    provider: 'anthropic',
+    provider: 'pi',
     workspace: createTestWorkspace(),
     session: createTestSession(),
     isHeadless: true, // Prevent config watchers from starting
@@ -64,34 +63,18 @@ function createTestConfig(overrides: Partial<BackendConfig> = {}): BackendConfig
 }
 
 describe('detectProvider', () => {
-  describe('Anthropic authentication types', () => {
-    it('should return anthropic for api_key', () => {
-      expect(detectProvider('api_key')).toBe('anthropic');
-    });
-
-    it('should return anthropic for oauth_token', () => {
-      expect(detectProvider('oauth_token')).toBe('anthropic');
-    });
-  });
-
-  describe('Unknown authentication types', () => {
-    it('should default to anthropic for unknown types', () => {
-      expect(detectProvider('unknown')).toBe('anthropic');
-      expect(detectProvider('')).toBe('anthropic');
-    });
+  /**
+   * There is one backend. The function keeps its argument for the stored auth types that used to
+   * select between two drivers, but every answer is 'pi'.
+   */
+  it('resolves every stored auth type to the one backend', () => {
+    for (const authType of ['api_key', 'oauth_token', 'api_key_with_endpoint', 'unknown', '']) {
+      expect(detectProvider(authType)).toBe('pi');
+    }
   });
 });
 
 describe('createBackend / createAgent', () => {
-  describe('Anthropic provider', () => {
-    it('should create PiAgent for anthropic provider', () => {
-      const config = createTestConfig({ provider: 'anthropic' });
-      const agent = createBackend(config);
-
-      expect(agent).toBeInstanceOf(PiAgent);
-    });
-  });
-
   describe('Pi provider', () => {
     it('should create PiAgent for pi provider', () => {
       const config = createTestConfig({ provider: 'pi' });
@@ -117,44 +100,18 @@ describe('createBackend / createAgent', () => {
 });
 
 describe('getAvailableProviders', () => {
-  it('should return anthropic and pi', () => {
-    const providers = getAvailableProviders();
-
-    expect(providers).toContain('anthropic');
-    expect(providers).toContain('pi');
-    expect(providers).toHaveLength(2);
+  it('should return the one backend', () => {
+    expect(getAvailableProviders()).toEqual(['pi']);
   });
 });
 
 describe('isProviderAvailable', () => {
-  it('should return true for anthropic', () => {
-    expect(isProviderAvailable('anthropic')).toBe(true);
-  });
-
   it('should return true for pi', () => {
     expect(isProviderAvailable('pi')).toBe(true);
   });
 
   it('should return false for unknown provider', () => {
     expect(isProviderAvailable('unknown' as any)).toBe(false);
-  });
-});
-
-describe('connectionTypeToProvider', () => {
-  it('should map anthropic type to anthropic provider', () => {
-    expect(connectionTypeToProvider('anthropic')).toBe('anthropic');
-  });
-
-  it('should map openai type to pi provider (legacy routing)', () => {
-    expect(connectionTypeToProvider('openai')).toBe('pi');
-  });
-
-  it('should map openai-compat type to pi provider (legacy routing)', () => {
-    expect(connectionTypeToProvider('openai-compat')).toBe('pi');
-  });
-
-  it('should default to anthropic for unknown types', () => {
-    expect(connectionTypeToProvider('unknown' as any)).toBe('anthropic');
   });
 });
 
@@ -169,20 +126,11 @@ describe('connectionAuthTypeToBackendAuthType (legacy)', () => {
 });
 
 describe('providerTypeToAgentProvider', () => {
-  describe('Anthropic SDK providers', () => {
-    it('should map anthropic to anthropic', () => {
-      expect(providerTypeToAgentProvider('anthropic')).toBe('anthropic');
-    });
-  });
-
-  describe('Pi SDK providers', () => {
-    it('should map pi to pi', () => {
-      expect(providerTypeToAgentProvider('pi')).toBe('pi');
-    });
-
-    it('should map pi_compat to pi', () => {
-      expect(providerTypeToAgentProvider('pi_compat')).toBe('pi');
-    });
+  // `pi` and `pi_compat` differ only in whether the endpoint is a known provider or a typed URL;
+  // both terminate in the same subprocess.
+  it('maps every provider type to pi', () => {
+    expect(providerTypeToAgentProvider('pi')).toBe('pi');
+    expect(providerTypeToAgentProvider('pi_compat')).toBe('pi');
   });
 });
 
@@ -191,25 +139,6 @@ describe('providerTypeToAgentProvider', () => {
 // ============================================================
 
 describe('isValidProviderAuthCombination', () => {
-  describe('Anthropic provider', () => {
-    it('should accept api_key auth', () => {
-      expect(isValidProviderAuthCombination('anthropic', 'api_key')).toBe(true);
-    });
-
-    // OAuth was removed, so this combination is no longer valid.
-    it('should reject oauth auth', () => {
-      expect(isValidProviderAuthCombination('anthropic', 'oauth' as never)).toBe(false);
-    });
-
-    it('should reject api_key_with_endpoint auth', () => {
-      expect(isValidProviderAuthCombination('anthropic', 'api_key_with_endpoint')).toBe(false);
-    });
-
-    it('should reject none auth', () => {
-      expect(isValidProviderAuthCombination('anthropic', 'none')).toBe(false);
-    });
-  });
-
   describe('Pi provider', () => {
     it('should accept api_key auth', () => {
       expect(isValidProviderAuthCombination('pi', 'api_key')).toBe(true);
@@ -248,15 +177,18 @@ describe('phase4 backend abstraction APIs', () => {
   });
 
   it('resolveSetupTestConnectionHint maps provider/baseUrl/piAuthProvider correctly', () => {
+    // A baseUrl alone is not enough to make a compat connection: `pi_compat` means "custom
+    // endpoint protocol", which is what `customEndpoint` carries. Without it the connection stays
+    // plain `pi` and the URL is just an override of that provider's endpoint.
     expect(resolveSetupTestConnectionHint({
-      provider: 'anthropic',
+      provider: 'pi',
       baseUrl: 'https://api.example.com',
-    })).toEqual({ providerType: 'pi_compat' });
+    })).toEqual({ providerType: 'pi', piAuthProvider: undefined });
 
     expect(resolveSetupTestConnectionHint({
-      provider: 'anthropic',
+      provider: 'pi',
       baseUrl: '',
-    })).toEqual({ providerType: 'anthropic' });
+    })).toEqual({ providerType: 'pi', piAuthProvider: undefined });
 
     expect(resolveSetupTestConnectionHint({
       provider: 'pi',
@@ -312,7 +244,7 @@ describe('phase4 backend abstraction APIs', () => {
 
   it('testBackendConnection keeps required model argument and validates key presence', async () => {
     const result = await testBackendConnection({
-      provider: 'anthropic',
+      provider: 'pi',
       apiKey: '   ',
       model: 'claude-sonnet-4-6',
       hostRuntime: {
@@ -340,7 +272,7 @@ describe('resolveModelForProvider', () => {
 
 describe('Backend model switching', () => {
   it('setModel updates getModel (regression: setModel used to write config.model but getModel reads _model)', () => {
-    const agent = createBackend(createTestConfig({ provider: 'anthropic', model: 'claude-opus-4-7' }));
+    const agent = createBackend(createTestConfig({ provider: 'pi', model: 'claude-opus-4-7' }));
 
     expect(agent.getModel()).toBe('claude-opus-4-7');
 

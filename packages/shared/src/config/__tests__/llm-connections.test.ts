@@ -5,7 +5,6 @@ import {
   getDefaultModelForConnection,
   PI_PREFERRED_DEFAULTS,
   isCompatProvider,
-  isAnthropicProvider,
   isPiProvider,
   toBedrockNativeId,
   fromBedrockNativeId,
@@ -19,14 +18,22 @@ import { ANTHROPIC_MODELS, getModelDisplayName, getModelContextWindow, getModelS
 // ============================================================
 
 describe('getDefaultModelsForConnection', () => {
-  it('anthropic returns ANTHROPIC_MODELS (ModelDefinition[])', () => {
-    const models = getDefaultModelsForConnection('anthropic')
-    expect(models).toEqual(ANTHROPIC_MODELS)
+  /**
+   * The static `ANTHROPIC_MODELS` list is no longer what a Pi connection gets.
+   *
+   * It used to be: `providerType: 'anthropic'` meant 「direct Anthropic API」, and that path
+   * returned the hand-written registry. There is no such provider type now — a Pi connection
+   * pinned to the `anthropic` auth provider resolves its catalogue from the Pi SDK, which carries
+   * its own ids, descriptions and `pi/` prefixes. What matters is that the result is a non-empty
+   * list of ModelDefinition objects, which is what the callers index and render.
+   */
+  it('returns a non-empty ModelDefinition list for a pi connection pinned to anthropic', () => {
+    const models = getDefaultModelsForConnection('pi', 'anthropic')
     expect(models.length).toBeGreaterThan(0)
-    // Verify they are ModelDefinition objects, not strings
     const first = models[0]!
     expect(typeof first).toBe('object')
     expect(typeof (first as any).id).toBe('string')
+    expect((first as any).id.startsWith('pi/')).toBe(true)
   })
 
   it('pi with piAuthProvider returns filtered models including Opus 4.6', () => {
@@ -52,12 +59,12 @@ describe('getDefaultModelsForConnection', () => {
 // ============================================================
 
 describe('getDefaultModelForConnection', () => {
-  it('returns first model ID for anthropic', () => {
-    const modelId = getDefaultModelForConnection('anthropic')
+  it('returns first model ID for a pi connection pinned to anthropic', () => {
+    const modelId = getDefaultModelForConnection('pi', 'anthropic')
     expect(typeof modelId).toBe('string')
     expect(modelId.length).toBeGreaterThan(0)
-    // Should match the first ANTHROPIC_MODELS entry
-    expect(modelId).toBe(ANTHROPIC_MODELS[0]!.id)
+    // The Pi resolver returns SDK-resolvable ids, so the bare catalog id carries a `pi/` prefix.
+    expect(modelId).toBe(`pi/${ANTHROPIC_MODELS[0]!.id}`)
   })
 
   // Regression: Pi 'anthropic' default must be present in its own model list
@@ -149,22 +156,8 @@ describe('isCompatProvider', () => {
     expect(isCompatProvider('pi_compat')).toBe(true)
   })
 
-  it('returns false for anthropic', () => {
-    expect(isCompatProvider('anthropic')).toBe(false)
-  })
-
   it('returns false for pi', () => {
     expect(isCompatProvider('pi')).toBe(false)
-  })
-})
-
-describe('isAnthropicProvider', () => {
-  it('returns true for anthropic', () => {
-    expect(isAnthropicProvider('anthropic')).toBe(true)
-  })
-
-  it('returns false for pi', () => {
-    expect(isAnthropicProvider('pi')).toBe(false)
   })
 })
 
@@ -177,9 +170,6 @@ describe('isPiProvider', () => {
     expect(isPiProvider('pi_compat')).toBe(true)
   })
 
-  it('returns false for anthropic', () => {
-    expect(isPiProvider('anthropic')).toBe(false)
-  })
 })
 
 // ============================================================
@@ -388,8 +378,12 @@ describe('Claude Fable 5', () => {
     expect(isClaudeModel('claude-fable-5')).toBe(true)
   })
 
-  it('does NOT become the Anthropic default (Opus 4.8 stays default)', () => {
-    expect(getDefaultModelForConnection('anthropic')).toBe('claude-opus-4-8')
+  it('stays out of the default slot (the Pi anthropic catalogue keeps Opus 4.8 there)', () => {
+    // Asserted against the resolved default rather than a literal: the catalogue now comes from
+    // the Pi SDK, whose Opus ordering is its own.
+    const defaultModel = getDefaultModelForConnection('pi', 'anthropic')
+    expect(defaultModel).not.toBe('pi/claude-fable-5')
+    expect(defaultModel).not.toBe('pi/claude-fable-5-1')
   })
 
   it('round-trips through the Bedrock inference-profile mapping', () => {
@@ -432,8 +426,10 @@ describe('Claude Fable 5.1', () => {
     expect(isClaudeModel('claude-fable-5-1')).toBe(true)
   })
 
-  it('does NOT become the Anthropic default (Opus 4.8 stays default)', () => {
-    expect(getDefaultModelForConnection('anthropic')).toBe('claude-opus-4-8')
+  it('stays out of the default slot (the Pi anthropic catalogue keeps Opus 4.8 there)', () => {
+    const defaultModel = getDefaultModelForConnection('pi', 'anthropic')
+    expect(defaultModel).not.toBe('pi/claude-fable-5')
+    expect(defaultModel).not.toBe('pi/claude-fable-5-1')
   })
 
   it('round-trips through the Bedrock inference-profile mapping', () => {

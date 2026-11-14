@@ -91,16 +91,16 @@ describe('buildRestartRequiredSignature', () => {
     expect(after).toBe(before)
   })
 
-  it('ignores baseUrl for non-compat providers (Anthropic-native has no endpoint to drift)', () => {
-    const anthropic: LlmConnection = {
+  it('ignores baseUrl for non-compat providers (`pi` has no endpoint to drift)', () => {
+    const piConnection: LlmConnection = {
       ...baseCompat,
-      providerType: 'anthropic',
+      providerType: 'pi',
       baseUrl: 'http://127.0.0.1:1111/v1',
     }
-    const sigA = buildRestartRequiredSignature({ ...restartInput(), connection: anthropic })
+    const sigA = buildRestartRequiredSignature({ ...restartInput(), connection: piConnection })
     const sigB = buildRestartRequiredSignature({
       ...restartInput(),
-      connection: { ...anthropic, baseUrl: 'http://127.0.0.1:2222/v1' },
+      connection: { ...piConnection, baseUrl: 'http://127.0.0.1:2222/v1' },
     })
 
     expect(sigB).toBe(sigA)

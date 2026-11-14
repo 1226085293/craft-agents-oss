@@ -2012,26 +2012,17 @@ function withUpdatedModelEntry(
   nextId: string,
 ): ModelDefinition | string {
   if (typeof entry === 'string') {
-    if (connection.providerType === 'anthropic' && nextId === OPUS_DEFAULT_ID) {
-      return { ...getModelById(OPUS_DEFAULT_ID)! };
-    }
     return nextId;
   }
 
   const nextEntry: ModelDefinition = { ...entry, id: nextId };
-  if (connection.providerType === 'anthropic' && nextId === OPUS_DEFAULT_ID) {
-    return { ...getModelById(OPUS_DEFAULT_ID)! };
-  }
   if (nextEntry.name && /Opus 4\.[56]/.test(nextEntry.name)) {
     nextEntry.name = displayNameForMigratedModel(nextId);
   }
   return nextEntry;
 }
 
-function modelEntryForDefault(connection: LlmConnection, modelId: string): ModelDefinition | string {
-  if (connection.providerType === 'anthropic' && modelId === OPUS_DEFAULT_ID) {
-    return { ...getModelById(OPUS_DEFAULT_ID)! };
-  }
+function modelEntryForDefault(_connection: LlmConnection, modelId: string): ModelDefinition | string {
   return modelId;
 }
 
@@ -2045,16 +2036,10 @@ function migrateLegacyOpusToDefaultOpus(config: StoredConfig): boolean {
   let changed = false;
 
   for (const connection of config.llmConnections) {
-    if (connection.providerType !== 'anthropic' && connection.providerType !== 'pi') continue;
+    if (connection.providerType !== 'pi') continue;
 
     if (connection.defaultModel) {
       let normalizedDefault = normalizeConnectionModelId(connection, connection.defaultModel);
-      // The previous direct-Anthropic default was Opus 4.7. Move existing
-      // direct-Anthropic defaults to Opus 4.8 while keeping 4.7 in the model list.
-      // Pi stays on 4.7 until the current Pi catalog exposes 4.8.
-      if (connection.providerType === 'anthropic' && normalizedDefault === OPUS_FALLBACK_ID) {
-        normalizedDefault = OPUS_DEFAULT_ID;
-      }
       if (normalizedDefault !== connection.defaultModel) {
         connection.defaultModel = normalizedDefault;
         changed = true;
@@ -2092,131 +2077,6 @@ function migrateLegacyOpusToDefaultOpus(config: StoredConfig): boolean {
       if (connectionModelsChanged) {
         connection.models = nextModels;
         changed = true;
-      }
-    }
-  }
-
-  return changed;
-}
-
-/**
- * Restore claude-opus-4-6 to direct Anthropic connections that were previously
- * force-migrated to 4.8 and no longer list 4.6. Runs once per user (tracked via
- * config.migrationsApplied). Never touches `defaultModel` — users keep whatever
- * default they had, and can switch models themselves.
- *
- * The marker is versioned ("-2") because the pre-4.8 restore already consumed
- * 'opus-4-6-restored' in long-time users' configs; this restore must fire
- * again after the 4.8-era removal.
- *
- * TODO(opus-4.6-sunset): drop this call and the function when 4.6 is deprecated.
- */
-function restoreOpus46ToAnthropicConnections(config: StoredConfig): boolean {
-  const OPUS_46_ID = 'claude-opus-4-6';
-  const MARKER = 'opus-4-6-restored-2';
-  const alreadyRan = config.migrationsApplied?.includes(MARKER) ?? false;
-
-  // Anthropic connection.models entries are stored as full ModelDefinition
-  // objects (via backfillAllConnectionModels). The model picker reads
-  // model.name and falls back to the raw ID for bare strings, so we must
-  // push the object form to render as "Opus 4.6".
-  const opus46Model = getModelById(OPUS_46_ID);
-  if (!opus46Model) {
-    // Defensive — 4.6 is registered in this same PR, should never happen.
-    if (!alreadyRan) {
-      config.migrationsApplied = [...(config.migrationsApplied ?? []), MARKER];
-      return true;
-    }
-    return false;
-  }
-
-  let changed = false;
-
-  for (const connection of config.llmConnections ?? []) {
-    if (connection.providerType !== 'anthropic') continue;
-    if (!Array.isArray(connection.models) || connection.models.length === 0) continue;
-
-    // Idempotent shape repair: normalize any bare-string 'claude-opus-4-6'
-    // entry to the ModelDefinition object form. Runs regardless of the
-    // one-shot marker because it's a display-shape fix, not a new entry.
-    for (let i = 0; i < connection.models.length; i++) {
-      const m = connection.models[i];
-      if (typeof m === 'string' && m === OPUS_46_ID) {
-        connection.models[i] = { ...opus46Model };
-        changed = true;
-      }
-    }
-
-    // One-shot restore: only append 4.6 on the first run for a given user.
-    // A deliberate removal after the marker is set should stick.
-    if (alreadyRan) continue;
-
-    const ids = connection.models.map(m => typeof m === 'string' ? m : m.id);
-    if ((ids.includes(OPUS_DEFAULT_ID) || ids.includes(OPUS_FALLBACK_ID)) && !ids.includes(OPUS_46_ID)) {
-      connection.models.push({ ...opus46Model });
-      changed = true;
-    }
-  }
-
-  // Mark the migration as seen on the first run — even when no connection
-  // was eligible — so subsequent runs don't keep re-checking.
-  if (!alreadyRan) {
-    config.migrationsApplied = [...(config.migrationsApplied ?? []), MARKER];
-    return true;
-  }
-  return changed;
-}
-
-/**
- * Migrate Sonnet 4.5 to Sonnet 4.6 for direct Anthropic connections.
- * Updates stored model IDs and names for direct Anthropic connections.
- */
-function migrateSonnet45ToSonnet46(config: StoredConfig): boolean {
-  if (!config.llmConnections) return false;
-
-  const SONNET_45_ID = 'claude-sonnet-4-5-20250929';
-  const SONNET_46_ID = 'claude-sonnet-4-6';
-
-  let changed = false;
-
-  for (const connection of config.llmConnections) {
-    // Only migrate direct Anthropic connections (not compat/third-party)
-    if (connection.providerType !== 'anthropic') continue;
-
-    // Migrate defaultModel
-    if (connection.defaultModel === SONNET_45_ID) {
-      connection.defaultModel = SONNET_46_ID;
-      changed = true;
-    }
-
-    // Migrate models array
-    if (connection.models && Array.isArray(connection.models)) {
-      const hasNew = connection.models.some(m =>
-        (typeof m === 'string' ? m : m.id) === SONNET_46_ID
-      );
-
-      if (hasNew) {
-        // New model already exists — just remove the old entry to avoid duplicates
-        const before = connection.models.length;
-        connection.models = connection.models.filter(m =>
-          (typeof m === 'string' ? m : m.id) !== SONNET_45_ID
-        );
-        if (connection.models.length !== before) changed = true;
-      } else {
-        // New model doesn't exist — rename the old entry in place
-        for (let i = 0; i < connection.models.length; i++) {
-          const model = connection.models[i];
-          if (typeof model === 'string' && model === SONNET_45_ID) {
-            connection.models[i] = SONNET_46_ID;
-            changed = true;
-          } else if (typeof model === 'object' && model.id === SONNET_45_ID) {
-            model.id = SONNET_46_ID;
-            if (model.name?.includes('4.5')) {
-              model.name = model.name.replace('4.5', '4.6');
-            }
-            changed = true;
-          }
-        }
       }
     }
   }
@@ -2369,16 +2229,13 @@ function migrateModelDefaultsToConnections(config: StoredConfig): boolean {
   if (!configAny.modelDefaults || !config.llmConnections) return false;
   let changed = false;
 
-  // Apply anthropic model default to the default anthropic connection
+  // Apply the legacy `anthropic` model default to the default Pi connection.
   if (configAny.modelDefaults.anthropic) {
     const defaultSlug = config.defaultLlmConnection;
-    const anthropicConn = config.llmConnections.find(c =>
-      c.slug === defaultSlug && c.providerType === 'anthropic'
-    ) || config.llmConnections.find(c =>
-      c.providerType === 'anthropic'
-    );
-    if (anthropicConn) {
-      anthropicConn.defaultModel = configAny.modelDefaults.anthropic;
+    const target = config.llmConnections.find(c => c.slug === defaultSlug)
+      ?? config.llmConnections[0];
+    if (target) {
+      target.defaultModel = configAny.modelDefaults.anthropic;
       changed = true;
     }
   }
@@ -2490,7 +2347,7 @@ export function migrateLegacyLlmConnectionsConfig(): void {
     if ('model' in config) {
       const legacyModel = configAny.model as string | undefined;
       if (legacyModel) {
-        const provider = getModelProvider(legacyModel) ?? 'anthropic';
+        const provider = getModelProvider(legacyModel) ?? 'pi';
         configAny.modelDefaults = { ...(configAny.modelDefaults ?? {}), [provider]: legacyModel };
       }
       delete configAny.model;
@@ -2526,10 +2383,6 @@ export function migrateLegacyLlmConnectionsConfig(): void {
     }
     // Phase 1f: Migrate legacy/previous Opus workspace defaults → current default Opus
     migrateWorkspaceLegacyOpusToDefaultOpus(config);
-    // Phase 1g: Migrate Sonnet 4.5 → Sonnet 4.6 for direct Anthropic connections
-    if (migrateSonnet45ToSonnet46(config)) {
-      needsSave = true;
-    }
     // Phase 1h: Migrate Sonnet 4.5 → Sonnet 4.6 in workspace default models
     migrateWorkspaceSonnet45ToSonnet46(config);
     // Phase 1j: Migrate legacy provider types (bedrock/vertex/anthropic_compat → pi/pi_compat)
@@ -2540,12 +2393,6 @@ export function migrateLegacyLlmConnectionsConfig(): void {
     // Important for old Bedrock connections: they become Pi+Bedrock first, then can
     // fall back from Opus 4.8 to 4.7 while Pi's catalog lacks 4.8.
     if (migrateLegacyOpusToDefaultOpus(config)) {
-      needsSave = true;
-    }
-    // Phase 1m: Restore Opus 4.6 to direct Anthropic connections that were
-    // previously force-migrated away from it (one-shot, guarded by marker).
-    // TODO(opus-4.6-sunset): drop this call and the function when 4.6 is deprecated.
-    if (restoreOpus46ToAnthropicConnections(config)) {
       needsSave = true;
     }
 
@@ -2585,28 +2432,34 @@ export function migrateLegacyLlmConnectionsConfig(): void {
         createdAt: Date.now(),
       };
     } else if (legacyAuthType === 'api_key') {
-      // Anthropic API Key - check if custom endpoint (compat mode → pi_compat)
-      const hasCustomEndpoint = !!legacyBaseUrl;
-      if (hasCustomEndpoint) {
-        migrated = {
-          slug: 'anthropic-api',
-          name: 'Custom Anthropic-Compatible',
-          providerType: 'pi_compat',
-          authType: 'api_key_with_endpoint',
-          customEndpoint: { api: 'anthropic-messages' },
-          models: getDefaultModelsForConnection('pi_compat'),
-          createdAt: Date.now(),
-        };
-      } else {
-        migrated = {
-          slug: 'anthropic-api',
-          name: 'Anthropic (API Key)',
-          providerType: 'anthropic',
-          authType: 'api_key',
-          models: getDefaultModelsForConnection('anthropic'),
-          createdAt: Date.now(),
-        };
-      }
+      /**
+       * Anthropic API key → Pi.
+       *
+       * Both halves used to produce a connection, and the no-baseUrl half produced
+       * `providerType: 'anthropic'` — a second name for what the Pi subprocess already does.
+       * Without a baseUrl the person was talking to api.anthropic.com, which the Pi driver
+       * reaches by pinning `piAuthProvider: 'anthropic'`; with one they were on a compatible
+       * endpoint, which is `pi_compat`.
+       */
+      migrated = legacyBaseUrl
+        ? {
+            slug: 'anthropic-api',
+            name: 'Custom Anthropic-Compatible',
+            providerType: 'pi_compat',
+            authType: 'api_key_with_endpoint',
+            customEndpoint: { api: 'anthropic-messages' },
+            models: getDefaultModelsForConnection('pi_compat'),
+            createdAt: Date.now(),
+          }
+        : {
+            slug: 'anthropic-api',
+            name: 'Anthropic (API Key)',
+            providerType: 'pi',
+            authType: 'api_key',
+            piAuthProvider: 'anthropic',
+            models: getDefaultModelsForConnection('pi', 'anthropic'),
+            createdAt: Date.now(),
+          };
     }
 
     if (migrated) {
@@ -2641,7 +2494,7 @@ export function migrateLegacyLlmConnectionsConfig(): void {
   delete configAny.model;
 
   if (legacyModel) {
-    const provider = getModelProvider(legacyModel) ?? 'anthropic';
+    const provider = getModelProvider(legacyModel) ?? 'pi';
     configAny.modelDefaults = { ...(configAny.modelDefaults ?? {}), [provider]: legacyModel };
   }
 
@@ -2898,7 +2751,6 @@ export function updateLlmConnection(slug: string, updates: Partial<Omit<LlmConne
     slug: existing.slug,
     name: updates.name ?? existing.name,
     providerType: updates.providerType ?? existing.providerType,
-    type: updates.type ?? existing.type, // Legacy field
     authType: updates.authType ?? existing.authType,
     createdAt: updates.createdAt ?? existing.createdAt,
     // Optional fields from updates or existing

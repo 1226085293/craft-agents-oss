@@ -117,7 +117,7 @@ describe('resolveCustomEndpointSetup', () => {
 describe('createBuiltInConnection seeds midStreamBehavior', () => {
   it("Anthropic API key → 'steer' (busy follow-ups default to guidance)", () => {
     const conn = createBuiltInConnection('anthropic-api')
-    expect(conn.providerType).toBe('anthropic')
+    expect(conn.providerType).toBe('pi')
     expect(conn.midStreamBehavior).toBe('steer')
   })
 

@@ -555,7 +555,8 @@ export interface LlmConnectionSetup {
 }
 
 export interface TestLlmConnectionParams {
-  provider: 'anthropic' | 'pi'
+  /** The one backend. Kept as a field because callers pass it through, not to select a driver. */
+  provider: 'pi'
   apiKey: string
   connectionSlug?: string
   baseUrl?: string

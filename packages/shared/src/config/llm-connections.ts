@@ -39,25 +39,22 @@ export function registerPiModelResolver(resolver: PiModelResolver): void {
 // ============================================================
 
 /**
- * Provider type determines which backend/SDK implementation to use.
+ * Provider type determines how a connection reaches its model endpoint.
  * This is separate from auth mechanism - a provider may support multiple auth types.
  *
- * - 'anthropic': Direct Anthropic API (api.anthropic.com) — uses the Anthropic API
  * - 'pi': Pi unified LLM API (20+ providers via @earendil-works/pi-ai)
- * - 'pi_compat': Pi with custom endpoint (Ollama, self-hosted models, Anthropic-compat endpoints)
+ * - 'pi_compat': Pi with custom endpoint (Ollama, self-hosted models, any compatible API)
  *
- * Legacy values (bedrock, vertex, anthropic_compat) are migrated on startup
- * by migrateLegacyProviderTypes() in storage.ts.
+ * There is one agent backend (Pi). `pi` and `pi_compat` differ only in whether the endpoint is
+ * a known provider or a URL the person typed, and both terminate in the same subprocess.
+ *
+ * 'anthropic' used to be here: a direct api.anthropic.com connection with its own driver. That
+ * driver still spawned the Pi subprocess under the hood, so it was a second name for the same
+ * thing — removed along with its migration path.
  */
 export type LlmProviderType =
-  | 'anthropic'
   | 'pi'
   | 'pi_compat';
-
-/**
- * @deprecated Use LlmProviderType instead. Kept for migration compatibility.
- */
-export type LlmConnectionType = 'anthropic' | 'openai' | 'openai-compat';
 
 /**
  * Authentication mechanism for the connection.
@@ -157,12 +154,6 @@ export interface LlmConnection {
 
   /** Provider type determines backend/SDK implementation */
   providerType: LlmProviderType;
-
-  /**
-   * @deprecated Use providerType instead. Kept for migration compatibility.
-   * Will be removed in a future version.
-   */
-  type?: LlmConnectionType;
 
   /** Custom base URL (required for *_compat providers, optional override for others) */
   baseUrl?: string;
@@ -318,9 +309,7 @@ function findSmallModel(
   // Provider-aware keyword search
   const keywords: string[] = [];
 
-  if (isAnthropicProvider(connection.providerType)) {
-    keywords.push('haiku');
-  } else if (isPiProvider(connection.providerType)) {
+  if (isPiProvider(connection.providerType)) {
     keywords.push('mini', 'flash');
   } else {
     // Aggregator providers (copilot, etc.) — try all common small-model keywords
@@ -431,16 +420,6 @@ export function authTypeRequiresEndpoint(authType: LlmAuthType): boolean {
  */
 export function isCompatProvider(providerType: LlmProviderType): boolean {
   return providerType === 'pi_compat';
-}
-
-/**
- * Check if a provider type uses the Anthropic API.
- * Only direct Anthropic API connections use the Anthropic provider.
- * @param providerType - Provider type to check
- * @returns true if this provider uses the Anthropic SDK
- */
-export function isAnthropicProvider(providerType: LlmProviderType): boolean {
-  return providerType === 'anthropic';
 }
 
 /**
@@ -743,7 +722,6 @@ export function isValidProviderAuthCombination(
   authType: LlmAuthType
 ): boolean {
   const validCombinations: Record<LlmProviderType, LlmAuthType[]> = {
-    anthropic: ['api_key'],
     pi: ['api_key', 'environment', 'none'],
     pi_compat: ['api_key_with_endpoint', 'none'],
   };
@@ -882,24 +860,6 @@ export function normalizeBedrockModelId(
 // ============================================================
 // Migration Helpers
 // ============================================================
-
-/**
- * Migrate legacy connection type to new provider type.
- * Used during config migration.
- *
- * @param legacyType - Legacy LlmConnectionType value
- * @returns New LlmProviderType value
- */
-export function migrateConnectionType(legacyType: LlmConnectionType): LlmProviderType {
-  switch (legacyType) {
-    case 'anthropic':
-      return 'anthropic';
-    case 'openai':
-      return 'pi';
-    case 'openai-compat':
-      return 'pi_compat';
-  }
-}
 
 /**
  * Migrate legacy auth type to new auth type.
@@ -1061,9 +1021,15 @@ export async function resolveAuthEnvVars(
 ): Promise<ResolvedAuthEnvVars> {
   const envVars: Record<string, string> = {};
 
-  // Only Anthropic-SDK-based providers use env var auth
-  // OpenAI (Codex), Copilot, and Pi handle auth internally in their postInit()
-  if (!isAnthropicProvider(connection.providerType)) {
+  /**
+   * Only connections that hand Pi its credential through the environment land here.
+   *
+   * `pi` connections configured with an API key are in that group (Pi reads ANTHROPIC_API_KEY /
+   * ANTHROPIC_BASE_URL for the `anthropic` auth provider). A `pi_compat` connection carries its
+   * endpoint on the record and Pi resolves it from `customEndpoint`, so pushing the gateway's
+   * address into the environment would redirect traffic that is already addressed elsewhere.
+   */
+  if (isCompatProvider(connection.providerType)) {
     return { envVars, success: true };
   }
 
@@ -1104,40 +1070,4 @@ export async function resolveAuthEnvVars(
   }
 
   return { envVars, success: true };
-}
-
-/**
- * Migrate a legacy LlmConnection to the new format.
- * Creates a new connection object with providerType instead of type.
- *
- * @param legacy - Legacy connection with 'type' field
- * @returns Migrated connection with 'providerType' field
- */
-export function migrateLlmConnection(legacy: {
-  slug: string;
-  name: string;
-  type: LlmConnectionType;
-  baseUrl?: string;
-  authType: 'api_key' | 'oauth' | 'none';
-  models?: ModelDefinition[];
-  defaultModel?: string;
-  createdAt: number;
-  lastUsedAt?: number;
-}): LlmConnection {
-  const providerType = migrateConnectionType(legacy.type);
-  const hasCustomEndpoint = !!legacy.baseUrl && legacy.type !== 'anthropic';
-  const authType = migrateAuthType(legacy.authType, hasCustomEndpoint);
-
-  return {
-    slug: legacy.slug,
-    name: legacy.name,
-    providerType,
-    type: legacy.type, // Keep for backwards compatibility
-    baseUrl: legacy.baseUrl,
-    authType,
-    models: legacy.models,
-    defaultModel: legacy.defaultModel,
-    createdAt: legacy.createdAt,
-    lastUsedAt: legacy.lastUsedAt,
-  };
 }

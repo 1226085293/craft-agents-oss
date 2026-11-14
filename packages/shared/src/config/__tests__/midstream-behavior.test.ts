@@ -14,10 +14,6 @@ import {
 // ============================================================
 
 describe('defaultMidStreamBehavior', () => {
-  it("returns 'steer' for anthropic so busy follow-ups default to guidance", () => {
-    expect(defaultMidStreamBehavior('anthropic')).toBe('steer')
-  })
-
   it("returns 'steer' for pi (Pi's native steer is non-destructive)", () => {
     expect(defaultMidStreamBehavior('pi')).toBe('steer')
   })
@@ -28,11 +24,11 @@ describe('defaultMidStreamBehavior', () => {
 })
 
 describe('resolveMidStreamBehavior', () => {
-  const baseAnthropic = { providerType: 'anthropic' as const }
+  const basePiApiKey = { providerType: 'pi' as const }
   const basePi = { providerType: 'pi' as const }
 
   it('returns the explicit value when set to steer', () => {
-    expect(resolveMidStreamBehavior({ ...baseAnthropic, midStreamBehavior: 'steer' })).toBe('steer')
+    expect(resolveMidStreamBehavior({ ...basePiApiKey, midStreamBehavior: 'steer' })).toBe('steer')
   })
 
   it('returns the explicit value when set to queue', () => {
@@ -40,14 +36,14 @@ describe('resolveMidStreamBehavior', () => {
   })
 
   it('falls back to steer when midStreamBehavior is undefined (legacy connection)', () => {
-    expect(resolveMidStreamBehavior(baseAnthropic)).toBe('steer')
+    expect(resolveMidStreamBehavior(basePiApiKey)).toBe('steer')
     expect(resolveMidStreamBehavior(basePi)).toBe('steer')
   })
 
   it('falls back to steer when midStreamBehavior has an unknown value (corrupt config.json)', () => {
-    const corruptAnthropic = { ...baseAnthropic, midStreamBehavior: 'invalid' as never }
+    const corruptPi2 = { ...basePiApiKey, midStreamBehavior: 'invalid' as never }
     const corruptPi = { ...basePi, midStreamBehavior: '' as never }
-    expect(resolveMidStreamBehavior(corruptAnthropic)).toBe('steer')
+    expect(resolveMidStreamBehavior(corruptPi2)).toBe('steer')
     expect(resolveMidStreamBehavior(corruptPi)).toBe('steer')
   })
 })
@@ -134,7 +130,7 @@ describe('updateLlmConnection persists midStreamBehavior', () => {
 
   it("flips midStreamBehavior from 'queue' to 'steer'", () => {
     const { runUpdate, readConnection } = setupConfig([
-      makeConnection({ providerType: 'anthropic', authType: 'api_key', midStreamBehavior: 'queue' }),
+      makeConnection({ providerType: 'pi', authType: 'api_key', midStreamBehavior: 'queue' }),
     ])
     expect(runUpdate('pi-test', { midStreamBehavior: 'steer' })).toBe(true)
     expect(readConnection('pi-test').midStreamBehavior).toBe('steer')

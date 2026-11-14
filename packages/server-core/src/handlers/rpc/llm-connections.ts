@@ -1,5 +1,5 @@
 import { RPC_CHANNELS, type LlmConnectionSetup } from '@craft-agent/shared/protocol'
-import { getLlmConnections, getLlmConnection, addLlmConnection, updateLlmConnection, deleteLlmConnection, getDefaultLlmConnection, setDefaultLlmConnection, touchLlmConnection, isCompatProvider, isAnthropicProvider, getDefaultModelsForConnection, getDefaultModelForConnection, normalizeModelIds, type LlmConnection, type LlmConnectionWithStatus, toBedrockNativeId, deriveBedrockRegionPrefix, recordProbeUsage } from '@craft-agent/shared/config'
+import { getLlmConnections, getLlmConnection, addLlmConnection, updateLlmConnection, deleteLlmConnection, getDefaultLlmConnection, setDefaultLlmConnection, touchLlmConnection, isCompatProvider, getDefaultModelsForConnection, getDefaultModelForConnection, normalizeModelIds, type LlmConnection, type LlmConnectionWithStatus, toBedrockNativeId, deriveBedrockRegionPrefix, recordProbeUsage } from '@craft-agent/shared/config'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { setSetupDeferred } from '@craft-agent/shared/config/storage'
 import {
@@ -101,18 +101,19 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       if (setup.baseUrl !== undefined) {
         updates.baseUrl = setup.baseUrl?.trim() || undefined
 
-        // OAuth connections were removed, so every connection here is API-key based.
-        if (isAnthropicProvider(connection.providerType)) {
-          if (hasConfiguredBaseUrl) {
-            updates.providerType = 'pi_compat'
-            updates.authType = 'api_key_with_endpoint'
-            updates.customEndpoint = { api: 'anthropic-messages' }
-          } else {
-            updates.providerType = 'anthropic'
-            updates.authType = 'api_key'
-            updates.models = getDefaultModelsForConnection('anthropic')
-            updates.defaultModel = getDefaultModelForConnection('anthropic')
-          }
+        // Every connection here is API-key based. A typed endpoint is `pi_compat`; the
+        // provider's own endpoint (no baseUrl) is plain `pi`, which reaches api.anthropic.com
+        // through the Pi driver's `anthropic` auth provider.
+        if (hasConfiguredBaseUrl) {
+          updates.providerType = 'pi_compat'
+          updates.authType = 'api_key_with_endpoint'
+          updates.customEndpoint = { api: 'anthropic-messages' }
+        } else {
+          updates.providerType = 'pi'
+          updates.authType = 'api_key'
+          updates.piAuthProvider = 'anthropic'
+          updates.models = getDefaultModelsForConnection('pi', 'anthropic')
+          updates.defaultModel = getDefaultModelForConnection('pi', 'anthropic')
         }
 
         // Pi API key flow: store baseUrl on the connection (Pi SDK doesn't use it yet,

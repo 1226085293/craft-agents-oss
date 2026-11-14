@@ -13,7 +13,7 @@
  * import { createAgent, type AgentBackend } from '@craft-agent/shared/agent/backend';
  *
  * const agent = createAgent({
- *   provider: 'anthropic',
+ *   provider: 'pi',
  *   workspace: myWorkspace,
  *   model: 'claude-sonnet-4-6',
  * });
@@ -53,7 +53,6 @@ export {
   getAvailableProviders,
   isProviderAvailable,
   // LLM Connection support
-  connectionTypeToProvider,
   connectionAuthTypeToBackendAuthType,
   resolveSessionConnection,
   resolveBackendContext,

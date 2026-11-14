@@ -53,7 +53,7 @@ export function parseTestConnectionError(msg: string): string {
  * Guard against ambiguous Pi custom endpoint tests where no provider routing is selected.
  */
 export function validateSetupTestInput(params: {
-  provider: 'anthropic' | 'pi'
+  provider: 'pi'
   baseUrl?: string
   piAuthProvider?: string
 }): { valid: true } | { valid: false; error: string } {
@@ -139,8 +139,11 @@ export const BUILT_IN_CONNECTION_TEMPLATES: Record<string, {
 }> = {
   'anthropic-api': {
     name: (h) => h ? 'Custom Anthropic-Compatible' : 'Anthropic (API Key)',
-    providerType: (h) => h ? 'pi_compat' : 'anthropic',
+    // Without a custom endpoint this is api.anthropic.com, reached through Pi with the
+    // `anthropic` auth provider — not a separate backend.
+    providerType: (h) => h ? 'pi_compat' : 'pi',
     authType: (h) => h ? 'api_key_with_endpoint' : 'api_key',
+    piAuthProvider: 'anthropic',
   },
   'pi-api-key': {
     name: 'Craft Agents Backend (API Key)',

@@ -22,7 +22,6 @@ export type {
   ApiSetupMethod,
   ApiKeySubmitData,
   LocalModelSubmitData,
-  ProviderSegment,
 } from './apisetup-types'
 export { apiSetupMethodToConnectionTypes } from './apisetup-types'
 

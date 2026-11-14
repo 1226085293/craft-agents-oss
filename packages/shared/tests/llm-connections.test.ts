@@ -106,7 +106,7 @@ describe('getMiniModel()', () => {
   });
 
   it('returns undefined for undefined models', () => {
-    const conn = { providerType: 'anthropic' as LlmProviderType, models: undefined };
+    const conn = { providerType: 'pi' as LlmProviderType, models: undefined };
     expect(getMiniModel(conn)).toBeUndefined();
   });
 

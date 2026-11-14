@@ -21,7 +21,7 @@ function anthropicConnection(overrides: Partial<LlmConnection> = {}): LlmConnect
   return {
     slug: 'anthropic-test',
     name: 'Anthropic Test',
-    providerType: 'anthropic',
+    providerType: 'pi',
     authType: 'api_key',
     baseUrl: 'https://upstream.example.com/v1/messages',
     createdAt: Date.now(),
@@ -142,9 +142,12 @@ describe('resolveAuthEnvVars gateway branch', () => {
     expect(requested).toEqual([connection.slug]);
   });
 
-  it('leaves non-Anthropic providers untouched even with a gateway armed', async () => {
+  it('leaves a compat connection untouched even with a gateway armed', async () => {
     const { manager } = trackingCredentialManager();
-    const connection = anthropicConnection({ providerType: 'pi' } as Partial<LlmConnection>);
+    // `pi_compat` carries its endpoint on the record; Pi resolves it from `customEndpoint`, so
+    // writing the gateway's address into the environment would redirect traffic that is already
+    // addressed elsewhere.
+    const connection = anthropicConnection({ providerType: 'pi_compat' } as Partial<LlmConnection>);
 
     const result = await resolveAuthEnvVars(
       connection,
@@ -153,8 +156,6 @@ describe('resolveAuthEnvVars gateway branch', () => {
       { baseUrl: 'http://127.0.0.1:54321', clientKey: 'sk-client-abc' },
     );
 
-    // The Pi backend handles its own auth; redirecting the SDK env at the
-    // gateway would break it.
     expect(result.success).toBe(true);
     expect(result.envVars).toEqual({});
   });

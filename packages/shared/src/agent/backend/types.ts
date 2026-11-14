@@ -47,10 +47,13 @@ export interface BackendRuntimeUpdate {
 }
 
 /**
- * Provider identifier for AI backends.
- * @deprecated Use ModelProvider from config/models.ts instead
+ * Which backend driver runs the agent.
+ *
+ * There is exactly one: Pi. `ModelProvider` (in `config/models.ts`) is a different axis — it tags
+ * which family a catalog entry belongs to — and the two used to share a type. Keeping them apart
+ * is what lets `MODEL_REGISTRY` keep its `anthropic` family tag while the only driver is `pi`.
  */
-export type AgentProvider = ModelProvider;
+export type AgentProvider = 'pi';
 
 
 // ============================================================

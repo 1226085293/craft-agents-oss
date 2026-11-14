@@ -514,14 +514,13 @@ export class TaskService {
      * Handing the round over is not starting a new one.
      *
      * Three writes describe one round: the trigger claims (`pending:cron:…`), the dispatch takes
-     * that claim over (`pending:dispatch`), and the spawn binds the real session id. Counting the
-     * first two as runs made a per-minute task's `runs` climb by two per round — and `runs` is the
-     * budget's clock (`runs > maxRuns`), so it ran out at half the rounds it promised.
+     * that claim over (`pending:dispatch`), and the spawn binds the real session id. Counting any
+     * of those as a new run made `runs` climb by two per round, and `runs` is the budget's clock
+     * (`runs > maxRuns`) — so a task that promised twelve rounds stopped at six.
+     *
+     * So the only write that counts a run is one that starts from no placeholder at all.
      */
-    const isBind =
-      (!isPlaceholder || !heldLock?.startsWith('pending:')) &&
-      Boolean(heldLock && heldLock.startsWith('pending:'));
-    const isTakeover = isPlaceholder && Boolean(heldLock && heldLock.startsWith('pending:'));
+    const continuesRun = Boolean(heldLock?.startsWith('pending:'));
 
     let next: Task = {
       ...task,
@@ -549,9 +548,7 @@ export class TaskService {
         // silently erased — `rounds` was reset to nothing on the second round of a recurring task,
         // which made every round look like the first one.
         ...task.stats,
-        // `isBind` hands a placeholder to a real session, `isTakeover` hands one placeholder to
-        // another; both continue a run that was already counted.
-        runs: (task.stats?.runs ?? 0) + (isBind || isTakeover ? 0 : 1),
+        runs: (task.stats?.runs ?? 0) + (continuesRun ? 0 : 1),
         activeMs: task.stats?.activeMs ?? 0,
         lastHeartbeatAt: now,
         lockSessionId: sessionId,
@@ -575,7 +572,7 @@ export class TaskService {
     this.save(next);
     this.registerRun(id, sessionId);
     appendJournal(this.root, id, {
-      type: isBind ? 'run_bound' : 'run_started',
+      type: continuesRun && !isPlaceholder ? 'run_bound' : 'run_started',
       at: now,
       data: { sessionId },
     });

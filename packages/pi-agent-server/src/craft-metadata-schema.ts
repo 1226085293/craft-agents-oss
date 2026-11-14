@@ -1,5 +1,9 @@
-const CRAFT_DISPLAY_NAME_KEY = '_displayName';
-const CRAFT_INTENT_KEY = '_intent';
+const CRAFT_DISPLAY_NAME_KEY = 'appDisplayName';
+const CRAFT_INTENT_KEY = 'appIntent';
+
+/** Legacy wire keys from before the 2026-11-10 rename. Stripped only. */
+const LEGACY_DISPLAY_NAME_KEY = '_displayName';
+const LEGACY_INTENT_KEY = '_intent';
 
 const CRAFT_DISPLAY_NAME_SCHEMA = {
   type: 'string',
@@ -25,7 +29,7 @@ function cloneWithDescriptors<T extends object>(value: T): T {
  * Return a Pi tool schema that accepts Craft's root-level metadata fields.
  *
  * Pi validates tool arguments before Craft's pre-tool-use hook can strip
- * `_displayName` / `_intent`. Built-in Pi tools often use strict schemas with
+ * `appDisplayName` / `appIntent`. Built-in Pi tools often use strict schemas with
  * `additionalProperties: false`, so we add those fields as optional root
  * properties at the adapter boundary. Unknown schema shapes are returned
  * unchanged, and upstream-defined metadata properties win if Pi adds them later.
@@ -58,11 +62,11 @@ export function allowCraftMetadataProperties<T>(schema: T): T {
 /** Strip Craft-only metadata before invoking the upstream Pi tool implementation. */
 export function stripCraftMetadata<T>(input: T): T {
   if (!isRecord(input)) return input;
-  if (!(CRAFT_DISPLAY_NAME_KEY in input) && !(CRAFT_INTENT_KEY in input)) return input;
+  const keys = [CRAFT_DISPLAY_NAME_KEY, CRAFT_INTENT_KEY, LEGACY_DISPLAY_NAME_KEY, LEGACY_INTENT_KEY];
+  if (!keys.some((key) => key in input)) return input;
 
   const cleanInput = { ...input };
-  delete cleanInput[CRAFT_DISPLAY_NAME_KEY];
-  delete cleanInput[CRAFT_INTENT_KEY];
+  for (const key of keys) delete cleanInput[key];
 
   return cleanInput as T;
 }
@@ -71,7 +75,7 @@ export function stripCraftMetadata<T>(input: T): T {
  * Normalize args where the model mistakenly prefixed a real payload key with an
  * underscore (`_command` → `command`, `_path` → `path`).
  *
- * Root cause: `_displayName` / `_intent` are the only legitimately
+ * Root cause: `appDisplayName` / `appIntent` are the only legitimately
  * underscore-prefixed fields, and their presence primes some models (notably
  * DeepSeek) to also underscore real parameter names, which the Pi SDK then
  * rejects with "Validation failed for tool ...: command: must have required

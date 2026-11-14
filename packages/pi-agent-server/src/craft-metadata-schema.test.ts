@@ -30,10 +30,10 @@ describe('Craft metadata schema compatibility for Pi tools', () => {
     expect(widened).not.toBe(schema);
     expect(widened.additionalProperties).toBe(false);
     expect(widened.required).toEqual(schema.required);
-    expect(widened.required).not.toContain('_displayName');
-    expect(widened.required).not.toContain('_intent');
-    expect(widened.properties._displayName).toBeDefined();
-    expect(widened.properties._intent).toBeDefined();
+    expect(widened.required).not.toContain('appDisplayName');
+    expect(widened.required).not.toContain('appIntent');
+    expect(widened.properties.appDisplayName).toBeDefined();
+    expect(widened.properties.appIntent).toBeDefined();
     expect(widened.properties.path).toBe(schema.properties.path);
     expect(widened.properties.edits).toBe(schema.properties.edits);
   });
@@ -51,10 +51,10 @@ describe('Craft metadata schema compatibility for Pi tools', () => {
     // `false`; the synthetic-schema test above covers preservation when set).
     const upstream = editTool.parameters as { additionalProperties?: unknown };
     expect(widenedSchema.additionalProperties).toBe(upstream.additionalProperties);
-    expect(widenedSchema.properties._displayName).toBeDefined();
-    expect(widenedSchema.properties._intent).toBeDefined();
-    expect(widenedSchema.required ?? []).not.toContain('_displayName');
-    expect(widenedSchema.required ?? []).not.toContain('_intent');
+    expect(widenedSchema.properties.appDisplayName).toBeDefined();
+    expect(widenedSchema.properties.appIntent).toBeDefined();
+    expect(widenedSchema.required ?? []).not.toContain('appDisplayName');
+    expect(widenedSchema.required ?? []).not.toContain('appIntent');
   });
 
   it('preserves upstream metadata properties if Pi defines them later', () => {
@@ -64,8 +64,8 @@ describe('Craft metadata schema compatibility for Pi tools', () => {
       type: 'object',
       additionalProperties: false,
       properties: {
-        _displayName: upstreamDisplayName,
-        _intent: upstreamIntent,
+        appDisplayName: upstreamDisplayName,
+        appIntent: upstreamIntent,
         path: { type: 'string' },
       },
       required: ['path'],
@@ -73,8 +73,8 @@ describe('Craft metadata schema compatibility for Pi tools', () => {
 
     const widened = allowCraftMetadataProperties(schema);
 
-    expect(widened.properties._displayName).toBe(upstreamDisplayName);
-    expect(widened.properties._intent).toBe(upstreamIntent);
+    expect(widened.properties.appDisplayName).toBe(upstreamDisplayName);
+    expect(widened.properties.appIntent).toBe(upstreamIntent);
   });
 
   it('returns unknown schema shapes unchanged', () => {
@@ -87,8 +87,8 @@ describe('Craft metadata schema compatibility for Pi tools', () => {
 
   it('strips Craft metadata before upstream Pi tool execution', () => {
     const input = {
-      _displayName: 'Edit Lines',
-      _intent: 'Add punctuation',
+      appDisplayName: 'Edit Lines',
+      appIntent: 'Add punctuation',
       path: 'random',
       edits: [{ oldText: 'a', newText: 'b' }],
     };
@@ -99,10 +99,10 @@ describe('Craft metadata schema compatibility for Pi tools', () => {
       path: 'random',
       edits: [{ oldText: 'a', newText: 'b' }],
     });
-    expect(clean).not.toHaveProperty('_displayName');
-    expect(clean).not.toHaveProperty('_intent');
-    expect(input).toHaveProperty('_displayName', 'Edit Lines');
-    expect(input).toHaveProperty('_intent', 'Add punctuation');
+    expect(clean).not.toHaveProperty('appDisplayName');
+    expect(clean).not.toHaveProperty('appIntent');
+    expect(input).toHaveProperty('appDisplayName', 'Edit Lines');
+    expect(input).toHaveProperty('appIntent', 'Add punctuation');
   });
 
   it('normalizes underscore-prefixed real params (command -> _command) before validation', () => {
@@ -115,7 +115,7 @@ describe('Craft metadata schema compatibility for Pi tools', () => {
       required: ['command'],
     };
 
-    const args = { _command: 'ls -la', _displayName: 'List', _intent: 'List files', timeout: 5 };
+    const args = { _command: 'ls -la', appDisplayName: 'List', appIntent: 'List files', timeout: 5 };
     const normalized = normalizeUnderscorePrefixedArgs(
       args as unknown as Record<string, unknown>,
       schema as { properties: Record<string, unknown> },
@@ -123,15 +123,15 @@ describe('Craft metadata schema compatibility for Pi tools', () => {
 
     expect(normalized).toEqual({
       command: 'ls -la',
-      _displayName: 'List',
-      _intent: 'List files',
+      appDisplayName: 'List',
+      appIntent: 'List files',
       timeout: 5,
     });
   });
 
   it('leaves args untouched when there is no underscore-prefixed param', () => {
     const schema = { properties: { command: { type: 'string' } } };
-    const args = { command: 'ls -la', _displayName: 'List', _intent: 'List' };
+    const args = { command: 'ls -la', appDisplayName: 'List', appIntent: 'List' };
     const normalized = normalizeUnderscorePrefixedArgs(args as unknown as Record<string, unknown>, schema as { properties: Record<string, unknown> });
     expect(normalized).toBe(args);
   });

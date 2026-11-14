@@ -1,11 +1,15 @@
 /**
- * Events navigator column, "listeners" section.
+ * Events navigator column, "listeners" section — the plugin list.
  *
- * Cards list every listener package found under `<workspace>/events/`, its
- * state, and how many events it produced. Picking one opens the detail page
- * (manifest, config, dependencies, setup). The ingest endpoint used to live
- * here; it moved to the detail page of any listener so the header stays about
- * listeners.
+ * Cards list every plugin found under `<workspace>/events/`, its light, and
+ * its state. Picking one opens the detail page (intro, config, dependencies).
+ *
+ * No section header of its own: the navigator's PanelHeader already prints the
+ * title (插件) with the refresh action on the SAME row, and a second title row
+ * only ate vertical space (it was the "two-line header" the plugin list kept
+ * showing). The refresh button no longer floats over the list or owns a row —
+ * it lives in the header row next to the title, and the panel registers its
+ * reload function there via `refreshRef`.
  *
  * Selection follows the EntityRow grammar (faint wash + left accent rule) so
  * the three event pages read like the rest of the app.
@@ -21,12 +25,13 @@ import {
   MessageCircle,
   MessagesSquare,
   Plus,
-  RefreshCw,
   Send,
   Terminal,
   Webhook,
   type LucideIcon,
 } from 'lucide-react'
+import type { ListenerDto } from '@craft-agent/shared/protocol/dto'
+import { ListenerStatusLight } from './ListenerStatusLight'
 
 /**
  * Manifest icon name → component.
@@ -49,60 +54,25 @@ export function PluginIcon({ name, className }: { name?: string; className?: str
   const Icon = (name && ICONS[name]) || Blocks
   return <Icon className={className} />
 }
-import type { ListenerDto } from '@craft-agent/shared/protocol/dto'
 
 export interface EventsListenersPanelProps {
   workspaceId: string
   selectedListenerId: string | null
   onSelectListener: (listenerId: string) => void
+  /**
+   * The navigator's title row owns the refresh affordance: the panel
+   * registers its reload there, so the header's icon button and the card
+   * list share one source of truth instead of a second header row.
+   */
+  refreshRef?: React.MutableRefObject<(() => void) | null>
   className?: string
-}
-
-/**
- * Status dot, top-right of each card.
- *
- *   gray   — switched off by the user
- *   green  — enabled and running
- *   amber  — enabled but not working (starting, unresponsive, or failed)
- *
- * A plugin that fails to start is NOT auto-disabled: giving up after the retry
- * budget keeps `enabled` true, so it keeps reading as amber rather than gray.
- * Gray must mean "I turned this off", never "it broke".
- */
-function StatusDot({ listener }: { listener: ListenerDto }): React.ReactElement {
-  const state = listener.status.state
-  const tone = !listener.enabled || (listener.status.state === 'stopped' && !listener.enabled)
-    ? 'off'
-    : state === 'running'
-      ? 'ok'
-      : 'bad'
-
-  const className =
-    tone === 'ok'
-      ? 'bg-emerald-500'
-      : tone === 'bad'
-        ? 'bg-amber-500'
-        : 'bg-muted-foreground/30'
-
-  const title = !listener.enabled
-    ? '已停用'
-    : state === 'running'
-      ? '运行中'
-      : state === 'starting'
-        ? '启动中'
-        : state === 'degraded'
-          ? '无响应'
-          : state === 'failed'
-            ? '启动失败'
-            : '已停止'
-
-  return <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${className}`} title={title} aria-label={title} />
 }
 
 export function EventsListenersPanel({
   workspaceId,
   selectedListenerId,
   onSelectListener,
+  refreshRef,
   className,
 }: EventsListenersPanelProps): React.ReactElement {
   const [listeners, setListeners] = React.useState<ListenerDto[]>([])
@@ -135,6 +105,19 @@ export function EventsListenersPanel({
     void load()
   }, [load])
 
+  // The header row's refresh button calls this — one reload function, two
+  // owners (the panel and the PanelHeader icon), so the button is never its
+  // own line again.
+  React.useEffect(() => {
+    if (!refreshRef) return
+    refreshRef.current = () => {
+      void load()
+    }
+    return () => {
+      refreshRef.current = null
+    }
+  }, [load, refreshRef])
+
   const startupReport = React.useMemo(() => {
     if (listeners.length === 0) return null
     return buildStartupReport(
@@ -150,6 +133,8 @@ export function EventsListenersPanel({
     )
   }, [listeners])
 
+  // The process side of the lights: start / running / degraded / failed /
+  // stop events flip the card's dot without a reload.
   React.useEffect(() => {
     if (!workspaceId) return
     // Remember which plugins we have already warned about, so a restart loop
@@ -158,7 +143,7 @@ export function EventsListenersPanel({
     const off = window.electronAPI.onEventListenerStatus((wsId, status) => {
       if (wsId !== workspaceId) return
       setListeners((prev) =>
-        prev.map((listener) => (listener.id === status.id ? { ...listener, status, enabled: status.state !== 'stopped' || listener.enabled } : listener)),
+        prev.map((listener) => (listener.id === status.id ? { ...listener, status } : listener)),
       )
 
       // A plugin that fails to start is still enabled — Craft does not silently
@@ -178,22 +163,26 @@ export function EventsListenersPanel({
     }
   }, [workspaceId])
 
+  // The on-disk side: the detail page toggling the enable switch, saving
+  // config, or installing a dependency changes facts a status event cannot
+  // carry. The server pushes listener-changed; re-reading the list (cheap,
+  // probe-free) keeps every card's light and chip on what is true now.
+  React.useEffect(() => {
+    if (!workspaceId) return
+    const off = window.electronAPI.onEventListenerChanged((wsId) => {
+      if (wsId !== workspaceId) return
+      void load()
+    })
+    return () => {
+      if (typeof off === 'function') off()
+    }
+  }, [workspaceId, load])
+
   return (
     <div className={className ? `flex flex-col h-full ${className}` : 'flex flex-col h-full'}>
-      {/* No section header: the navigator already says 插件, and a second
-          title row only ate vertical space. Refresh floats over the list. */}
-      <div className="relative flex-1 min-h-0">
-        <button
-          type="button"
-          onClick={() => void load()}
-          className="absolute right-3 top-2.5 z-10 h-6 w-6 inline-flex items-center justify-center rounded-md bg-background/80 backdrop-blur hover:bg-foreground/5 text-muted-foreground hover:text-foreground"
-          title="刷新"
-        >
-          <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
-        </button>
-
-        <div className="h-full overflow-y-auto p-2 space-y-1.5">
+      <div className={`flex-1 overflow-y-auto p-2 space-y-1.5 ${loading ? 'opacity-60' : ''}`} aria-busy={loading}>
         {error && <div className="px-1 py-2 text-xs text-destructive">{error}</div>}
+
         {/* Why something is not running, before the list: the same sentence the
             host logs at boot, so the two never disagree. */}
         {!error && startupReport && startupReport.reasons.length > 0 && (
@@ -217,7 +206,7 @@ export function EventsListenersPanel({
             <Plus className="h-7 w-7 opacity-70" />
             <p className="text-sm">还没有插件</p>
             <p className="text-xs opacity-70 leading-relaxed">
-              把一个插件目录放进 <code className="font-mono">&lt;workspace&gt;/events/&lt;id&gt;/</code>，
+              在 <code className="font-mono">&lt;workspace&gt;/events/&lt;id&gt;/manifest.json</code> 放一个清单，
               这里就会出现卡片
             </p>
           </div>
@@ -237,16 +226,18 @@ export function EventsListenersPanel({
                   : 'border-border/60 hover:bg-foreground/2 hover:border-border'
               }`}
             >
-              <div className="flex items-center gap-2 pr-3">
+              <div className="flex items-center gap-2">
+                {/* The manifest's icon name, resolved to a component. Kept from
+                    the single-icon pass: a plugin that declares no icon falls
+                    back to the neutral block rather than rendering nothing. */}
                 <PluginIcon name={listener.icon} className="h-4 w-4 shrink-0 text-muted-foreground" />
-                <span className="text-sm font-medium truncate">{listener.name}</span>
+                <span className="text-sm font-medium truncate flex-1 min-w-0">{listener.name}</span>
                 <span className="text-[11px] text-muted-foreground shrink-0 tabular-nums">
                   v{listener.version}
                 </span>
+                {/* One shared mapping with the detail page title bar. */}
+                <ListenerStatusLight listener={listener} />
               </div>
-              <span className="absolute right-2.5 top-2.5">
-                <StatusDot listener={listener} />
-              </span>
               {listener.description && (
                 <p className="text-[12px] leading-4 text-foreground/55 line-clamp-2 mt-1">
                   {listener.description}
@@ -269,7 +260,6 @@ export function EventsListenersPanel({
             </button>
           )
         })}
-        </div>
       </div>
     </div>
   )

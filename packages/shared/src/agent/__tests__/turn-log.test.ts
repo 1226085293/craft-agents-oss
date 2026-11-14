@@ -275,6 +275,33 @@ describe('writeTurnLogs', () => {
     expect(writeTurnLogs(dir, [])).toBe(0)
     expect(existsSync(join(dir, 'turns'))).toBe(false)
   })
+
+  // Regression: 261110-brave-titanium archived ONE turn three times
+  // (`2026-11-10T08-28-29-{002,005,010}.md`) because the trailing index is a
+  // window-relative ordinal over the rotating progress ledger — when the window
+  // shifted, the same turn was rebuilt with a different index and `existsSync`
+  // on the full name missed it. Identity is the turn START, not the name.
+  it('does not re-archive a turn whose window index changed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-turnlog-'))
+    dirs.push(dir)
+    expect(writeTurnLogs(dir, [sampleTurn()])).toBe(1)
+    const before = readFileSync(join(dir, 'turns', '2026-10-16T09-30-51-005.md'), 'utf8')
+
+    // Same turn, later re-run of the archiver with a shifted window → index 12.
+    expect(writeTurnLogs(dir, [{ ...sampleTurn(), turnIndex: 12 }])).toBe(0)
+    expect(readdirSync(join(dir, 'turns'))).toEqual(['2026-10-16T09-30-51-005.md'])
+    expect(readFileSync(join(dir, 'turns', '2026-10-16T09-30-51-005.md'), 'utf8')).toBe(before)
+
+    // A genuinely new turn in the same run is still written, with its own index.
+    expect(writeTurnLogs(dir, [
+      { ...sampleTurn(), turnIndex: 12 },
+      { ...sampleTurn(), turnIndex: 13, turnStartIso: '2026-10-16T09-40-00.000Z' },
+    ])).toBe(1)
+    expect(readdirSync(join(dir, 'turns')).sort()).toEqual([
+      '2026-10-16T09-30-51-005.md',
+      '2026-10-16T09-40-00-013.md',
+    ])
+  })
 })
 
 /**

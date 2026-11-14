@@ -25,37 +25,67 @@ import type {
   TimeBucket,
 } from './types'
 
-/** Live gateway status, refreshed by the server's 2s push. */
-export function useGatewayStatus(): GatewayStatus | null {
+/**
+ * Live gateway status, refreshed by the server's 2s push.
+ *
+ * `enabled: false` skips the RPC and the push subscription entirely — a caller
+ * that already owns a status (or passes one down to `useKeyStates`) must not
+ * open a second listener, or every push renders the page twice.
+ */
+export function useGatewayStatus(enabled = true): GatewayStatus | null {
   const [status, setStatus] = React.useState<GatewayStatus | null>(null)
+  // The push fires every 2s whether or not anything moved. Keeping the previous
+  // object when the payload is identical stops an idle gateway from
+  // re-rendering the whole page (and, in the log view, re-measuring the table)
+  // twice a second for nothing.
+  const signature = React.useRef('')
+
+  const apply = React.useCallback((s: GatewayStatus): void => {
+    let sig: string
+    try {
+      sig = JSON.stringify(s)
+    } catch {
+      sig = ''
+    }
+    if (sig && sig === signature.current) return
+    signature.current = sig
+    setStatus(s)
+  }, [])
 
   React.useEffect(() => {
+    if (!enabled) return
     let cancelled = false
     void window.electronAPI.llmGatewayGetStatus?.().then((s) => {
-      if (!cancelled && s) setStatus(s as GatewayStatus)
+      if (!cancelled && s) apply(s as GatewayStatus)
     })
 
     // Without this the cooldown counters would freeze at the initial fetch.
     const off = window.electronAPI.onLlmGatewayStatus?.((s: unknown) => {
-      if (!cancelled) setStatus(s as GatewayStatus)
+      if (!cancelled) apply(s as GatewayStatus)
     })
     return () => {
       cancelled = true
       off?.()
     }
-  }, [])
+  }, [enabled, apply])
 
   return status
 }
 
-/** Per-key live state, flattened out of the status push. */
-export function useKeyStates(): Map<string, LlmKeyStateShape> {
-  const status = useGatewayStatus()
+/**
+ * Per-key live state, flattened out of the status push.
+ *
+ * Pass the status the caller already holds: this used to subscribe on its own,
+ * so the settings page ran two listeners and rendered twice per push.
+ */
+export function useKeyStates(status?: GatewayStatus | null): Map<string, LlmKeyStateShape> {
+  const own = useGatewayStatus(status === undefined)
+  const source = status === undefined ? own : status
   return React.useMemo(() => {
     const m = new Map<string, LlmKeyStateShape>()
-    status?.keyStates?.forEach((k) => m.set(`${k.provider}/${k.keyId}`, k))
+    source?.keyStates?.forEach((k) => m.set(`${k.provider}/${k.keyId}`, k))
     return m
-  }, [status])
+  }, [source])
 }
 
 /** The whole gateway config, with a reload trigger for after writes. */

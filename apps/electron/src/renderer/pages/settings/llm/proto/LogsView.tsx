@@ -20,7 +20,17 @@ import { allKinds, kindLabel } from '@craft-agent/shared/config/model-request-ki
 import type { ProtoLogRow, ProtoProvider, ProtoStrategy } from './viewmodel'
 import { Badge, fmt } from './atoms'
 import { useProtoShell } from './state'
-import { columnLimits, displayWidths, fillerWidth, HARD_MAX, HARD_MIN } from './logWidths'
+import {
+  columnLimits,
+  displayWidths,
+  fillerWidth,
+  HARD_MAX,
+  HARD_MIN,
+  letterSpacingWidth,
+  monoTextWidth,
+  reconcileWidths,
+  WIDTH_RULE_VERSION,
+} from './logWidths'
 import type { ColumnMetrics, WidthLimits } from './logWidths'
 import { DEFAULT_FILTER, filterLogs, logLevel, normalizeLevel } from './logFilters'
 import type { LogsFilter } from './logFilters'
@@ -34,6 +44,23 @@ export type { LogsFilter }
 const COLUMNS_KEY = 'llm-proto.log-columns'
 const TOUCHED_KEY = 'llm-proto.log-widths-touched'
 const WIDTHS_KEY = 'llm-proto.log-widths'
+const RULE_VERSION_KEY = 'llm-proto.log-widths-rule'
+
+/**
+ * Whether persisted widths were derived by the current measurement rules.
+ *
+ * Read before the width state initialises, and false when nothing was stored:
+ * a first visit has no widths to invalidate.
+ */
+function widthsFromCurrentRule(): boolean {
+  try {
+    const raw = localStorage.getItem(RULE_VERSION_KEY)
+    if (raw === null) return false
+    return Number(raw) === WIDTH_RULE_VERSION
+  } catch {
+    return false
+  }
+}
 
 /** Horizontal padding (8px each side) plus the 1px cell border plus slack. */
 const CELL_PAD = 20
@@ -72,30 +99,49 @@ function codeText(r: LlmUsageRecord): string {
 }
 
 /**
- * Min = the column's shortest value (never below its header, or the title would
- * be truncated), max = its longest value. Measured with canvas instead of the
- * DOM: a 5000-row page would otherwise need 50k layout reads.
+ * Bounds for every column, measured with canvas instead of the DOM (a 5000-row
+ * table would otherwise need 50k layout reads).
+ *
+ * `fit` comes from all rows: the default width should hold the widest value the
+ * table contains, not just whatever happens to be on screen.
+ *
+ * `min` comes from `visibleRows` only — the rows the reader can actually see.
+ * Taking it from the whole history was the bug behind "the minimum width is
+ * narrower than the text": `min` is the floor of the drag, and a floor derived
+ * from a row on page 300 (a short provider name, a short model) let the column
+ * shrink to a width at which every row on the current page is truncated — model
+ * measured 119px against a visible-page shortest of 238px, so the whole column
+ * elided at its own minimum. The floor only has to guarantee what is on screen.
  */
 function measureLimits(
   rows: ReadonlyArray<LlmUsageRecord>,
+  visibleRows: ReadonlyArray<LlmUsageRecord>,
   providerName: (id: string) => string,
   keyLabel: (id: string) => string,
 ): Record<ColumnId, WidthLimits> {
   const canvas = document.createElement('canvas').getContext('2d')
   const out = {} as Record<ColumnId, WidthLimits>
-  const textFor = (c: (typeof COLUMNS)[number], r: LlmUsageRecord): string => {
+  /**
+   * The text a cell shows, or `null` when it shows a placeholder dash.
+   *
+   * Placeholders are reported as absent rather than as `'—'` so they cannot
+   * define the column minimum: 45% of usage rows carry no key, and a 6px dash
+   * dragged the Key column down to the 40px floor where the real values
+   * (`sk-e8F…xR4z`, 68px) were all elided.
+   */
+  const textFor = (c: (typeof COLUMNS)[number], r: LlmUsageRecord): string | null => {
     switch (c.id) {
       case 'time':
         return stamp(r.startedAt ?? r.ts)
       case 'provider':
-        return providerName(r.provider)
+        return r.provider ? providerName(r.provider) : null
       case 'key':
         // Measure what is rendered (the masked key), not the stored id.
-        return r.keyId ? keyLabel(r.keyId) : '—'
+        return r.keyId ? keyLabel(r.keyId) : null
       case 'model':
-        return r.upstreamModel || r.publicModel
+        return r.upstreamModel || r.publicModel || null
       case 'code':
-        // 0 means "no HTTP response" — see `codeText`.
+        // 0 means "no HTTP response" — see `codeText`. Every row has one.
         return codeText(r)
       case 'status':
         // The badge adds its own padding; 30px covers it.
@@ -103,38 +149,190 @@ function measureLimits(
       case 'tokens':
         return `${fmt(r.promptTokens ?? 0)} / ${fmt(r.completionTokens ?? 0)}`
       case 'firstByte':
-        return r.firstByteMs != null ? `${r.firstByteMs}ms` : '—'
+        return r.firstByteMs != null ? `${r.firstByteMs}ms` : null
       case 'dur':
-        return r.totalMs != null ? `${(r.totalMs / 1000).toFixed(1)}s` : '—'
+        return r.totalMs != null ? `${(r.totalMs / 1000).toFixed(1)}s` : null
       case 'session':
-        return r.sessionId ?? '—'
+        return r.sessionId || null
       case 'strategy':
-        return r.strategy ?? '—'
+        return r.strategy || null
       case 'kind':
-        return kindLabel(r.kind)
+        return kindLabel(r.kind) || null
       default:
         return ''
     }
   }
 
+  const typo = cellTypography()
   for (const c of COLUMNS) {
-    const font = c.mono
-      ? '12px Consolas, "Cascadia Mono", monospace'
-      : '13px "Segoe UI", system-ui, sans-serif'
+    // Same font the cell is rendered in: family and size both come from the
+    // stylesheet (--font-mono / --font-sans, --text-xs / --text-md), so a theme
+    // or CSS change cannot leave the measurement drifting from the paint.
+    const font = c.mono ? typo.mono : c.small ? typo.small : typo.body
     if (canvas) canvas.font = font
-    const width = (text: string): number => (canvas ? canvas.measureText(text).width : text.length * 7)
-
-    const header = width(c.label) + CELL_PAD
-    const values: number[] = []
-    for (const r of rows) {
-      const w = width(textFor(c, r))
-      values.push(w + CELL_PAD)
+    // Monospace columns need no per-value measurement: every ASCII glyph has the
+    // same advance, so a value's width depends only on its length. Without this
+    // the 时间 column alone contributed 5000 unique `measureText` calls on every
+    // 3s tail poll (timestamps never repeat). `advanceSpread` disables the
+    // shortcut when the resolved font is not really monospace; `monoTextWidth`
+    // disables it per value for wide glyphs such as 连接失败.
+    const advance = canvas && c.mono ? canvas.measureText('0').width : 0
+    const spread =
+      canvas && c.mono
+        ? Math.max(
+            Math.abs(canvas.measureText('W').width - advance),
+            Math.abs(canvas.measureText('i').width - advance),
+            Math.abs(canvas.measureText('.').width - advance),
+          )
+        : 0
+    // Other columns repeat heavily (provider, status, model, key…), so their
+    // measured widths are memoized per column. Bounded, and cleared when full
+    // rather than frozen: a full memo that stops accepting entries would silently
+    // go back to measuring every value.
+    const memo = widthMemo(c.id)
+    const width = (text: string): number => {
+      // Letter-spacing is not part of a canvas advance (see letterSpacingWidth).
+      const spacing = letterSpacingWidth(text, typo.letterSpacingPx)
+      const mono = monoTextWidth(text, advance, spread)
+      if (mono !== null) return mono + spacing
+      const cached = memo.get(text)
+      if (cached !== undefined) return cached + spacing
+      const w = canvas ? canvas.measureText(text).width : text.length * 7
+      if (memo.size >= WIDTH_MEMO_LIMIT) memo.clear()
+      memo.set(text, w)
+      return w + spacing
     }
-    if (!values.length) values.push(header)
 
-    out[c.id] = columnLimits({ header, values } satisfies ColumnMetrics)
+    // The heading is `.tbl th` at --text-xs in the *sans* family, not in the
+    // column's own font: `Key` is 21px there but only 18px in 11px mono, and the
+    // 40px floor would then cut the title it promises never to truncate. Its own
+    // font means it cannot share the column's memo or its monospace advance.
+    const headerText = c.label
+    const header =
+      (canvas ? measureIn(canvas, typo.header, headerText) : headerText.length * 7) +
+      letterSpacingWidth(headerText, typo.letterSpacingPx) +
+      CELL_PAD
+    const measure = (source: ReadonlyArray<LlmUsageRecord>): Array<number | null> => {
+      const values: Array<number | null> = []
+      for (const r of source) {
+        const text = textFor(c, r)
+        // A placeholder dash is not a value: measuring it would make `min` the
+        // width of a dash (see textFor). Kept in the array so "this column has
+        // no real value at all" still reads as "use the heading" rather than
+        // "no rows".
+        values.push(text === null ? null : width(text) + CELL_PAD)
+      }
+      return values
+    }
+
+    const all = measure(rows)
+    // Same rows unless a filter or a page change moved the window; measuring
+    // twice costs a full pass, so reuse when the sets are identical.
+    const visibleValues = visibleRows === rows ? all : measure(visibleRows)
+    if (!all.length) all.push(header)
+
+    out[c.id] = columnLimits({
+      header,
+      values: all,
+      floorValues: visibleValues.length ? visibleValues : all,
+    } satisfies ColumnMetrics)
   }
   return out
+}
+
+/**
+ * The fonts a cell is actually painted in.
+ *
+ * Hardcoding these was the bug: an `.xs` cell renders at --text-xs (11px), yet
+ * measurement assumed 12px mono / 13px sans, so every bound was off by the ratio
+ * between the two — and an 11px cell measured at 13px still reported a min above
+ * its own text while a 13px cell measured at 12px reported one below. Reading the
+ * resolved values keeps measurement and paint in step, including for themes that
+ * change --font-mono.
+ */
+interface CellTypography {
+  /** Font shorthand for a `.mono` cell. */
+  mono: string
+  /** Font shorthand for an `.xs` cell that is not monospace. */
+  small: string
+  /** Font shorthand for a regular (--text-md) cell. */
+  body: string
+  /** Font shorthand for a heading cell: `.tbl th` is --text-xs at weight 500. */
+  header: string
+  /** Resolved size of `.xs` cells, in px (letter-spacing is em-based). */
+  smallPx: number
+  /** Resolved size of regular cells, in px. */
+  bodyPx: number
+  /** Computed letter-spacing, in px per character, inherited from `.llm-proto`. */
+  letterSpacingPx: number
+}
+
+/* Fallbacks mirror proto.css; they only apply before the page root is mounted. */
+const FALLBACK_TYPOGRAPHY: CellTypography = {
+  mono: '11px ui-monospace, "SF Mono", SFMono-Regular, Consolas, monospace',
+  small: '11px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
+  body: '13px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
+  header: '500 11px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
+  smallPx: 11,
+  bodyPx: 13,
+  // `.llm-proto{letter-spacing:.01em}` at the 13px body size.
+  letterSpacingPx: 0.13,
+}
+
+function px(value: string, fallback: number): number {
+  const n = Number.parseFloat(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function cellTypography(): CellTypography {
+  const root = document.querySelector('.llm-proto')
+  if (!root) return FALLBACK_TYPOGRAPHY
+  const cs = window.getComputedStyle(root)
+  const varOf = (name: string): string => cs.getPropertyValue(name).trim()
+  const sans = varOf('--font-sans') || FALLBACK_TYPOGRAPHY.small.split(' ').slice(1).join(' ')
+  const monoFamily = varOf('--font-mono') || 'ui-monospace, monospace'
+  const smallPx = px(varOf('--text-xs'), FALLBACK_TYPOGRAPHY.smallPx)
+  const bodyPx = px(varOf('--text-md'), FALLBACK_TYPOGRAPHY.bodyPx)
+  // `letter-spacing: .01em` resolves to an absolute px length in computed
+  // style, so it is already per-character — no em conversion, and "normal"
+  // parses to NaN which `px` turns back into the fallback ratio.
+  const spacingPx = px(cs.letterSpacing, Number.NaN)
+  return {
+    mono: `${smallPx}px ${monoFamily}`,
+    small: `${smallPx}px ${sans}`,
+    body: `${bodyPx}px ${sans}`,
+    header: `500 ${smallPx}px ${sans}`,
+    smallPx,
+    bodyPx,
+    letterSpacingPx: Number.isFinite(spacingPx) ? spacingPx : 0,
+  }
+}
+
+/**
+ * `measureText` under a specific font, restoring the context's own font after:
+ * the surrounding loop keeps one font set for the whole column and a measurement
+ * in another font must not leak into it.
+ */
+function measureIn(ctx: CanvasRenderingContext2D, font: string, text: string): number {
+  const prev = ctx.font
+  ctx.font = font
+  const w = ctx.measureText(text).width
+  ctx.font = prev
+  return w
+}
+
+/** Per-column text→width cache, shared across measurements. */
+const widthMemos = new Map<ColumnId, Map<string, number>>()
+/** Bounded so a very long history cannot grow the cache without limit. */
+const WIDTH_MEMO_LIMIT = 20_000
+
+function widthMemo(id: ColumnId): Map<string, number> {
+  let memo = widthMemos.get(id)
+  if (!memo) {
+    memo = new Map()
+    widthMemos.set(id, memo)
+  }
+  return memo
 }
 
 /**
@@ -144,6 +342,10 @@ function measureLimits(
  */
 function readWidths(): Record<ColumnId, number> {
   const out = Object.fromEntries(COLUMNS.map((c) => [c.id, HARD_MIN])) as Record<ColumnId, number>
+  // Stored widths come from the previous rules: they are not user choices and
+  // baking them in would keep the columns at widths this build no longer
+  // measures. Start from the floor and let the rows decide `fit`.
+  if (!widthsFromCurrentRule()) return out
   try {
     const raw = localStorage.getItem(WIDTHS_KEY)
     if (!raw) return out
@@ -222,9 +424,33 @@ export function LogsView(props: Props): React.JSX.Element {
   const [truncated, setTruncated] = React.useState(false)
   const [loading, setLoading] = React.useState(false)
 
-  const providerName = React.useCallback(
-    (id: string): string => props.providers.find((p) => p.id === id)?.name ?? id,
+  // Labels only change when the *config* changes, but `providers` gets a new
+  // array identity on every 2s status push (live key state). Keying on that
+  // identity dragged the 5000-row width measurement along with it, so a push
+  // that changed nothing visible still re-measured the whole table. Memoize on a
+  // cheap signature of the parts the labels actually read.
+  const labelKey = React.useMemo(
+    () =>
+      props.providers
+        .map((p) => `${p.id}\u0000${p.name}\u0000${p.keyRows.map((k) => `${k.id}=${k.key}`).join(',')}`)
+        .join('\u0001'),
     [props.providers],
+  )
+  const labels = React.useMemo(() => {
+    const providerNames = new Map<string, string>()
+    const keyNames = new Map<string, string>()
+    for (const p of props.providers) {
+      providerNames.set(p.id, p.name)
+      for (const k of p.keyRows) if (k.key) keyNames.set(k.id, maskKeyHead(k.key))
+    }
+    return { providerNames, keyNames }
+    // `labelKey` is the identity that matters; `providers` is the *content*
+    // behind it and is deliberately not a dependency (see the comment above).
+  }, [labelKey])
+
+  const providerName = React.useCallback(
+    (id: string): string => labels.providerNames.get(id) ?? id,
+    [labels],
   )
   /**
    * Masked key for a usage row.
@@ -235,16 +461,23 @@ export function LogsView(props: Props): React.JSX.Element {
    * id rather than an empty cell.
    */
   const keyLabel = React.useCallback(
-    (keyId: string): string => {
-      for (const p of props.providers) {
-        const hit = p.keyRows.find((k) => k.id === keyId)
-        if (hit?.key) return maskKeyHead(hit.key)
-      }
-      return keyId
-    },
-    [props.providers],
+    (keyId: string): string => labels.keyNames.get(keyId) ?? keyId,
+    [labels],
   )
-  const limits = React.useMemo(() => measureLimits(rows, providerName, keyLabel), [rows, providerName, keyLabel])
+  // Filtering and paging live here rather than further down because the visible
+  // page is an *input* to the column bounds: `min` is the floor of the drag and
+  // has to keep the rows on screen readable (see measureLimits).
+  const list = React.useMemo(() => filterLogs(rows, f), [rows, f])
+  const pages = Math.max(1, Math.ceil(list.length / pageSize))
+  const cur = Math.min(page, pages)
+  const slice = React.useMemo(
+    () => list.slice((cur - 1) * pageSize, cur * pageSize),
+    [list, cur, pageSize],
+  )
+  const limits = React.useMemo(
+    () => measureLimits(rows, slice, providerName, keyLabel),
+    [rows, slice, providerName, keyLabel],
+  )
   // Requests carry the strategy id; the card should show its name.
   const strategyName = React.useCallback(
     (id: string | undefined): string | null => {
@@ -254,22 +487,14 @@ export function LogsView(props: Props): React.JSX.Element {
     [props.strategies],
   )
 
-  // "First visit" = nothing was stored yet, so start from the content max.
-  // Read once per mount here rather than from a ref: React (StrictMode) mounts
-  // twice in dev and the first mount's own write must not count as a stored
-  // choice on the second one.
-  const [hadStoredWidths] = React.useState(() => {
-    try {
-      return localStorage.getItem(WIDTHS_KEY) !== null
-    } catch {
-      return false
-    }
-  })
-  const firstWidthRun = React.useRef(!hadStoredWidths)
   // Columns the user dragged. Auto-fill must not hand slack back to them (that
   // would undo the drag the moment the pane has room), and the set is persisted
   // because a ref would forget it on reload.
   const [touched, setTouched] = React.useState<ColumnId[]>(() => {
+    // Same reasoning as readWidths: a drag recorded under the old rules referred
+    // to widths those rules computed, so honouring it would pin the column to a
+    // number nobody chose.
+    if (!widthsFromCurrentRule()) return []
     try {
       const raw = localStorage.getItem(TOUCHED_KEY)
       const arr = raw ? (JSON.parse(raw) as unknown) : []
@@ -279,35 +504,27 @@ export function LogsView(props: Props): React.JSX.Element {
     }
   })
 
-  // Keep the stored widths inside the data's range. On the very first visit
-  // (nothing stored) start from the widest content so nothing is truncated.
+  // Reconcile the rendered widths with the data they have to hold.
+  //
+  // A column the user has not dragged always sits at its content width (`fit`).
+  // This table is a tail — a poll every 3s brings new rows, so the widest value
+  // changes on its own. Deciding the width once, on first mount, left every
+  // column pinned to the value measured then: once `min` was computed from a
+  // placeholder dash (see `measureLimits`) the pinned width was narrower than
+  // the text and no amount of new data widened it back, which is exactly what
+  // "the column minimum is smaller than the text" looked like on screen.
+  //
+  // A dragged column keeps the width the user chose, clamped to the range the
+  // current data allows.
   React.useEffect(() => {
-    // Capture the flag OUTSIDE the updater: React (StrictMode) invokes updaters
-    // twice, and mutating a ref inside one makes the second call see "not first
-    // run" and return the old widths.
+    // Before the rows arrive the limits only know the headings, so reconciling
+    // now would throw away the user's widths (a 194px model column collapsing
+    // to its 73px heading floor). Wait for real data.
     if (!rows.length) return
-    const firstRun = firstWidthRun.current
-    firstWidthRun.current = false
-    setWidths((prev) => {
-      // Before the rows arrive the limits only know the headings, so clamping
-      // now would throw away the user's widths (a 194px model column collapsing
-      // to its 73px heading floor). Wait for real data.
-      if (!rows.length) return prev
-      let changed = false
-      const next = { ...prev }
-      for (const c of COLUMNS) {
-        const l = limits[c.id]
-        // Both bounds: max is a hard ceiling, so a stored value past it — e.g.
-        // from an older build — collapses back instead of surviving forever.
-        const target = firstRun ? l.fit : Math.min(l.max, Math.max(l.min, prev[c.id]))
-        if (target !== prev[c.id]) {
-          next[c.id] = target
-          changed = true
-        }
-      }
-      return changed ? next : prev
-    })
-  }, [limits, rows.length])
+    setWidths((prev) =>
+      reconcileWidths({ widths: prev, limits, touched, ids: COLUMNS.map((c) => c.id) }),
+    )
+  }, [limits, rows.length, touched])
 
   // Tag composer
   const [field, setField] = React.useState<UsageTagField | 'strategy'>('any')
@@ -369,6 +586,8 @@ export function LogsView(props: Props): React.JSX.Element {
       localStorage.setItem(COLUMNS_KEY, JSON.stringify(columns))
       localStorage.setItem(WIDTHS_KEY, JSON.stringify(widths))
       localStorage.setItem(TOUCHED_KEY, JSON.stringify(touched))
+      // Stamped only once the widths on disk are the ones this build computed.
+      localStorage.setItem(RULE_VERSION_KEY, String(WIDTH_RULE_VERSION))
     } catch {
       // Preference only.
     }
@@ -397,8 +616,6 @@ export function LogsView(props: Props): React.JSX.Element {
     () => displayWidths({ widths, limits, ids: visibleIds, touched, containerW }),
     [widths, limits, visibleIds, touched, containerW],
   )
-  const list = React.useMemo(() => filterLogs(rows, f), [rows, f])
-
   /**
    * A stable id per row for React keys and for "which row is expanded".
    *
@@ -420,21 +637,26 @@ export function LogsView(props: Props): React.JSX.Element {
     return ids
   }, [rows])
 
-  const pages = Math.max(1, Math.ceil(list.length / pageSize))
-  const cur = Math.min(page, pages)
-  const slice = list.slice((cur - 1) * pageSize, cur * pageSize)
-
   const tableWidth = visible.reduce((sum, c) => sum + display[c.id], 0)
   const spacer = fillerWidth(display, visibleIds, containerW)
 
   // Content that does not fit its column is left-aligned; centred otherwise.
   // Measured after layout because CSS cannot compare content width to the cell.
+  //
+  // Two passes on purpose: `scrollWidth` forces a layout, and interleaving that
+  // read with a class write per cell forced one layout per cell (hundreds of
+  // them on a 10-row table). All reads first, then all writes — one layout.
+  // The key is content-derived rather than `slice` (a fresh array every render),
+  // so an unrelated re-render does not re-run the sweep at all.
+  const pageKey = slice.map((r) => `${r.ts}:${r.statusCode}`).join('|')
   React.useLayoutEffect(() => {
     const cells = document.querySelectorAll<HTMLElement>('.llm-proto table.logtbl td[data-cell]')
+    const overflowing: Array<[HTMLElement, boolean]> = []
     cells.forEach((td) => {
-      td.classList.toggle('over', td.scrollWidth > td.clientWidth + 1)
+      overflowing.push([td, td.scrollWidth > td.clientWidth + 1])
     })
-  }, [slice, widths, columns, f.sort])
+    for (const [td, over] of overflowing) td.classList.toggle('over', over)
+  }, [pageKey, widths, columns, f.sort])
 
 
   const lastDown = React.useRef<{ id: ColumnId | null; t: number }>({ id: null, t: 0 })

@@ -68,7 +68,9 @@ function readKpiConfig(): string[] {
 export default function LlmGatewayPage(): React.JSX.Element {
   const { config, reload } = useLlmConfig()
   const status = useGatewayStatus()
-  const keyStates = useKeyStates()
+  // Same status object the page renders from: subscribing again inside the hook
+  // doubled every 2s push (two listeners → two full re-renders).
+  const keyStates = useKeyStates(status)
   const [range, setRange] = React.useState<TimeBucket>('day')
   const { overview, reload: reloadUsage } = useUsageOverview(range)
 

@@ -7,7 +7,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol';
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config';
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport';
@@ -46,6 +47,8 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.events.STATUS,
   RPC_CHANNELS.events.LIST_LISTENERS,
   RPC_CHANNELS.events.GET_LISTENER,
+  RPC_CHANNELS.events.GET_LISTENER_UI,
+  RPC_CHANNELS.events.GET_LISTENER_LOG,
   RPC_CHANNELS.events.SET_LISTENER_ENABLED,
   RPC_CHANNELS.events.SET_LISTENER_CONFIG,
   RPC_CHANNELS.events.INSTALL_DEPENDENCY,
@@ -97,6 +100,26 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
       { to: 'workspace', workspaceId },
       workspaceId,
       status,
+    );
+  };
+
+  /**
+   * Tell renderers that a listener's on-disk facts changed (enabled flag,
+   * saved config, installed dependency). Process state flows over
+   * LISTENER_STATUS; these are the facts a status event cannot carry, and
+   * the plugin list's lights must not wait for a page reload to see them.
+   */
+  const pushListenerChanged = (
+    workspaceId: string,
+    listenerId: string,
+    reason: 'enabled' | 'config' | 'dependency',
+  ) => {
+    pushTyped(
+      server,
+      RPC_CHANNELS.events.LISTENER_CHANGED,
+      { to: 'workspace', workspaceId },
+      workspaceId,
+      { listenerId, reason },
     );
   };
 
@@ -177,12 +200,66 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
     return listListenersFor(svc, workspace.rootPath, skipProbes ?? true);
   });
 
-  server.handle(RPC_CHANNELS.events.GET_LISTENER, async (_ctx, workspaceId: string, id: string) => {
-    if (!id) throw new Error('id is required');
-    const workspace = requireWorkspace(workspaceId);
-    const svc = await getEventService(workspaceId, workspace.rootPath, undefined);
-    return getListenerFor(svc, workspace.rootPath, id);
-  });
+  server.handle(
+    RPC_CHANNELS.events.GET_LISTENER,
+    async (_ctx, workspaceId: string, id: string) => {
+      if (!id) throw new Error('id is required');
+      const workspace = requireWorkspace(workspaceId);
+      const svc = await getEventService(workspaceId, workspace.rootPath, undefined);
+      return getListenerFor(svc, workspace.rootPath, id);
+    },
+  );
+
+  /**
+   * The plugin's own HTML config UI. The renderer never touches the
+   * filesystem: the document is resolved and read here, confined to the
+   * plugin directory (the manifest already validated the path shape).
+   */
+  server.handle(
+    RPC_CHANNELS.events.GET_LISTENER_UI,
+    async (
+      _ctx,
+      workspaceId: string,
+      id: string,
+    ): Promise<{ html: string | null; source?: 'file' | 'inline' }> => {
+      if (!id) throw new Error('id is required');
+      const workspace = requireWorkspace(workspaceId);
+      const listener = loadListeners({ workspaceRoot: workspace.rootPath, skipProbes: true }).find(
+        (entry) => entry.id === id,
+      );
+      if (!listener) return { html: null };
+      const ui = listener.manifest.ui;
+      if (!ui) return { html: null };
+      if (ui.configHtml) {
+        // The manifest confines the path (relative, plain segments); resolve
+        // is the belt-and-suspenders check before touching the filesystem.
+        const filePath = resolve(join(listener.dir, ui.configHtml));
+        const inside = filePath.startsWith(resolve(listener.dir) + sep);
+        if (!inside || !existsSync(filePath)) return { html: null };
+        try {
+          return { html: readFileSync(filePath, 'utf8'), source: 'file' };
+        } catch {
+          return { html: null };
+        }
+      }
+      return { html: ui.configHtmlInline ?? null, source: 'inline' };
+    },
+  );
+
+  /** Log tail + live process state, without re-running dependency probes. */
+  server.handle(
+    RPC_CHANNELS.events.GET_LISTENER_LOG,
+    async (_ctx, workspaceId: string, id: string) => {
+      if (!id) throw new Error('id is required');
+      const workspace = requireWorkspace(workspaceId);
+      const svc = await getEventService(workspaceId, workspace.rootPath, undefined);
+      const dataDir = join(workspace.rootPath, 'events-data', id);
+      return {
+        logTail: svc.tailListenerLog(id, dataDir),
+        status: svc.supervisorStatus(id),
+      };
+    },
+  );
 
   server.handle(
     RPC_CHANNELS.events.SET_LISTENER_ENABLED,
@@ -191,6 +268,7 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
       const svc = await getEventService(workspaceId, workspace.rootPath, undefined);
       const status = await svc.setListenerEnabled(workspace.rootPath, id, enabled);
       broadcastStatus(workspaceId, status);
+      pushListenerChanged(workspaceId, id, 'enabled');
       return status;
     },
   );
@@ -204,6 +282,7 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
       // as a fallback. `restart` is null when the plugin was not running, in
       // which case the new config simply applies on the next start.
       const restart = await svc.saveListenerConfig(workspace.rootPath, id, config ?? {});
+      pushListenerChanged(workspaceId, id, 'config');
       return { ok: true, restart };
     },
   );
@@ -217,7 +296,9 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
       dependency: { manager: 'pip' | 'npm'; name: string; range: string },
     ): Promise<InstallResult> => {
       requireWorkspace(workspaceId);
-      return runInstallCommand(dependency);
+      const result = await runInstallCommand(dependency);
+      pushListenerChanged(workspaceId, id, 'dependency');
+      return result;
     },
   );
 
@@ -231,7 +312,9 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
     );
     const dep = listener?.manifest.dependencies?.mcp?.find((m) => m.id === mcpId);
     if (!dep) throw new Error(`listener ${id} declares no mcp dependency "${mcpId}"`);
-    return installMcp(workspace.rootPath, dep);
+    const result = await installMcp(workspace.rootPath, dep);
+    pushListenerChanged(workspaceId, id, 'dependency');
+    return result;
   });
 
   server.handle(RPC_CHANNELS.events.LISTENER_DEPS, async (_ctx, workspaceId: string, id: string) => {

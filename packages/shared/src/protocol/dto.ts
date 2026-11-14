@@ -1075,6 +1075,18 @@ export interface ListenerDto {
     }>
     required?: string[]
   }
+  /** Plugin-provided HTML config UI (manifest `ui`), when declared. */
+  ui?: {
+    /** Relative path to an HTML file inside the plugin directory. */
+    configHtml?: string
+    /** Inline HTML document. */
+    configHtmlInline?: string
+  }
   setup: Array<{ text: string; link?: string }>
   logTail?: string
+  /**
+   * Tail of the plugin's own README, fetched for the detail view only.
+   * List rows never pay for it.
+   */
+  readme?: string
 }

@@ -820,6 +820,17 @@ export interface ElectronAPI {
     skipProbes?: boolean
   ): Promise<import('@craft-agent/shared/protocol/dto').ListenerDto[]>
   getEventListener(workspaceId: string, listenerId: string): Promise<import('@craft-agent/shared/protocol/dto').ListenerDto | null>
+  getEventListenerUi(
+    workspaceId: string,
+    listenerId: string
+  ): Promise<{ html: string | null; source?: 'file' | 'inline' }>
+  getEventListenerLog(
+    workspaceId: string,
+    listenerId: string
+  ): Promise<{
+    logTail: string
+    status: import('@craft-agent/shared/protocol/dto').ListenerStatusDto
+  }>
   setEventListenerEnabled(
     workspaceId: string,
     listenerId: string,
@@ -851,6 +862,13 @@ export interface ElectronAPI {
   ): Promise<{ ok: boolean; conflict?: boolean; error?: string }>
   onEventListenerStatus(
     callback: (workspaceId: string, status: import('@craft-agent/shared/protocol/dto').ListenerStatusDto) => void
+  ): () => void
+  /** A listener's on-disk facts changed (enable toggle, saved config, installed dep). */
+  onEventListenerChanged(
+    callback: (
+      workspaceId: string,
+      changed: { listenerId: string; reason: 'enabled' | 'config' | 'dependency' },
+    ) => void
   ): () => void
   listEventSubscriptions(
     workspaceId: string,

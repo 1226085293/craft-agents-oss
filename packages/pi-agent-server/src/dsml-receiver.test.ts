@@ -42,8 +42,8 @@ describe("DeepSeek DSML receiver", () => {
       '<｜DSML｜tool_calls>\n' +
       '<｜DSML｜invoke name="read">\n' +
       '<｜DSML｜parameter name="path" string="true">a.txt</｜DSML｜parameter>\n' +
-      '<｜DSML｜parameter name="_displayName" string="true">读取</｜DSML｜parameter>\n' +
-      '<｜DSML｜parameter name="_intent" string="true">read it</｜DSML｜parameter>\n' +
+      '<｜DSML｜parameter name="appDisplayName" string="true">读取</｜DSML｜parameter>\n' +
+      '<｜DSML｜parameter name="appIntent" string="true">read it</｜DSML｜parameter>\n' +
       '</｜DSML｜invoke>\n' +
       '</｜DSML｜tool_calls>';
     const input =
@@ -54,7 +54,7 @@ describe("DeepSeek DSML receiver", () => {
     const events = output.split("\n").filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).filter((line) => line !== "[DONE]").map((line) => JSON.parse(line));
     const call = events.find((event) => event.choices?.[0]?.delta?.tool_calls)?.choices[0].delta.tool_calls[0];
     expect(call.function.name).toBe("read");
-    expect(JSON.parse(call.function.arguments)).toEqual({ path: "a.txt", _displayName: "读取", _intent: "read it" });
+    expect(JSON.parse(call.function.arguments)).toEqual({ path: "a.txt", appDisplayName: "读取", appIntent: "read it" });
     expect(events.at(-1).choices[0].finish_reason).toBe("tool_calls");
   });
 

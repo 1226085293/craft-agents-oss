@@ -5181,8 +5181,10 @@ export class SessionManager implements ISessionManager {
       // downstream compaction does not re-index turns the parent already
       // folded into a checkpoint (loss of the marker = redundant re-index, and
       // for a branch-of-branch the boundary must survive every hop). The value
-      // is a monotonic turnIndex; the parent's boundary is always ≤ the branch
-      // point, so it stays valid in the branch as-is.
+      // is a TIME watermark (epoch ms of the newest fully-consumed turn start),
+      // not a turn index — turn indexes are window-relative and repeat — so it
+      // stays valid in the branch as-is: a branch only ever carries turns that
+      // started at or before the branch point.
       try {
         const srcBoundary = join(sourceDir, 'meta', 'context-relief-boundary.json')
         if (existsSync(srcBoundary)) {

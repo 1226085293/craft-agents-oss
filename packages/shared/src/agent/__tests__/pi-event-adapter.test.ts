@@ -1011,8 +1011,8 @@ describe('PiEventAdapter', () => {
         toolName: 'bash',
         args: {
           command: 'npm test',
-          _intent: 'Run unit tests',
-          _displayName: 'Run Tests',
+          appIntent: 'Run unit tests',
+          appDisplayName: 'Run Tests',
         },
       } as any));
 
@@ -1073,8 +1073,8 @@ describe('PiEventAdapter', () => {
         toolName: 'bash',
         args: {
           command: 'npm test',
-          _intent: 'Args intent',
-          _displayName: 'Args name',
+          appIntent: 'Args intent',
+          appDisplayName: 'Args name',
         },
       } as any));
 
@@ -1151,8 +1151,8 @@ describe('PiEventAdapter', () => {
         toolName: 'bash',
         args: {
           command: 'npm test',
-          _intent: 'Args intent',
-          _displayName: 'Args name',
+          appIntent: 'Args intent',
+          appDisplayName: 'Args name',
         },
         toolMetadata: {
           intent: 'Canonical intent',

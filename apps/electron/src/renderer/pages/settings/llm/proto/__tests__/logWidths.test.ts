@@ -12,6 +12,10 @@ import {
   HARD_MAX,
   HARD_MIN,
   MAX_SLACK,
+  letterSpacingWidth,
+  monoTextWidth,
+  reconcileWidths,
+  WIDTH_RULE_VERSION,
   type WidthLimits,
 } from '../logWidths'
 
@@ -30,6 +34,66 @@ describe('columnLimits', () => {
     expect(limits.max).toBe(194)
   })
 
+  test('the floor comes from the visible page, the fit from every row', () => {
+    // Reported bug: `min` was drawn from the whole 5000-row history, so a short
+    // model name on a far page set it to 119px — dragging there truncated all
+    // ten rows actually on screen, whose shortest value needed 238px.
+    const limits = columnLimits({
+      header: 33,
+      values: [119, 238, 260, 300], // all rows: fit must hold 300
+      floorValues: [238, 260, 300], // what is on screen: floor is 238
+    })
+    expect(limits.min).toBe(238)
+    expect(limits.fit).toBe(300)
+  })
+
+  test('the floor never exceeds the fit', () => {
+    // A visible row can be wider than anything else only if `values` is a subset
+    // of what is on screen; the ordering min <= fit must still hold.
+    const limits = columnLimits({ header: 40, values: [100], floorValues: [200] })
+    expect(limits.min).toBeLessThanOrEqual(limits.fit)
+    expect(limits.fit).toBe(200)
+  })
+
+  test('a page of nothing but placeholders falls back to the whole table', () => {
+    // Filtering can land on a page where a column has no real value at all. The
+    // floor should then be the table's shortest real value, not the heading.
+    const limits = columnLimits({ header: 40, values: [150, 210], floorValues: [null, null] })
+    expect(limits.min).toBe(150)
+  })
+
+  test('placeholder cells do not define the minimum', () => {
+    // Reported from the real page: 45% of usage rows have no key and render a
+    // placeholder dash, ~6px wide. Counting those made `min` 40 for the Key
+    // column while every real value (68px) was elided to `sk…`. A dash is not
+    // a value the column has to fit.
+    const limits = columnLimits({ header: 26, values: [null, null, 26, 88, 92] })
+    // 26 is below HARD_MIN, so the floor takes over — the point is that it is no
+    // longer the *dash* at 26 that decides: before this, `min` came from the
+    // narrowest entry including nulls rendered as a 6px dash.
+    expect(limits.min).toBe(HARD_MIN)
+    expect(limits.fit).toBe(92)
+
+    // With a heading wider than the floor, the heading is the bound — not a dash.
+    const wide = columnLimits({ header: 52, values: [null, 30, 88] })
+    expect(wide.min).toBe(52)
+    expect(wide.fit).toBe(88)
+  })
+
+  test('a column of nothing but placeholders falls back to its heading', () => {
+    // No row carries a value, so there is no content width to respect: the
+    // heading is the only real constraint (and the HARD_MIN floor still applies).
+    const limits = columnLimits({ header: 52, values: [null, null, null] })
+    expect(limits.min).toBe(52)
+    expect(limits.fit).toBe(52)
+  })
+
+  test('placeholders never widen or narrow the fit', () => {
+    const withNulls = columnLimits({ header: 40, values: [null, 120, 130, null] })
+    const withoutNulls = columnLimits({ header: 40, values: [120, 130] })
+    expect(withNulls).toEqual(withoutNulls)
+  })
+
   test('max is exactly MAX_SLACK x fit, not the raw longest value', () => {
     const limits = columnLimits({ header: 46, values: [200, 400] })
     expect(limits.fit).toBe(400)
@@ -38,7 +102,7 @@ describe('columnLimits', () => {
   })
 
   test('every bound stays ordered: min <= fit <= max', () => {
-    for (const values of [[10], [10, 10], [40, 900], [300, 12], []]) {
+    for (const values of [[10], [10, 10], [40, 900], [300, 12], [], [null, 90]]) {
       const l = columnLimits({ header: 46, values })
       expect(l.min).toBeLessThanOrEqual(l.fit)
       expect(l.fit).toBeLessThanOrEqual(l.max)
@@ -208,6 +272,121 @@ describe('displayWidths', () => {
     })
     expect(out.session).toBe(103)
     expect(out.model).toBe(129)
+  })
+})
+
+describe('monoTextWidth', () => {
+  // The monospace shortcut (length × advance) is what makes the 时间 column free
+  // to measure, but it is only valid for ASCII in a genuinely monospace font.
+  test('multiplies ASCII length by the advance', () => {
+    expect(monoTextWidth('11-14 12:03', 6.6)).toBeCloseTo(11 * 6.6, 5)
+    expect(monoTextWidth('200ms', 6.6)).toBeCloseTo(5 * 6.6, 5)
+  })
+
+  test('returns null for wide glyphs so they are measured for real', () => {
+    // 本地 / 超时 / 连接失败 sit in the 状态码 column: a monospace cell whose
+    // values are CJK, where each glyph is two advances. Counting characters
+    // reported half the width and let the column shrink below its own text.
+    expect(monoTextWidth('本地', 6.6)).toBeNull()
+    expect(monoTextWidth('超时', 6.6)).toBeNull()
+    expect(monoTextWidth('连接失败', 6.6)).toBeNull()
+    // A masked key can carry an ellipsis, which is likewise not one advance of
+    // an ASCII glyph in every fallback font.
+    expect(monoTextWidth('sk-e8F…xR4z', 6.6)).toBeNull()
+  })
+
+  test('returns null when the resolved font is not monospace', () => {
+    // `advanceSpread` is the measured difference between glyphs that a real
+    // monospace font draws identically. Non-zero means a proportional fallback.
+    expect(monoTextWidth('200ms', 6.6, 2.1)).toBeNull()
+    expect(monoTextWidth('200ms', 6.6, 0.004)).toBeCloseTo(5 * 6.6, 5)
+  })
+
+  test('returns null without a usable advance', () => {
+    expect(monoTextWidth('200ms', 0)).toBeNull()
+  })
+})
+
+describe('letterSpacingWidth', () => {
+  test('adds the inherited letter-spacing per character', () => {
+    // `.llm-proto{letter-spacing:.01em}`: at 13px that is 0.13px/char, which is
+    // more than the slack CELL_PAD leaves for a long model name.
+    expect(letterSpacingWidth('12345', 0.13)).toBeCloseTo(0.65, 5)
+    expect(letterSpacingWidth('12345', 0)).toBe(0)
+  })
+
+  test('is zero for any non-positive spacing', () => {
+    expect(letterSpacingWidth('abc', -1)).toBe(0)
+    expect(letterSpacingWidth('', 0.13)).toBe(0)
+  })
+})
+
+describe('reconcileWidths', () => {
+  const limits = {
+    // Content needs 96 but was stored at 54, the old heading floor.
+    provider: { min: 64, fit: 96, max: 144 },
+    model: { min: 99, fit: 197, max: 295 },
+    time: { min: 107, fit: 107, max: 160 },
+  }
+  const ids = ['time', 'provider', 'model']
+
+  test('a column nobody dragged follows its content width, not its stored value', () => {
+    // The reported bug: 提供商 stored at 54 (the old floor) while its real
+    // content needed 96, and the poll kept appending rows that made it wider.
+    const out = reconcileWidths({
+      widths: { time: 113, provider: 54, model: 110 },
+      limits,
+      touched: [],
+      ids,
+    })
+    expect(out.provider).toBe(96)
+    expect(out.model).toBe(197)
+    expect(out.time).toBe(107)
+  })
+
+  test('a dragged column keeps the width the user chose', () => {
+    const out = reconcileWidths({
+      widths: { time: 113, provider: 120, model: 110 },
+      limits,
+      touched: ['provider'],
+      ids,
+    })
+    expect(out.provider).toBe(120)
+    // Untouched siblings still follow their content.
+    expect(out.model).toBe(197)
+  })
+
+  test('a dragged column is still clamped to the current range', () => {
+    const out = reconcileWidths({
+      widths: { provider: 999, model: 10, time: 107 },
+      limits,
+      touched: ['provider', 'model'],
+      ids,
+    })
+    expect(out.provider).toBe(144) // past max
+    expect(out.model).toBe(99) // below min
+  })
+
+  test('returns the same object contents when every width already agrees', () => {
+    const out = reconcileWidths({
+      widths: { time: 107, provider: 96, model: 197 },
+      limits,
+      touched: [],
+      ids,
+    })
+    expect(out).toEqual({ time: 107, provider: 96, model: 197 })
+  })
+
+  test('columns without limits are left alone', () => {
+    const out = reconcileWidths({ widths: { provider: 54, gone: 77 }, limits, touched: [], ids: ['provider', 'gone'] })
+    expect(out.gone).toBe(77)
+  })
+
+  test('the rule version is bumped whenever measurement changes', () => {
+    // Persisted widths cannot be recomputed, only invalidated — so a change in
+    // how columns are measured must come with a new version, or the page keeps
+    // rendering values the old rules produced and looks unfixed.
+    expect(WIDTH_RULE_VERSION).toBeGreaterThanOrEqual(3)
   })
 })
 

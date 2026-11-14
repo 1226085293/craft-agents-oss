@@ -94,8 +94,8 @@ const simpleSlack: ActivityItem = {
   toolInput: {
     channel: '#general',
     text: 'Hello team!',
-    _intent: 'Sending a message to the team',
-    _displayName: 'Send Message',
+    appIntent: 'Sending a message to the team',
+    appDisplayName: 'Send Message',
   },
   intent: 'Sending a message to the team',
   displayName: 'Send Message',
@@ -115,8 +115,8 @@ const simpleStripe: ActivityItem = {
   toolInput: {
     path: '/v1/customers',
     method: 'GET',
-    _intent: 'Fetching customer list',
-    _displayName: 'List Customers',
+    appIntent: 'Fetching customer list',
+    appDisplayName: 'List Customers',
   },
   intent: 'Fetching customer list',
   displayName: 'List Customers',

@@ -424,10 +424,10 @@ describe('runPreToolUseChecks', () => {
       expect(result.type).toBe('allow');
     });
 
-    it('strips _intent and _displayName metadata', () => {
+    it('strips appIntent and appDisplayName metadata', () => {
       const result = runPreToolUseChecks(createInput({
         toolName: 'mcp__linear__createIssue',
-        input: { title: 'Bug fix', _intent: 'create issue', _displayName: 'Create Issue' },
+        input: { title: 'Bug fix', appIntent: 'create issue', appDisplayName: 'Create Issue' },
         activeSourceSlugs: ['linear'],
         allSourceSlugs: ['linear'],
       }));
@@ -435,21 +435,21 @@ describe('runPreToolUseChecks', () => {
       expect(result.type).toBe('modify');
       if (result.type === 'modify') {
         expect(result.input.title).toBe('Bug fix');
-        expect(result.input._intent).toBeUndefined();
-        expect(result.input._displayName).toBeUndefined();
+        expect(result.input.appIntent).toBeUndefined();
+        expect(result.input.appDisplayName).toBeUndefined();
       }
     });
 
     it('combines path expansion and metadata stripping', () => {
       const result = runPreToolUseChecks(createInput({
         toolName: 'Read',
-        input: { file_path: '~/test.ts', _intent: 'reading a file' },
+        input: { file_path: '~/test.ts', appIntent: 'reading a file' },
       }));
 
       expect(result.type).toBe('modify');
       if (result.type === 'modify') {
         expect(result.input.file_path).toBe('/Users/test/test.ts');
-        expect(result.input._intent).toBeUndefined();
+        expect(result.input.appIntent).toBeUndefined();
       }
     });
 
@@ -744,7 +744,7 @@ describe('runPreToolUseChecks', () => {
     it('includes modifiedInput in prompt when transforms changed the input', () => {
       const result = runPreToolUseChecks(createInput({
         toolName: 'Write',
-        input: { file_path: '~/test.ts', content: 'hello', _intent: 'write file' },
+        input: { file_path: '~/test.ts', content: 'hello', appIntent: 'write file' },
         permissionMode: 'ask',
       }));
 
@@ -752,7 +752,7 @@ describe('runPreToolUseChecks', () => {
       if (result.type === 'prompt') {
         expect(result.modifiedInput).toBeDefined();
         expect(result.modifiedInput!.file_path).toBe('/Users/test/test.ts');
-        expect(result.modifiedInput!._intent).toBeUndefined();
+        expect(result.modifiedInput!.appIntent).toBeUndefined();
       }
     });
 
@@ -844,13 +844,13 @@ describe('runPreToolUseChecks', () => {
       // call_llm should be intercepted even if input has metadata
       const result = runPreToolUseChecks(createInput({
         toolName: 'mcp__session__call_llm',
-        input: { model: 'haiku', _intent: 'summarize' },
+        input: { model: 'haiku', appIntent: 'summarize' },
       }));
 
       expect(result.type).toBe('call_llm_intercept');
       if (result.type === 'call_llm_intercept') {
         // Input should be passed through unmodified (no stripping)
-        expect(result.input._intent).toBe('summarize');
+        expect(result.input.appIntent).toBe('summarize');
       }
     });
   });

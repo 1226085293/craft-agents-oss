@@ -278,8 +278,12 @@ export function PanelHeader({
   // Base padding (16px = pl-4, matches pr-2 when leading action present for symmetry)
   const basePadding = leadingAction ? 8 : 16
 
+  // flex-nowrap is load-bearing: the title must truncate (min-w-0) instead
+  // of wrapping to a second line at any width — the "two-line header" the
+  // plugin list used to show came from a stacked second title row, and the
+  // shared header must never reintroduce one by wrapping.
   const baseClassName = cn(
-    'flex shrink-0 items-center pr-2 min-w-0 gap-1.5 relative z-panel h-[42px]',
+    'flex flex-nowrap shrink-0 items-center pr-2 min-w-0 gap-1.5 relative z-panel h-[42px]',
     // Only use static paddingLeft class when not animating
     !shouldCompensate && (paddingLeft || (leadingAction ? 'pl-2' : 'pl-4')),
     className

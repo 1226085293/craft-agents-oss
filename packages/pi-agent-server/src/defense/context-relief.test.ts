@@ -668,10 +668,10 @@ describe('compaction boundary', () => {
     const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
     dirs.push(dir)
     writeTurnFile(dir, '2026-10-16T06-53-23-001.md', { user: 'old turn 1' })
-    writeTurnFile(dir, '2026-10-16T06-53-23-002.md', { user: 'old turn 2' })
-    writeTurnFile(dir, '2026-10-16T06-53-23-003.md', { user: 'new turn 3' })
-    writeTurnFile(dir, '2026-10-16T06-53-23-004.md', { user: 'new turn 4' })
-    saveCompactionBoundary(dir, 2)
+    writeTurnFile(dir, '2026-10-16T06-55-23-002.md', { user: 'old turn 2' })
+    writeTurnFile(dir, '2026-10-16T06-57-23-003.md', { user: 'new turn 3' })
+    writeTurnFile(dir, '2026-10-16T06-59-23-004.md', { user: 'new turn 4' })
+    saveCompactionBoundary(dir, Date.UTC(2026, 9, 16, 6, 55, 23))
     const result = handleSessionBeforeCompact(
       makeEvent({ preparation: preparation({ tokensBefore: 20_000 }) }),
       { sessionPath: dir },
@@ -682,12 +682,79 @@ describe('compaction boundary', () => {
     expect(result?.compaction?.summary).not.toContain('old turn 2')
   })
 
+  // Regression: 261110-brave-titanium. Turn ids come from the rotating ledger
+  // window, so the SAME index names several turns and the sequence wraps back
+  // to 1. An integer watermark therefore starves relief forever once it reaches
+  // the window's max index (12 consecutive LLM compactions, log
+  // "no turn files newer than boundary 30"). Time ordering must not care.
+  it('keeps working when turn indexes repeat and wrap (recycled ordinals)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    // Old cycle: same index 007 appears twice, older turn first.
+    writeTurnFile(dir, '2026-11-10T05-26-38-006.md', { user: 'ancient turn' })
+    writeTurnFile(dir, '2026-11-10T07-25-18-007.md', { user: 'first 007' })
+    // Boundary lands on the first 007 (a plain time watermark).
+    saveCompactionBoundary(dir, Date.UTC(2026, 10, 10, 7, 25, 18))
+    // New cycle wraps back to small ordinals — 002 and 003 are BRAND NEW turns.
+    writeTurnFile(dir, '2026-11-10T07-59-32-002.md', { user: 'wrapped turn a' })
+    writeTurnFile(dir, '2026-11-10T08-28-29-003.md', { user: 'wrapped turn b' })
+    const result = handleSessionBeforeCompact(
+      makeEvent({ preparation: preparation({ tokensBefore: 20_000 }) }),
+      { sessionPath: dir },
+    )
+    expect(result?.compaction?.summary).toContain('wrapped turn a')
+    expect(result?.compaction?.summary).toContain('wrapped turn b')
+    expect(result?.compaction?.summary).not.toContain('first 007')
+    expect(result?.compaction?.summary).not.toContain('ancient turn')
+  })
+
+  it('indexes a turn ONCE when the archive holds several copies of it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    // Same turn start, three copies — what the pre-fix archiver produced when
+    // the ledger window shifted and renumbered the turn.
+    writeTurnFile(dir, '2026-11-10T08-28-29-002.md', { user: 'duplicated turn' })
+    writeTurnFile(dir, '2026-11-10T08-28-29-005.md', { user: 'duplicated turn' })
+    writeTurnFile(dir, '2026-11-10T08-28-29-010.md', { user: 'duplicated turn' })
+    writeTurnFile(dir, '2026-11-10T09-00-00-011.md', { user: 'single turn' })
+    const result = handleSessionBeforeCompact(
+      makeEvent({ preparation: preparation({ tokensBefore: 20_000 }) }),
+      { sessionPath: dir },
+    )
+    const indexed = (result?.compaction?.details as { turnFiles?: string[] } | undefined)?.turnFiles ?? []
+    expect(indexed).toHaveLength(2)
+    expect(indexed.filter((p) => p.includes('2026-11-10T08-28-29'))).toHaveLength(1)
+    const summary = result?.compaction?.summary ?? ''
+    expect(summary.split('duplicated turn').length - 1).toBe(1)
+  })
+
+  it('migrates a v1 (turn-index) sidecar to a time watermark on read', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    writeTurnFile(dir, '2026-11-11T14-38-03-030.md', { user: 'folded' })
+    writeTurnFile(dir, '2026-11-12T09-24-23-014.md', { user: 'after wrap' })
+    mkdirSync(join(dir, 'meta'), { recursive: true })
+    writeFileSync(
+      join(dir, 'meta', 'context-relief-boundary.json'),
+      JSON.stringify({ version: 1, compactedThroughTurnIndex: 30 }),
+      'utf-8',
+    )
+    expect(loadCompactionBoundary(dir)).toBe(Date.UTC(2026, 10, 11, 14, 38, 3))
+    // Unmatched v1 index → 0, i.e. one full re-index instead of a stuck boundary.
+    writeFileSync(
+      join(dir, 'meta', 'context-relief-boundary.json'),
+      JSON.stringify({ version: 1, compactedThroughTurnIndex: 999 }),
+      'utf-8',
+    )
+    expect(loadCompactionBoundary(dir)).toBe(0)
+  })
+
   it('returns undefined (LLM path) when every turn is already checkpointed', () => {
     const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
     dirs.push(dir)
     writeTurnFile(dir, '2026-10-16T06-53-23-001.md', { user: 'old' })
-    writeTurnFile(dir, '2026-10-16T06-53-23-002.md', { user: 'old' })
-    saveCompactionBoundary(dir, 2)
+    writeTurnFile(dir, '2026-10-16T06-55-23-002.md', { user: 'old' })
+    saveCompactionBoundary(dir, Date.UTC(2026, 9, 16, 6, 55, 23))
     const result = handleSessionBeforeCompact(
       makeEvent({ preparation: preparation({ tokensBefore: 20_000 }) }),
       { sessionPath: dir },
@@ -699,17 +766,17 @@ describe('compaction boundary', () => {
     const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
     dirs.push(dir)
     writeTurnFile(dir, '2026-10-16T06-53-23-001.md', { user: 'x' })
-    writeTurnFile(dir, '2026-10-16T06-53-23-002.md', { user: 'y' })
+    writeTurnFile(dir, '2026-10-16T10-00-00-002.md', { user: 'y' })
     const deps: ContextReliefDeps = { sessionPath: dir }
     handleSessionBeforeCompact(
       makeEvent({ preparation: preparation({ tokensBefore: 20_000 }) }),
       deps,
     )
     // Stashed for the success event, but NOT yet on disk.
-    expect(deps.pendingCompactionBoundary).toBe(2)
+    expect(deps.pendingCompactionBoundary).toBe(Date.UTC(2026, 9, 16, 10, 0, 0))
     expect(loadCompactionBoundary(dir)).toBe(0)
     handleSessionCompact({ type: 'session_compact' } as never, deps)
-    expect(loadCompactionBoundary(dir)).toBe(2)
+    expect(loadCompactionBoundary(dir)).toBe(Date.UTC(2026, 9, 16, 10, 0, 0))
     expect(deps.pendingCompactionBoundary).toBeUndefined()
   })
 

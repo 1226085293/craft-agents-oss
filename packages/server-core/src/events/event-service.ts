@@ -12,7 +12,7 @@
  */
 
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createLogger } from '@craft-agent/shared/utils';
 import { EventStore, type EventFilter, type EventMeta, type EventRecord } from '@craft-agent/shared/events/event-store.ts';
 import { EventIngestServer, type EventIngestAddress } from './ingest-server.ts';
@@ -24,7 +24,7 @@ import { EventDispatcher, type DispatchTarget } from './event-dispatcher.ts';
 import { fetchReportedDeps } from './listener-control.ts';
 import { loadSubscriptions } from '@craft-agent/shared/events/subscriptions.ts';
 import { deriveThreadKey, findThreadOwner } from '@craft-agent/shared/events/thread-bindings.ts';
-import type { ListenerConfigSchema } from '@craft-agent/shared/events/manifest.ts';
+import type { ListenerConfigSchema, ListenerUi } from '@craft-agent/shared/events/manifest.ts';
 import type { CraftEventEnvelope } from '@craft-agent/shared/events/types.ts';
 import type { ListenerReportedDepsDto } from '@craft-agent/shared/protocol/dto';
 
@@ -506,6 +506,10 @@ export interface ListenerView extends LoadedListener {
   controlDeps?: ListenerReportedDepsDto
   /** Tail of the last failed startup, when the process gave up non-zero. */
   startupErrorTail?: string
+  /** Plugin-provided HTML config UI (manifest `ui`), when declared. */
+  ui?: ListenerUi
+  /** Tail of the plugin's README.md — detail view only, never on list rows. */
+  readme?: string
 }
 
 /** Map a LoadedListener (fields nested under `manifest`) onto the ListenerView shape. */
@@ -526,6 +530,7 @@ function toListenerView(
     icon: m.icon,
     homepage: m.homepage,
     configSchema: m.config,
+    ui: m.ui,
     setup: m.setup ?? [],
     status,
     missingConfig: missingConfigKeys(listener),
@@ -565,6 +570,28 @@ export function pluginCatalogDirs(): string[] {
   return dirs
 }
 
+/**
+ * The plugin's own README, truncated for the detail page's intro section.
+ * The head of a readme is where the "what is this" lives; the budget keeps
+ * the DTO cheap. Returns undefined when the plugin ships no readme — a
+ * plugin is not wrong for that.
+ */
+const README_TAIL_CHARS = 4000;
+
+function readListenerReadme(dir: string): string | undefined {
+  for (const name of ['README.md', 'README.MD', 'README']) {
+    const path = join(dir, name);
+    if (!existsSync(path)) continue;
+    try {
+      const text = readFileSync(path, 'utf8');
+      return text.length > README_TAIL_CHARS ? `${text.slice(0, README_TAIL_CHARS)}…` : text;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 export function listListenersFor(service: EventService, workspaceRoot: string, skipProbes = false): ListenerView[] {
   return loadListeners({ workspaceRoot, skipProbes, catalogDirs: pluginCatalogDirs() }).map((listener) =>
     toListenerView(listener, service, ''),
@@ -581,7 +608,9 @@ export async function getListenerFor(
   // The control service is listener-provided and optional; a missing or slow
   // answer just renders as "no dependency info".
   const controlDeps = await fetchReportedDeps(listener.dataDir);
-  return toListenerView(listener, service, service.tailListenerLog(id, listener.dataDir), controlDeps);
+  const view = toListenerView(listener, service, service.tailListenerLog(id, listener.dataDir), controlDeps);
+  const readme = readListenerReadme(listener.dir);
+  return readme !== undefined ? { ...view, readme } : view;
 }
 
 // ---------------------------------------------------------------------------

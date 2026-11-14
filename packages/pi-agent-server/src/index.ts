@@ -131,6 +131,7 @@ import { createWebFetchTool } from './tools/web-fetch.ts';
 import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
 import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, normalizeUnderscorePrefixedArgs, stripCraftMetadata } from './craft-metadata-schema.ts';
+import { enrichUnknownToolResult } from './unknown-tool-result.ts';
 import { wrapMidTurnGuidance } from './steer-guidance.ts';
 import { settleStreamingSessionBeforePrompt } from './prompt-settle.ts';
 import { scheduleQueuedFollowUpDrain, type DrainableSession } from './queued-followup-drain.ts';
@@ -523,6 +524,10 @@ let piSession: AgentSession | null = null;
  */
 let contextReliefDeps: ContextReliefDeps | undefined;
 let restoreDsmlReceiver: (() => void) | null = null;
+// Tools advertised by the CURRENT session — read by the DSML receiver as the
+// safety gate for marker-less (bare) leak form. Set once per session creation
+// (one subprocess per session, so no cross-session bleed).
+let currentSessionToolNames: readonly string[] = [];
 let piModelRegistry: PiModelRegistry | null = null;
 let moduleCredentialStore: InMemoryCredentialStore | null = null;
 // Cached runtime build shared by the main session and ephemeral queryLlm
@@ -1767,6 +1772,7 @@ async function createPiSession(): Promise<AgentSession> {
         return /\/(?:chat\/)?completions\/?$/.test(path);
       },
       debugLog,
+      knownToolNames: () => currentSessionToolNames,
     });
   }
 
@@ -1896,6 +1902,7 @@ async function createPiSession(): Promise<AgentSession> {
   const proxyTools = buildProxyTools();
   const wrappedAll = wrapToolsWithHooks([...builtinDefs, ...webDefs, ...proxyTools]);
   const toolAllowlist = wrappedAll.map(t => t.name);
+  currentSessionToolNames = toolAllowlist;
   debugLog(`Session tools: ${builtinDefs.length} builtin + ${webDefs.length} web + ${proxyTools.length} proxy = ${wrappedAll.length} total`);
 
   // The tool preamble (names + descriptions + JSON Schemas) is serialised into
@@ -2254,7 +2261,7 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
 
   /**
    * Defensive normalization: some models (esp. DeepSeek) learn the
-   * `_displayName`/`_intent` underscore pattern from the schema and also
+   * `appDisplayName`/`appIntent` underscore pattern from the schema and also
    * underscore real parameter names (command -> _command, path -> _path).
    * The Pi SDK runs prepareArguments BEFORE validateToolArguments, so
    * mapping stray `_<param>` back to `<param>` prevents the whole class of
@@ -2274,7 +2281,7 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
     let inputObj: Record<string, unknown> = { ...(params as Record<string, unknown>) };
 
     // Extract intent before main process strips metadata (used for summarization)
-    const intent = typeof inputObj._intent === 'string' ? inputObj._intent : undefined;
+    const intent = typeof inputObj.appIntent === 'string' ? inputObj.appIntent : undefined;
 
     // Normalize Pi SDK parameter names: path → file_path
     if ((sdkToolName === 'Write' || sdkToolName === 'Edit' || sdkToolName === 'MultiEdit' || sdkToolName === 'NotebookEdit')
@@ -2793,8 +2800,8 @@ async function runMiniCompletion(
 function extractToolExecutionMetadata(args: Record<string, unknown> | undefined): ToolExecutionMetadata | undefined {
   if (!args) return undefined;
 
-  const intent = typeof args._intent === 'string' ? args._intent : undefined;
-  const displayName = typeof args._displayName === 'string' ? args._displayName : undefined;
+  const intent = typeof args.appIntent === 'string' ? args.appIntent : undefined;
+  const displayName = typeof args.appDisplayName === 'string' ? args.appDisplayName : undefined;
 
   if (!intent && !displayName) return undefined;
 
@@ -2875,6 +2882,20 @@ let lastAbortReason: 'user' | 'system' | null = null;
 // catch to decide whether the turn was recovered (and must not be reported
 // as a terminal prompt error).
 let defenseResumeQueued = false;
+// Set while a FRESH user turn settles a still-streaming previous run
+// (2026-11-07 261105-onyx-steel: "send a message and it aborts silently").
+// settleStreamingSessionBeforePrompt() calls session.abort(), which emits an
+// agent_end. That terminal event belongs to the SUPERSEDED run, but the host
+// has already opened the queue for the new turn and had no way to tell the
+// two apart — so it closed the brand-new turn with zero assistant output
+// ("Processing stopped: complete" 39 ms after "Turn started"), while the
+// subprocess went on to run the new prompt invisibly: requests, SSE events
+// and tool calls all landed in the closed iterator. The next message then hit
+// the same unconsumed run and the loop repeated forever.
+// While this flag is set, forwarded agent_end events carry
+// `supersededByFreshTurn: true`; the adapter holds its queue for the fresh
+// turn's agent_start instead of completing.
+let freshTurnSettling = false;
 
 // Bounded compaction heartbeat: while the Pi SDK runs a threshold/overflow
 // compaction the main stream is silent, so without these ticks the
@@ -3126,6 +3147,13 @@ function handleSessionEvent(event: AgentSessionEvent): void {
   }
 
   if (event.type === 'tool_execution_end') {
+    // Phantom-call correction: if the model used a Craft metadata field as the
+    // tool name, replace the bare `Tool X not found` with an explanation while
+    // the result is still in flight (see enrichUnknownToolResult).
+    if (event.isError && enrichUnknownToolResult(event.result, event.toolName)) {
+      debugLog(`[pi-server] Enriched unknown-tool result for metadata field "${event.toolName}"`);
+    }
+
     // Stall-detection exemption bookkeeping: the tool settled (success, error,
     // or its own timeout firing) — its exemption dies with it.
     activeToolSilenceDeadlines.delete(event.toolCallId);
@@ -3348,6 +3376,18 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     !(forwardedEvent as { queuedFollowUpPending?: boolean }).queuedFollowUpPending
   ) {
     forwardedEvent = { ...(forwardedEvent as Record<string, unknown>), gatewayRetryPending: true } as unknown as OutboundAgentEvent;
+  }
+
+  // Fresh-turn settlement (see `freshTurnSettling`): this agent_end closes the
+  // run that a newly arrived user prompt just superseded. Tell the host to
+  // hold its queue open — the fresh turn's own agent_start follows — instead
+  // of completing a turn the model has not even answered yet.
+  if (event.type === 'agent_end' && freshTurnSettling) {
+    forwardedEvent = {
+      ...(forwardedEvent as Record<string, unknown>),
+      supersededByFreshTurn: true,
+    } as unknown as OutboundAgentEvent;
+    debugLog('[prompt] agent_end annotated supersededByFreshTurn=true (host holds the queue for the fresh turn)');
   }
 
   // Forward all events to main process
@@ -3608,7 +3648,20 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     // Mid-turn delivery has its own channel (`steer`), so reaching here while
     // streaming always means the previous run had not settled yet.
     // See prompt-settle.ts for the full incident notes.
-    await settleStreamingSessionBeforePrompt(session, { log: debugLog });
+    //
+    // 2026-11-07 (261105-onyx-steel): the abort issued here terminates the
+    // SUPERSEDED run, not this one. `session.abort()` awaits idle, so every
+    // agent_end it produces is emitted before this await returns — the flag
+    // below therefore covers exactly those events and nothing else. Without
+    // it the host consumed that terminal event as the END of the turn we are
+    // about to start, closed the queue, and the new prompt's entire run
+    // (requests, deltas, tool calls) was dropped on the floor.
+    freshTurnSettling = true;
+    try {
+      await settleStreamingSessionBeforePrompt(session, { log: debugLog });
+    } finally {
+      freshTurnSettling = false;
+    }
 
     // Stall protection: wait on the prompt promise, but poll for SILENCE.
     // If no SDK event (stream delta / tool progress / message_end) arrives

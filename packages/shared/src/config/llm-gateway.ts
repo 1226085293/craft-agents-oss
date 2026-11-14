@@ -88,6 +88,24 @@ import {
   type GatewayStreamRetryState,
 } from './gateway-stream-retry.ts';
 
+/**
+ * Cap on how long a streaming response may stay open without producing a
+ * single visible byte of answer text or a completed tool call.
+ *
+ * Reasoning deltas keep the socket alive, so the byte-gap timeout never fires
+ * for a model stuck in a chain-of-thought loop (observed: ~6 min of pure
+ * thinking, then an empty response and a from-scratch re-run). Cutting the
+ * attempt at this deadline surfaces the same retryable empty-response failure
+ * far sooner; the client re-runs the step and the fresh attempt usually
+ * answers in seconds.
+ */
+const DEFAULT_VISIBLE_OUTPUT_TIMEOUT_MS = 180_000;
+
+function visibleOutputTimeoutMs(): number {
+  const raw = Number(process.env.CRAFT_GATEWAY_VISIBLE_OUTPUT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_VISIBLE_OUTPUT_TIMEOUT_MS;
+}
+
 /** How long a provider's discovered `GET /models` effort catalog is trusted. */
 const CATALOG_TTL_MS = 10 * 60_000;
 
@@ -1707,6 +1725,7 @@ export class LlmGateway {
                 ?? DEFAULT_PRESET.streamGapSeconds
                 ?? 60) * 1000,
             ),
+            visibleOutputMs: visibleOutputTimeoutMs(),
             abort: call.abort,
             publicModel: unit.publicModel,
             onStreamFailure: streamRetryState
@@ -2628,6 +2647,8 @@ export class LlmGateway {
     guard: {
       firstByteMs: number;
       streamGapMs?: number;
+      /** Cap on reasoning-only streaming before the attempt is cut short. */
+      visibleOutputMs?: number;
       abort: () => void;
       publicModel?: string;
       onStreamFailure?: (failure: GatewayStreamFailure) => Promise<string>;
@@ -2768,6 +2789,12 @@ export class LlmGateway {
     let completed = false;
     let sawByte = false;
     let pending = first.value;
+    // Armed only for streams whose visibility we can actually judge. A relay
+    // that streams reasoning forever without ever answering is cancelled here
+    // instead of being waited out until it gives up on its own.
+    const visibleDeadlineAt = monitor && guard.visibleOutputMs && guard.visibleOutputMs > 0
+      ? Date.now() + guard.visibleOutputMs
+      : undefined;
 
     const forwardAnthropicFrames = (frames: SseFrame[]): boolean => {
       if (!monitor) return true;
@@ -2785,17 +2812,22 @@ export class LlmGateway {
 
     try {
       for (;;) {
+        const gapMs = monitor
+          ? this.effectiveStreamGap(guard.streamGapMs, visibleDeadlineAt, () => monitor.hasVisibleOutput)
+          : guard.streamGapMs;
         const chunk: { done: boolean; value?: Uint8Array; gapTimeout?: boolean; readError?: string } = pending
           ? { done: false, value: pending }
           : parser
-            ? await this.readChunkWithGap(reader, guard.streamGapMs, abort)
+            ? await this.readChunkWithGap(reader, gapMs, abort)
             : await reader.read();
         pending = undefined;
         if (chunk.gapTimeout) {
-          streamFailure = {
-            kind: 'truncated',
-            message: `upstream stream went silent for ${Math.round((guard.streamGapMs ?? 0) / 1000)}s`,
-          };
+          streamFailure = monitor
+            ? this.streamTimeoutFailure(guard, visibleDeadlineAt, monitor.hasVisibleOutput)
+            : {
+                kind: 'truncated',
+                message: `upstream stream went silent for ${Math.round((guard.streamGapMs ?? 0) / 1000)}s`,
+              };
           break;
         }
         if (chunk.readError) {
@@ -2846,6 +2878,53 @@ export class LlmGateway {
       res.end();
     }
     return { truncated: false };
+  }
+
+  /**
+   * The gap to wait for this read, tightened so a stream that is only emitting
+   * reasoning still hits `visibleDeadlineAt` on time.
+   *
+   * Once the stream has produced something the user can see, the plain
+   * idle-byte budget applies again.
+   */
+  private effectiveStreamGap(
+    gapMs: number | undefined,
+    visibleDeadlineAt: number | undefined,
+    hasVisibleOutput: () => boolean,
+  ): number | undefined {
+    if (visibleDeadlineAt === undefined) return gapMs
+    if (hasVisibleOutput()) return gapMs
+    const remaining = Math.max(1, visibleDeadlineAt - Date.now())
+    if (!gapMs || gapMs <= 0) return remaining
+    return Math.min(gapMs, remaining)
+  }
+
+  /**
+   * Classify a wait that timed out, so the two different problems stay
+   * distinguishable in logs: `truncated` means the socket went quiet, while a
+   * missed visible-output deadline means the model kept streaming reasoning
+   * and never answered.
+   */
+  private streamTimeoutFailure(
+    guard: { streamGapMs?: number; visibleOutputMs?: number },
+    visibleDeadlineAt: number | undefined,
+    hasVisibleOutput: boolean,
+  ): GatewayStreamFailure {
+    if (
+      visibleDeadlineAt !== undefined
+      && !hasVisibleOutput
+      && Date.now() >= visibleDeadlineAt - 100
+    ) {
+      const seconds = Math.round((guard.visibleOutputMs ?? DEFAULT_VISIBLE_OUTPUT_TIMEOUT_MS) / 1000)
+      return {
+        kind: 'empty_response',
+        message: `upstream streamed for ${seconds}s without visible text or a tool call`,
+      }
+    }
+    return {
+      kind: 'truncated',
+      message: `upstream stream went silent for ${Math.round((guard.streamGapMs ?? 0) / 1000)}s`,
+    }
   }
 
   /** Read one chunk, aborting when the stream stays silent past `gapMs`. */
@@ -2972,6 +3051,8 @@ export class LlmGateway {
     guard: {
       firstByteMs: number;
       streamGapMs?: number;
+      /** Cap on reasoning-only streaming before the attempt is cut short. */
+      visibleOutputMs?: number;
       abort: () => void;
       onStreamFailure?: (failure: GatewayStreamFailure) => Promise<string>;
     } = { firstByteMs: 0, abort: () => {} },
@@ -2987,6 +3068,11 @@ export class LlmGateway {
       upstreamModel: transcode.upstreamModel,
       messageId: transcode.messageId,
     });
+    // See pipeResponse: reasoning can keep a stream alive without ever
+    // producing an answer, so bound how long we wait for visible output.
+    const visibleDeadlineAt = guard.visibleOutputMs && guard.visibleOutputMs > 0
+      ? Date.now() + guard.visibleOutputMs
+      : undefined;
     const { firstByteMs, abort } = guard;
     // The response must expose Anthropic's content type regardless of what the
     // upstream called it, or the SDK will not treat it as an SSE stream.
@@ -3064,15 +3150,17 @@ export class LlmGateway {
 
     try {
       for (;;) {
+        const gapMs = this.effectiveStreamGap(
+          guard.streamGapMs,
+          visibleDeadlineAt,
+          () => transcoder.hasVisibleContent,
+        );
         const chunk = pending
           ? { done: false, value: pending }
-          : await this.readChunkWithGap(reader, guard.streamGapMs, abort);
+          : await this.readChunkWithGap(reader, gapMs, abort);
         pending = undefined;
         if (chunk.gapTimeout) {
-          failure = {
-            kind: 'truncated',
-            message: `upstream stream went silent for ${Math.round((guard.streamGapMs ?? 0) / 1000)}s`,
-          };
+          failure = this.streamTimeoutFailure(guard, visibleDeadlineAt, transcoder.hasVisibleContent);
           break;
         }
         if (chunk.readError) {

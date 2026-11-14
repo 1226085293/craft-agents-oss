@@ -475,6 +475,15 @@ export const RPC_CHANNELS = {
     LISTENER_DEPS_ACTION: 'events:listenerDepsAction',
     /** Pushed when a listener process changes state. */
     LISTENER_STATUS: 'events:listenerStatus',
+    /** Plugin-provided HTML config UI (file content or the inline document). */
+    GET_LISTENER_UI: 'events:getListenerUi',
+    /** Log tail + process state, without re-running the dependency probes. */
+    GET_LISTENER_LOG: 'events:getListenerLog',
+    /**
+     * Pushed when a listener's on-disk facts change (enabled flag, saved
+     * config, installed dependency), so list lights follow the detail page.
+     */
+    LISTENER_CHANGED: 'events:listenerChanged',
 
     /** This session's subscriptions. */
     LIST_SUBSCRIPTIONS: 'events:listSubscriptions',

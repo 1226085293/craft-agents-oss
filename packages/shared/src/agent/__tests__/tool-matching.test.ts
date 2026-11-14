@@ -277,9 +277,9 @@ describe('extractToolStarts', () => {
     expect(toolIndex.getInput('toolu_1')).toEqual({ file_path: '/foo.ts' })
   })
 
-  it('extracts intent from _intent field', () => {
+  it('extracts intent from appIntent field', () => {
     const blocks: ContentBlock[] = [
-      makeToolUseBlock('Grep', { pattern: 'foo', _intent: 'Find usages of foo' }, 'toolu_1'),
+      makeToolUseBlock('Grep', { pattern: 'foo', appIntent: 'Find usages of foo' }, 'toolu_1'),
     ]
 
     const events = extractToolStarts(blocks, null, toolIndex, emittedIds)
@@ -295,9 +295,9 @@ describe('extractToolStarts', () => {
     expect(events[0]).toMatchObject({ intent: 'List files' })
   })
 
-  it('extracts displayName from _displayName field', () => {
+  it('extracts displayName from appDisplayName field', () => {
     const blocks: ContentBlock[] = [
-      makeToolUseBlock('mcp__craft__search', { _displayName: 'Search Docs', _intent: 'Find docs' }, 'toolu_1'),
+      makeToolUseBlock('mcp__craft__search', { appDisplayName: 'Search Docs', appIntent: 'Find docs' }, 'toolu_1'),
     ]
 
     const events = extractToolStarts(blocks, null, toolIndex, emittedIds)
@@ -642,7 +642,7 @@ describe('extractToolResults', () => {
   // --- Background event detection ---
 
   it('detects background Task from agentId in result when run_in_background is true', () => {
-    toolIndex.register('toolu_task', 'Task', { _intent: 'Search codebase', run_in_background: true })
+    toolIndex.register('toolu_task', 'Task', { appIntent: 'Search codebase', run_in_background: true })
 
     const blocks: ContentBlock[] = [
       makeToolResultBlock('toolu_task', 'Done.\nagentId: abc123'),
@@ -664,7 +664,7 @@ describe('extractToolResults', () => {
   it('auto-backgrounds an Agent with agentId even without run_in_background', () => {
     // The pre-tool hook forces Agent/Task into background mode; the renderer
     // must therefore surface a chip even when the model omitted the flag.
-    toolIndex.register('toolu_agent', 'Agent', { _intent: 'Explore codebase', prompt: 'Find auth code' })
+    toolIndex.register('toolu_agent', 'Agent', { appIntent: 'Explore codebase', prompt: 'Find auth code' })
 
     const blocks: ContentBlock[] = [
       makeToolResultBlock('toolu_agent', 'Found auth in /src/auth.ts\nagentId: fg_agent_xyz'),
@@ -686,7 +686,7 @@ describe('extractToolResults', () => {
     // WITHOUT run_in_background in the input. The "working in the background" +
     // output_file signature distinguishes it from a foreground agent that merely
     // mentions "agentId:".
-    toolIndex.register('toolu_async', 'Agent', { _intent: 'Investigate Intercom data' })
+    toolIndex.register('toolu_async', 'Agent', { appIntent: 'Investigate Intercom data' })
 
     const asyncResult = [
       'Async agent launched successfully.',
@@ -711,8 +711,8 @@ describe('extractToolResults', () => {
     })
   })
 
-  it('falls back to the Agent description for intent when _intent is absent', () => {
-    // The built-in Agent/Task tool does not set `_intent`, but it carries a concise
+  it('falls back to the Agent description for intent when appIntent is absent', () => {
+    // The built-in Agent/Task tool does not set `appIntent`, but it carries a concise
     // `description` param. The chip should show that instead of the opaque agent ID.
     toolIndex.register('toolu_desc', 'Agent', { description: "Look up today's AI news", prompt: 'Search the web...' })
 
@@ -738,8 +738,8 @@ describe('extractToolResults', () => {
     })
   })
 
-  it('prefers _intent over description when both are present on an Agent launch', () => {
-    toolIndex.register('toolu_both', 'Agent', { _intent: 'Explicit intent', description: 'Short desc' })
+  it('prefers appIntent over description when both are present on an Agent launch', () => {
+    toolIndex.register('toolu_both', 'Agent', { appIntent: 'Explicit intent', description: 'Short desc' })
 
     const asyncResult = [
       'Async agent launched successfully.',
@@ -761,7 +761,7 @@ describe('extractToolResults', () => {
   it('still ignores a foreground Agent that only mentions agentId (no async signature)', () => {
     // Guards against false positives: a foreground result quoting "agentId:" but
     // lacking the background phrasing / output_file must NOT be backgrounded.
-    toolIndex.register('toolu_fg', 'Agent', { _intent: 'Explore', prompt: 'Find code' })
+    toolIndex.register('toolu_fg', 'Agent', { appIntent: 'Explore', prompt: 'Find code' })
 
     const blocks: ContentBlock[] = [
       makeToolResultBlock('toolu_fg', 'The relevant agentId: abc123 is referenced in config.'),

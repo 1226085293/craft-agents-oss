@@ -202,8 +202,8 @@ describe('unified-network-interceptor relay SSE quirks (#613)', () => {
     // args). After the consolidated-emit fix, downstream sees exactly 2.
     const sse = [
       // Phase 1: id+name with metadata-only args at indices 0, 1
-      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_00_Yp3Y","type":"function","function":{"name":"web_fetch","arguments":"{\\"_intent\\":\\"fetch news\\",\\"_displayName\\":\\"Fetch article\\"}"}}]}}]}\n\n',
-      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_01_Zg1a","type":"function","function":{"name":"web_fetch","arguments":"{\\"_intent\\":\\"fetch backup\\",\\"_displayName\\":\\"Fetch article\\"}"}}]}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_00_Yp3Y","type":"function","function":{"name":"web_fetch","arguments":"{\\"appIntent\\":\\"fetch news\\",\\"appDisplayName\\":\\"Fetch article\\"}"}}]}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_01_Zg1a","type":"function","function":{"name":"web_fetch","arguments":"{\\"appIntent\\":\\"fetch backup\\",\\"appDisplayName\\":\\"Fetch article\\"}"}}]}}]}\n\n',
       // Phase 2: empty id+name with url args at NEW indices 2, 3
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"id":"","function":{"name":"","arguments":"{\\"url\\":\\"https://daily.example/news\\"}"}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":3,"id":"","function":{"name":"","arguments":"{\\"url\\":\\"https://ap.example/article\\"}"}}]}}]}\n\n',
@@ -227,8 +227,8 @@ describe('unified-network-interceptor relay SSE quirks (#613)', () => {
     expect(argsArr[1]).toEqual({ url: 'https://ap.example/article' });
     // No metadata leakage in output.
     for (const args of argsArr) {
-      expect(args).not.toHaveProperty('_intent');
-      expect(args).not.toHaveProperty('_displayName');
+      expect(args).not.toHaveProperty('appIntent');
+      expect(args).not.toHaveProperty('appDisplayName');
     }
     // ids preserved correctly per call.
     expect(reassembled[0]?.id).toBe('call_00_Yp3Y');
@@ -261,9 +261,9 @@ describe('unified-network-interceptor relay SSE quirks (#613)', () => {
     // NEW indices interleaved. Output must contain ZERO tool_call entries
     // with empty id.
     const sse = [
-      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read","arguments":"{\\"_intent\\":\\"a\\"}"}}]}}]}\n\n',
-      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"ls","arguments":"{\\"_intent\\":\\"b\\"}"}}]}}]}\n\n',
-      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"id":"call_c","type":"function","function":{"name":"grep","arguments":"{\\"_intent\\":\\"c\\"}"}}]}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read","arguments":"{\\"appIntent\\":\\"a\\"}"}}]}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"ls","arguments":"{\\"appIntent\\":\\"b\\"}"}}]}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"id":"call_c","type":"function","function":{"name":"grep","arguments":"{\\"appIntent\\":\\"c\\"}"}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":3,"id":"","function":{"name":"","arguments":"{\\"path\\":\\"/a\\"}"}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":4,"id":"","function":{"name":"","arguments":"{\\"path\\":\\"/b\\"}"}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":5,"id":"","function":{"name":"","arguments":"{\\"pattern\\":\\"foo\\"}"}}]}}]}\n\n',

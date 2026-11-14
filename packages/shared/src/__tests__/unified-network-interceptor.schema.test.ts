@@ -19,10 +19,10 @@ describe('unified-network-interceptor schema metadata injection', () => {
     const schema = { type: 'object' };
     const result = injectMetadataIntoToolSchema(schema);
 
-    expect(result.properties._displayName).toBeDefined();
-    expect(result.properties._intent).toBeDefined();
-    expect(result.required).toContain('_displayName');
-    expect(result.required).toContain('_intent');
+    expect(result.properties.appDisplayName).toBeDefined();
+    expect(result.properties.appIntent).toBeDefined();
+    expect(result.required).toContain('appDisplayName');
+    expect(result.required).toContain('appIntent');
   });
 
   it('preserves existing properties and required keys while appending metadata keys', () => {
@@ -37,24 +37,24 @@ describe('unified-network-interceptor schema metadata injection', () => {
     const result = injectMetadataIntoToolSchema(schema);
 
     expect(result.properties.url).toEqual({ type: 'string' });
-    expect(result.required).toEqual(['url', '_displayName', '_intent']);
+    expect(result.required).toEqual(['url', 'appDisplayName', 'appIntent']);
   });
 
   it('does not duplicate metadata keys when already present in required', () => {
     const schema = {
       properties: {
-        _displayName: { type: 'string', description: 'custom display name schema' },
-        _intent: { type: 'string', description: 'custom intent schema' },
+        appDisplayName: { type: 'string', description: 'custom display name schema' },
+        appIntent: { type: 'string', description: 'custom intent schema' },
         url: { type: 'string' },
       },
-      required: ['_intent', '_displayName', 'url'],
+      required: ['appIntent', 'appDisplayName', 'url'],
     };
 
     const result = injectMetadataIntoToolSchema(schema);
 
-    expect(result.required).toEqual(['url', '_displayName', '_intent']);
-    expect(result.properties._displayName).toEqual({ type: 'string', description: 'custom display name schema' });
-    expect(result.properties._intent).toEqual({ type: 'string', description: 'custom intent schema' });
+    expect(result.required).toEqual(['url', 'appDisplayName', 'appIntent']);
+    expect(result.properties.appDisplayName).toEqual({ type: 'string', description: 'custom display name schema' });
+    expect(result.properties.appIntent).toEqual({ type: 'string', description: 'custom intent schema' });
   });
 });
 

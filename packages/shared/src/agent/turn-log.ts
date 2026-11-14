@@ -94,7 +94,14 @@ export interface TurnToolCall {
 }
 
 export interface TurnLogData {
-  /** 1-based index among REAL turns in the session. */
+  /**
+   * 1-based index among the REAL turns present in the ledger window passed to
+   * `buildTurnLogs`. NOT a session-global sequence: the ledger (progress.jsonl)
+   * is a rolling window, so this number RESTARTS at 1 after every rotation and
+   * the same value names several different turns across the archive. Never use
+   * it as an ordering key or a "how far did we get" watermark — order by
+   * `turnStartIso` (the file name's compact ISO prefix) instead.
+   */
   turnIndex: number;
   /** ISO timestamp of the turn's first user_request record. */
   turnStartIso: string;
@@ -382,9 +389,28 @@ export function turnLogFileName(turn: TurnLogData): string {
 }
 
 /**
- * Write turn logs to `sessions/{id}/turns/`. Append-only: existing files are
- * never overwritten, so re-running the archiver is a no-op for already
- * archived turns. Best-effort — a failed write must never break the agent.
+ * Identity of a turn inside the archive: its start time, second precision.
+ * File names are `{startIso compact}-{index}.md`, so the same turn archived at
+ * two different moments (the ledger window shifted, giving it a different
+ * index) still maps to the same key.
+ */
+function turnStartKey(isoOrFileName: string): string | null {
+  const key = isoOrFileName.slice(0, 19).replace(/:/g, '-');
+  return /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$/.test(key) ? key : null;
+}
+
+/**
+ * Write turn logs to `sessions/{id}/turns/`. Append-only: a turn that is
+ * already archived is never rewritten, so re-running the archiver is a no-op
+ * for already archived turns. Best-effort — a failed write must never break
+ * the agent.
+ *
+ * Existence is keyed by the turn's START TIME, not by the full file name: the
+ * trailing index is a window-relative ordinal that repeats (see TurnLogData),
+ * so keying on the whole name let one turn be archived again under a new index
+ * every time the ledger window shifted — 261110-brave-titanium accumulated 3
+ * copies of the same turn (`2026-11-10T08-28-29-{002,005,010}.md`), which the
+ * checkpoint then indexed repeatedly.
  *
  * @returns Number of files newly written.
  */
@@ -394,10 +420,23 @@ export function writeTurnLogs(sessionDir: string, turns: TurnLogData[]): number 
   try {
     const dir = getTurnLogsDir(sessionDir);
     mkdirSync(dir, { recursive: true });
+    const archivedStarts = new Set<string>();
+    try {
+      for (const entry of readdirSync(dir)) {
+        if (!entry.endsWith('.md')) continue;
+        const key = turnStartKey(entry);
+        if (key) archivedStarts.add(key);
+      }
+    } catch {
+      // Directory raced away — fall through; per-file existsSync still guards.
+    }
     for (const turn of turns) {
       const path = join(dir, turnLogFileName(turn));
       if (existsSync(path)) continue;
+      const key = turnStartKey(turn.turnStartIso);
+      if (key && archivedStarts.has(key)) continue;
       writeFileSync(path, renderTurnLog(turn), 'utf-8');
+      if (key) archivedStarts.add(key);
       written++;
     }
   } catch (err) {

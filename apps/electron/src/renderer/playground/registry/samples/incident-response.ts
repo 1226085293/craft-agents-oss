@@ -16,8 +16,8 @@ const sentryFetchError: ActivityItem = {
   toolName: 'mcp__sentry__sentry_get_issue',
   toolInput: {
     issue_id: 'PROD-4521',
-    _intent: 'Fetching error details and stack trace for authentication failure',
-    _displayName: 'Get Issue Details',
+    appIntent: 'Fetching error details and stack trace for authentication failure',
+    appDisplayName: 'Get Issue Details',
   },
   intent: 'Fetching error details and stack trace for authentication failure',
   displayName: 'Get Issue Details',
@@ -38,8 +38,8 @@ const slackPostAlert: ActivityItem = {
   toolInput: {
     channel: '#incidents',
     text: '🚨 P1 Incident: Auth service returning 500 errors - investigating',
-    _intent: 'Alerting the engineering team about the production incident',
-    _displayName: 'Post Alert',
+    appIntent: 'Alerting the engineering team about the production incident',
+    appDisplayName: 'Post Alert',
   },
   intent: 'Alerting the engineering team about the production incident',
   displayName: 'Post Alert',
@@ -181,8 +181,8 @@ const slackUpdateStatus: ActivityItem = {
   toolInput: {
     channel: '#incidents',
     text: '✅ Hotfix PR #1847 created and ready for review. Root cause: JWT signing key rotation interval too long.',
-    _intent: 'Updating the team with fix status and PR link',
-    _displayName: 'Update Status',
+    appIntent: 'Updating the team with fix status and PR link',
+    appDisplayName: 'Update Status',
   },
   intent: 'Updating the team with fix status and PR link',
   displayName: 'Update Status',
@@ -203,8 +203,8 @@ const sentryResolve: ActivityItem = {
   toolInput: {
     issue_id: 'PROD-4521',
     status: 'resolving',
-    _intent: 'Marking the Sentry issue as resolving with PR reference',
-    _displayName: 'Update Issue Status',
+    appIntent: 'Marking the Sentry issue as resolving with PR reference',
+    appDisplayName: 'Update Issue Status',
   },
   intent: 'Marking the Sentry issue as resolving with PR reference',
   displayName: 'Update Issue Status',

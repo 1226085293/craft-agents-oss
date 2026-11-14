@@ -71,7 +71,7 @@ describe('DSML sanitizer extension', () => {
     // 261008-plain-stag shape: parameter OPEN tags without the marker, CLOSE
     // tags with it, missing <M>invoke opener, stray closers at the end.
     const malformed =
-      '<parameter name="_displayName">查看剩余 diff</' + M + 'parameter>\n' +
+      '<parameter name="appDisplayName">查看剩余 diff</' + M + 'parameter>\n' +
       '<parameter name="command" string="true">cd "E:/craft-agents-oss" && git diff | head -80</' + M + 'parameter>\n' +
       '<parameter name="timeout" string="false">30</' + M + 'parameter>\n' +
       '</' + M + 'invoke>\n' +
@@ -107,6 +107,30 @@ describe('DSML sanitizer extension', () => {
     const text = (cleaned.content[0] as { text: string }).text;
     expect(text).not.toContain('\uFF5C');
     expect(h.sent).toHaveLength(0);
+  });
+
+  it('strips a bare (marker-less) envelope only when the receiver executed a matching call', async () => {
+    const h = harness();
+    const bare =
+      '<tool_calls>\n<invoke name="bash">\n<parameter name="command" string="true">echo 0</parameter>\n<parameter name="timeout" string="false">150</parameter>\n</invoke>\n</tool_calls>';
+    const nativeCall = { type: 'toolCall', id: 'call_dsml_00000000000000000000000000000000_1', name: 'bash', arguments: { command: 'echo 0', timeout: 150 } };
+    const result = await h.fire({ role: 'assistant', content: [{ type: 'text', text: `Prose before.\n${bare}` }, nativeCall] });
+    const cleaned = (result as { message: { content: Array<{ text?: string }> } } | undefined)?.message;
+    expect(cleaned).toBeDefined();
+    const text = cleaned!.content[0]!.text!;
+    expect(text).not.toContain('tool_calls');
+    expect(text).not.toContain('parameter');
+    expect(text).toContain('Prose before.');
+  });
+
+  it('keeps a bare envelope untouched when no matching native call executed', async () => {
+    const h = harness();
+    const bare =
+      '<tool_calls>\n<invoke name="bash">\n<parameter name="command" string="true">echo 0</parameter>\n</invoke>\n</tool_calls>';
+    const result = await h.fire({ role: 'assistant', content: [{ type: 'text', text: `Prose before.\n${bare}\nAfter.` }] });
+    // Nothing was executable, so nothing is stripped: the sanitizer reports
+    // "no change" (undefined) rather than rewriting the reply.
+    expect(result).toBeUndefined();
   });
 
 });

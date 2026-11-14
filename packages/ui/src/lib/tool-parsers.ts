@@ -547,7 +547,7 @@ export function formatToolCommandPreview(
   }
 
   const entries = Object.entries(input)
-    .filter(([key, value]) => key !== '_intent' && key !== '_displayName' && value !== undefined)
+    .filter(([key, value]) => key !== 'appIntent' && key !== 'appDisplayName' && value !== undefined)
     .sort(([a], [b]) => a.localeCompare(b))
 
   const flags = entries.map(([key, value]) => {

@@ -35,6 +35,7 @@
       "types": "./src/events/message-bridge.ts",
       "default": "./src/events/message-bridge.ts"
     },
+    "./events/plugin-status": "./src/events/plugin-status.ts",
     "./events/plugin-tools": "./src/events/plugin-tools.ts",
     "./events/startup-report": "./src/events/startup-report.ts",
     "./feature-flags": "./src/feature-flags.ts",

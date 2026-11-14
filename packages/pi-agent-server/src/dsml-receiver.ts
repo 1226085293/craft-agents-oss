@@ -7,6 +7,15 @@ type UsableCall = { name: string; args: Record<string, unknown> };
 export interface DsmlReceiverDeps {
   isLlmRequest: (url: string) => boolean;
   debugLog: (message: string) => void;
+  /**
+   * Names of the tools advertised in the CURRENT session (allowlist). Used as
+   * the safety gate for the marker-less (bare) leak form: a bare
+   * `<tool_calls><invoke name="X">` block is only executed when `X` is a tool
+   * this session actually exposes (after the same name-repair rules as
+   * repairToolName). When absent (e.g. standalone usage), bare-form
+   * conversion is DISABLED rather than risk executing prose.
+   */
+  knownToolNames?: () => readonly string[];
 }
 
 const DSML_MARKER = String.fromCharCode(0xff5c);
@@ -17,6 +26,8 @@ let nextSyntheticCallId = 0;
 interface SseState {
   prefix: string;
   content: string;
+  /** Rolling tail of ALL assistant text (bounded) — bare-form parse window. */
+  tailContent: string;
   hasStructuredCalls: boolean;
   terminalLines: string[];
   terminalChunk: Record<string, unknown> | null;
@@ -31,7 +42,7 @@ export function installDsmlReceiver(deps: DsmlReceiverDeps): () => void {
     if (!deps.isLlmRequest(url) || !response.ok || !response.body) return response;
     const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
     if (contentType.includes("text/event-stream")) {
-      return new Response(transformDsmlSse(response.body, deps.debugLog), {
+      return new Response(transformDsmlSse(response.body, deps.debugLog, deps), {
         status: response.status,
         statusText: response.statusText,
         headers: transformedHeaders(response.headers),
@@ -58,11 +69,15 @@ function transformedHeaders(headers: Headers): Headers {
 
 /** Pass SSE through line-by-line. Hold the terminal chunk and [DONE] until the
  * whole response is inspected, then inject native tool-call deltas if needed. */
-export function transformDsmlSse(body: ReadableStream<Uint8Array>, log: (message: string) => void): ReadableStream<Uint8Array> {
+export function transformDsmlSse(
+  body: ReadableStream<Uint8Array>,
+  log: (message: string) => void,
+  deps?: Pick<DsmlReceiverDeps, 'knownToolNames'>,
+): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8");
   const encoder = new TextEncoder();
-  const state: SseState = { prefix: "", content: "", hasStructuredCalls: false, terminalLines: [], terminalChunk: null };
+  const state: SseState = { prefix: "", content: "", tailContent: "", hasStructuredCalls: false, terminalLines: [], terminalChunk: null };
   let pending = "";
   let newline = "\n";
   let holdingTail = false;
@@ -105,6 +120,9 @@ export function transformDsmlSse(body: ReadableStream<Uint8Array>, log: (message
       if (state.content.length > MAX_CAPTURED_CONTENT_CHARS) {
         state.content = state.content.slice(-MAX_CAPTURED_CONTENT_CHARS);
       }
+      // Rolling tail for the bare (marker-less) form: only the LAST chunk
+      // matters (the envelope must close at the end of the reply).
+      state.tailContent = (state.tailContent + delta.content).slice(-MAX_CAPTURED_CONTENT_CHARS);
     }
     if (choice?.finish_reason !== null && choice?.finish_reason !== undefined) {
       holdingTail = true;
@@ -127,14 +145,20 @@ export function transformDsmlSse(body: ReadableStream<Uint8Array>, log: (message
       pending = "";
       const emitted = processLine(line, "");
       if (emitted) {
-        const calls = state.hasStructuredCalls ? [] : usableCalls(state.content);
+        const knownNames = deps?.knownToolNames ? (deps.knownToolNames() ?? []) : [];
+        const calls = state.hasStructuredCalls
+          ? []
+          : usableCalls(state.content, state.tailContent, knownNames.length > 0 ? knownNames : undefined, log);
         if (calls.length > 0) state.terminalLines.unshift(emitted + newline);
         else controller.enqueue(encoder.encode(emitted));
       }
     }
     const finishReason = (state.terminalChunk?.choices as Array<{ finish_reason?: unknown }> | undefined)?.[0]?.finish_reason;
     const mayConvert = finishReason === undefined || finishReason === null || finishReason === "stop";
-    const calls = state.hasStructuredCalls || !mayConvert ? [] : usableCalls(state.content);
+    const knownNames = deps?.knownToolNames ? (deps.knownToolNames() ?? []) : [];
+    const calls = state.hasStructuredCalls || !mayConvert
+      ? []
+      : usableCalls(state.content, state.tailContent, knownNames.length > 0 ? knownNames : undefined, log);
     if (calls.length > 0) {
       for (let i = 0; i < calls.length; i++) {
         const call = calls[i]!;
@@ -212,9 +236,17 @@ export function transformDsmlSse(body: ReadableStream<Uint8Array>, log: (message
   });
 }
 
-function usableCalls(text: string): UsableCall[] {
-  if (!text.includes(DSML_MARKER)) return [];
-  const parsed = parseLeakedToolCalls(text);
+function usableCalls(
+  text: string,
+  tailText: string,
+  knownToolNames: readonly string[] | undefined,
+  log: (message: string) => void,
+): UsableCall[] {
+  const parsed = text.includes(DSML_MARKER)
+    ? parseLeakedToolCalls(text)
+    : knownToolNames && knownToolNames.length > 0
+      ? parseLeakedToolCalls(tailText, { allowBare: true })
+      : { leaked: false, calls: [] };
   if (!parsed.leaked) return [];
   // Repetition failures make the model re-emit the SAME call N times in one
   // response (observed up to 7x). Execute each unique call once: keying on
@@ -223,11 +255,40 @@ function usableCalls(text: string): UsableCall[] {
   const unique: UsableCall[] = [];
   for (const call of parsed.calls) {
     if (!call.name || call.args === null) continue;
-    const key = `${call.name}:${JSON.stringify(call.args)}`;
+    // Bare-form gate: the name must resolve onto a tool this session really
+    // advertises (same repair rules as repairToolName: strip leading
+    // underscores, case-insensitive). Never invent a name — a bare XML block
+    // in prose is ordinary text until this check passes.
+    const name = knownToolNames ? resolveKnownToolName(call.name, knownToolNames) : call.name;
+    if (!name) {
+      if (knownToolNames) {
+        log(`[dsml-receiver] bare leak rejected — "${call.name}" is not an advertised tool`);
+      }
+      continue;
+    }
+    const key = `${name}:${JSON.stringify(call.args)}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    unique.push({ name: call.name, args: call.args });
+    unique.push({ name, args: call.args });
   }
   return unique;
+}
+
+/**
+ * Map a leaked name onto a known tool (same rules as shared's repairToolName):
+ * exact match, leading-underscore strip, then case-insensitive. Returns
+ * `null` when the name cannot be proven — the caller must NOT execute such a
+ * call, because a bare XML block in prose is ordinary text until proven.
+ */
+function resolveKnownToolName(rawName: string, known: readonly string[]): string | null {
+  if (known.includes(rawName)) return rawName;
+  const stripped = rawName.replace(/^_+/, "");
+  if (stripped && known.includes(stripped)) return stripped;
+  const lowered = stripped.toLowerCase();
+  if (lowered) {
+    const caseMatch = known.find((name) => name.toLowerCase() === lowered);
+    if (caseMatch) return caseMatch;
+  }
+  return null;
 }
 

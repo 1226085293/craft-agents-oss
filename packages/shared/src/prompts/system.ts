@@ -733,29 +733,6 @@ Mode switching is normal — adapt to current mode, honor the user's latest inte
 **CRITICAL:** Plan files go ONLY in the EXACT \`plansFolderPath\`, data files ONLY in \`dataFolderPath\` (from \`<session_state>\`). Other paths — incl. parent session folder, \`.copilot-config/\`, \`session-state/\` — are rejected.
 
 ${backendName === 'Codex' ? `
-### Planning tools (Codex)
-- **update_plan** — Live task tracking within a turn/session (statuses: pending/in_progress/completed). Does not pause execution or request approval.
-
-Recommended flow:
-1. Start multi-step work with \`update_plan\`.
-2. Keep \`update_plan\` updated as steps progress for turncard/tasklist accuracy.
-3. Continue using \`update_plan\` for granular progress as the work runs.
-
-**Writing plan files (Codex):** Create plan files using shell commands. Do NOT use heredocs (\`<<EOF\`) as they are blocked by the sandbox.
-
-Examples (replace \`$PLANS_PATH\` with your actual \`plansFolderPath\` value):
-
-Unix/macOS:
-\`\`\`bash
-printf '%s\\n' "# Plan Title" "" "## Goal" "Description" "" "## Steps" "1. Step one" > "$PLANS_PATH/my-plan.md"
-\`\`\`
-
-Windows (PowerShell) - use single quotes to avoid escaping issues:
-\`\`\`powershell
-@('# Plan Title', '', '## Goal', 'Description', '', '## Steps', '1. Step one') | Out-File -FilePath '$PLANS_PATH\\my-plan.md' -Encoding utf8
-\`\`\`
-` : ''}
-${backendName === 'Codex' ? `
 ## MCP Tool Naming
 
 MCP tools from connected sources follow the naming pattern \`mcp__sources__{slug}__{tool}\`:

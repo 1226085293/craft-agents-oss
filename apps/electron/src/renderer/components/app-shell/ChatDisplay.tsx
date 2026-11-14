@@ -1267,7 +1267,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     const pending: PendingFollowUpAnnotation[] = []
 
     for (const message of session.messages) {
-      if (message.role !== 'assistant' && message.role !== 'plan') continue
+      if (message.role !== 'assistant') continue
       if (!message.annotations?.length) continue
 
       for (const annotation of message.annotations) {
@@ -2542,32 +2542,6 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                           }
                         }}
                         onSaveAndSendFollowUp={handleSaveAndSendFollowUp}
-                        onAcceptPlan={() => {
-                          const planMessage = session?.messages.findLast(m => m.role === 'plan')
-                          const planPath = planMessage?.planPath
-
-                          window.dispatchEvent(new CustomEvent('craft:approve-plan', {
-                            detail: {
-                              sessionId: session?.id,
-                              planPath,
-                              includeDraftInput: true,
-                              source: 'plan-card',
-                            },
-                          }))
-                        }}
-                        onAcceptPlanWithCompact={() => {
-                          const planMessage = session?.messages.findLast(m => m.role === 'plan')
-                          const planPath = planMessage?.planPath
-
-                          window.dispatchEvent(new CustomEvent('craft:approve-plan-with-compact', {
-                            detail: {
-                              sessionId: session?.id,
-                              planPath,
-                              includeDraftInput: true,
-                              source: 'plan-card',
-                            },
-                          }))
-                        }}
                         onPopOut={(text) => {
                           // Open raw markdown source in code viewer
                           setOverlayState({

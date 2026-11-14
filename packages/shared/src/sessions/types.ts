@@ -38,8 +38,6 @@ export const SESSION_PERSISTENT_FIELDS = [
   'model', 'llmConnection', 'connectionLocked', 'thinkingLevel', 'strategy',
   // Sharing
   'sharedUrl', 'sharedId',
-  // Plan execution
-  'pendingPlanExecution',
   // Archive
   'isArchived', 'archivedAt',
   // Branching
@@ -193,21 +191,6 @@ export interface SessionConfig {
    * after a reload — otherwise a sticky-looking setting silently resets.
    */
   strategy?: string;
-  /**
-   * Pending plan execution state - tracks "Accept & Compact" flow.
-   * When set, indicates a plan needs to be executed after compaction completes.
-   * Cleared on: successful execution, new user message, or manual clear.
-   */
-  pendingPlanExecution?: {
-    /** Path to the plan file to execute */
-    planPath: string;
-    /** Optional snapshot of draft input captured at accept time */
-    draftInputSnapshot?: string;
-    /** Whether we're still waiting for compaction to complete */
-    awaitingCompaction: boolean;
-    /** Whether execution has already been dispatched from the UI. */
-    executionDispatched?: boolean;
-  };
   /** When true, session is hidden from session list (e.g., mini edit sessions) */
   hidden?: boolean;
   /** Whether this session is archived */
@@ -330,21 +313,6 @@ export interface SessionHeader {
    * after a reload — otherwise a sticky-looking setting silently resets.
    */
   strategy?: string;
-  /**
-   * Pending plan execution state - tracks "Accept & Compact" flow.
-   * When set, indicates a plan needs to be executed after compaction completes.
-   * Cleared on: successful execution, new user message, or manual clear.
-   */
-  pendingPlanExecution?: {
-    /** Path to the plan file to execute */
-    planPath: string;
-    /** Optional snapshot of draft input captured at accept time */
-    draftInputSnapshot?: string;
-    /** Whether we're still waiting for compaction to complete */
-    awaitingCompaction: boolean;
-    /** Whether execution has already been dispatched from the UI. */
-    executionDispatched?: boolean;
-  };
   /** When true, session is hidden from session list (e.g., mini edit sessions) */
   hidden?: boolean;
   /** Whether this session is archived */
@@ -379,7 +347,7 @@ export interface SessionHeader {
   /** Number of messages in session */
   messageCount: number;
   /** Role/type of the last message (for badge display without loading messages) */
-  lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error';
+  lastMessageRole?: 'user' | 'assistant' | 'tool' | 'error';
   /** Preview of first user message (first 150 chars) */
   preview?: string;
   /** Token usage statistics */
@@ -422,7 +390,7 @@ export interface SessionMetadata {
   /** SDK cwd for session storage - set once at creation, never changes */
   sdkCwd?: string;
   /** Role/type of the last message (for badge display without loading messages) */
-  lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error';
+  lastMessageRole?: 'user' | 'assistant' | 'tool' | 'error';
   /** Model to use for this session (overrides global config if set) */
   model?: string;
   /** LLM connection slug for this session (locked after first message) */

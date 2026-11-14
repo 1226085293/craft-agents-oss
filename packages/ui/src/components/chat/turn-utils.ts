@@ -712,7 +712,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
       // A manual /compact has no such work (at most its compacting status row),
       // so retain its standalone result card.
       const hasActiveWork = currentTurn?.activities.some(
-        activity => activity.type === 'tool' || activity.type === 'intermediate' || activity.type === 'plan'
+        activity => activity.type === 'tool' || activity.type === 'intermediate'
       )
       if (currentTurn && hasActiveWork) {
         const existingIdx = currentTurn.activities.findIndex(
@@ -883,39 +883,6 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
         message,
         timestamp: message.timestamp,
       })
-      continue
-    }
-
-    // Plan messages are added as activities to be time-sorted with tool calls
-    // This keeps historical plan rows time-sorted with the rest of the turn
-    if (message.role === 'plan') {
-      if (!currentTurn) {
-        // Edge case: plan without preceding activities
-        currentTurn = {
-          type: 'assistant',
-          turnId: message.turnId || message.id,
-          activities: [],
-          response: undefined,
-          intent: undefined,
-          isStreaming: false,
-          isComplete: false,
-          timestamp: message.timestamp,
-        }
-      }
-      // Add plan as an activity so it gets time-sorted with other activities
-      currentTurn.activities.push({
-        id: message.id,
-        type: 'plan' as ActivityType,
-        status: 'completed',
-        content: message.content,
-        messageId: message.id,
-        annotations: message.annotations,
-        displayName: 'Plan',
-        timestamp: message.timestamp,
-      })
-      currentTurn.isStreaming = false
-      currentTurn.isComplete = true
-      flushCurrentTurn()
       continue
     }
 
@@ -1193,7 +1160,6 @@ export function turnHasNoMeaningfulWork(
     // Intermediate activities must have no meaningful content
     if (a.type === 'intermediate') return !a.content?.trim()
     // Plan activities are meaningful work
-    if (a.type === 'plan') return false
     // Status rows that carry the turn's outcome are meaningful
     if (a.type === 'status') {
       return !(

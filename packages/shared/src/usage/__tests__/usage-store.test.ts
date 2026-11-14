@@ -39,7 +39,7 @@ describe('resolveUsageTarget', () => {
 
   it('ignores internal session MCP tools', () => {
     expect(resolveUsageTarget('mcp__session__call_llm', { model: 'x' })).toBeNull()
-    expect(resolveUsageTarget('mcp__session__SubmitPlan', {})).toBeNull()
+    expect(resolveUsageTarget('mcp__session__config_validate', {})).toBeNull()
   })
 
   it('resolves the Skill tool to its slug', () => {

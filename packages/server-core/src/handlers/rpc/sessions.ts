@@ -121,7 +121,6 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.sessions.RESPOND_TO_PERMISSION,
   RPC_CHANNELS.sessions.RESPOND_TO_CREDENTIAL,
   RPC_CHANNELS.sessions.COMMAND,
-  RPC_CHANNELS.sessions.GET_PENDING_PLAN_EXECUTION,
   RPC_CHANNELS.sessions.GET_PERMISSION_MODE_STATE,
   RPC_CHANNELS.sessions.SEARCH_CONTENT,
   RPC_CHANNELS.sessions.GET_FILES,
@@ -405,18 +404,9 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
       case 'setConnection':
         log.info(`IPC: setConnection received for session ${sessionId}, connection: ${command.connectionSlug}`)
         return sessionManager.setSessionConnection(sessionId, command.connectionSlug)
-      // Pending plan execution (Accept & Compact flow)
-      case 'setPendingPlanExecution':
-        return sessionManager.setPendingPlanExecution(sessionId, command.planPath, command.draftInputSnapshot)
-      case 'markCompactionComplete':
-        return sessionManager.markCompactionComplete(sessionId)
       case 'clearSession':
         // Clear the session's message context (same as /clear on mobile)
         return sessionManager.clearSessionMessages(sessionId)
-      case 'markPendingPlanExecutionDispatched':
-        return sessionManager.markPendingPlanExecutionDispatched(sessionId)
-      case 'clearPendingPlanExecution':
-        return sessionManager.clearPendingPlanExecution(sessionId)
       case 'cancelQueuedMessage':
         return sessionManager.cancelQueuedMessage(sessionId, command.messageId)
       case 'guideQueuedMessage':
@@ -436,14 +426,6 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
         throw new Error(`Unknown session command: ${JSON.stringify(command)}`)
       }
     }
-  })
-
-  // Get pending plan execution state (for reload recovery)
-  server.handle(RPC_CHANNELS.sessions.GET_PENDING_PLAN_EXECUTION, async (
-    _ctx,
-    sessionId: string
-  ) => {
-    return sessionManager.getPendingPlanExecution(sessionId)
   })
 
   // Get authoritative permission mode diagnostics for renderer reconciliation

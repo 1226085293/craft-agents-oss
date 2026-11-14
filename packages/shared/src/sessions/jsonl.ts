@@ -208,14 +208,14 @@ export function createSessionHeader(session: StoredSession): SessionHeader {
 
 /**
  * Extract the role of the last message for badge display.
- * Only returns roles that are meaningful for UI display (user, assistant, plan, tool, error).
+ * Only returns roles that are meaningful for UI display (user, assistant, tool, error).
  */
 function extractLastMessageRole(messages: StoredMessage[]): SessionHeader['lastMessageRole'] {
   const lastMessage = messages[messages.length - 1];
   if (!lastMessage) return undefined;
   // Map message types to the subset we care about for display
   const role = lastMessage.type;
-  if (role === 'user' || role === 'assistant' || role === 'plan' || role === 'tool' || role === 'error') {
+  if (role === 'user' || role === 'assistant' || role === 'tool' || role === 'error') {
     return role;
   }
   return undefined;

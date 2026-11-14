@@ -62,7 +62,7 @@ export interface SessionMeta {
   /** Non-null = pinned (D33) */
   pinnedAt?: number
   /** Role/type of the last message (for badge display without loading messages) */
-  lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error'
+  lastMessageRole?: 'user' | 'assistant' | 'tool' | 'error'
   /** Whether an async operation is ongoing (sharing, updating share, revoking, title regeneration) */
   isAsyncOperationOngoing?: boolean
   /** @deprecated Use isAsyncOperationOngoing instead */
@@ -102,7 +102,7 @@ function findLastFinalMessageId(messages: Message[]): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]
     // Include plan messages as final responses (they're AI-generated content)
-    if ((msg.role === 'assistant' || msg.role === 'plan') && !msg.isIntermediate) {
+    if ((msg.role === 'assistant') && !msg.isIntermediate) {
       return msg.id
     }
   }

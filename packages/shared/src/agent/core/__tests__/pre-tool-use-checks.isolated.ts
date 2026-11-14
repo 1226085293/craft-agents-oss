@@ -386,7 +386,7 @@ describe('runPreToolUseChecks', () => {
 
     it('does not intercept other session tools', () => {
       const result = runPreToolUseChecks(createInput({
-        toolName: 'mcp__session__SubmitPlan',
+        toolName: 'mcp__session__config_validate',
         input: {},
       }));
 

@@ -1171,7 +1171,7 @@ export default function App() {
           if (event.type === 'complete' && !updatedSession.hidden) {
             // Get the last assistant/plan message as preview
             const lastMessage = updatedSession.messages.findLast(
-              m => (m.role === 'assistant' || m.role === 'plan') && !m.isIntermediate
+              m => m.role === 'assistant' && !m.isIntermediate
             )
             // Strip markdown so OS notifications display clean plain text
             const rawPreview = lastMessage?.content?.substring(0, 200) || undefined
@@ -1383,7 +1383,7 @@ export default function App() {
     // Also update lastReadMessageId for backwards compatibility
     updateSessionById(sessionId, (s) => {
       const lastFinalId = s.messages.findLast(
-        m => (m.role === 'assistant' || m.role === 'plan') && !m.isIntermediate
+        m => m.role === 'assistant' && !m.isIntermediate
       )?.id
       return {
         hasUnread: false,

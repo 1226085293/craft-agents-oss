@@ -208,7 +208,7 @@ interface SessionItemPreviewProps {
   isSelected?: boolean
   searchQuery?: string
   chatMatchCount?: number
-  state?: 'none' | 'loading' | 'plan' | 'new'
+  state?: 'none' | 'loading' | 'new'
 }
 
 function SessionItemPreview({
@@ -222,7 +222,6 @@ function SessionItemPreview({
     const base: SessionMeta = { ...item, isProcessing: false, hasUnread: false, lastMessageRole: undefined }
     switch (state) {
       case 'loading': base.isProcessing = true; break
-      case 'plan': base.lastMessageRole = 'plan'; break
       case 'new': base.hasUnread = true; break
     }
     return base
@@ -386,7 +385,6 @@ export const sessionListComponents: ComponentEntry[] = [
           options: [
             { label: 'None', value: 'none' },
             { label: 'Loading', value: 'loading' },
-            { label: 'Plan', value: 'plan' },
             { label: 'New', value: 'new' },
           ],
         },
@@ -433,7 +431,7 @@ export const sessionListComponents: ComponentEntry[] = [
         description: 'Session has a pending plan (shows compass icon)',
         props: {
           item: sampleSessions[0],
-          state: 'plan',
+          state: 'none',
         },
       },
       {

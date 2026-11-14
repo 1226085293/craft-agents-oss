@@ -9,14 +9,6 @@ export * from './errors.ts';
 export type { AgentEvent } from '@craft-agent/core/types';
 export { resolveKeepBackgroundTasksAlive } from './keep-alive.ts';
 
-// Plan state (shared by Pi and legacy tools)
-export {
-  getSessionPlansDir,
-  getLastPlanFilePath,
-  clearPlanFileState,
-  isPathInPlansDir,
-} from './session-plan-state.ts';
-
 // Session-scoped tool callbacks
 export {
   registerSessionScopedToolCallbacks,
@@ -76,8 +68,6 @@ export {
 } from './mode-manager.ts';
 
 // Export plan types and permission mode messages
-export type { Plan, PlanStep, PlanState, PlanReviewRequest, PlanReviewResult } from './plan-types.ts';
-export { PERMISSION_MODE_MESSAGES, PERMISSION_MODE_PROMPTS } from './plan-types.ts';
 
 // Export thinking-levels - extended reasoning configuration
 export {

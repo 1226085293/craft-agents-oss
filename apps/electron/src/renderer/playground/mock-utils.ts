@@ -296,12 +296,6 @@ export const mockElectronAPI = {
     console.log('[Playground] writeAppearance called:', content)
   },
 
-  // FreeFormInput required mocks
-  getPendingPlanExecution: async (sessionId: string) => {
-    console.log('[Playground] getPendingPlanExecution called:', sessionId)
-    return null
-  },
-
   getSendMessageKey: async () => 'enter',
   getSpellCheck: async () => true,
   getDefaultContextWindow: async () => 512_000,

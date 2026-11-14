@@ -1133,7 +1133,7 @@ function DocumentFormattedMarkdownOverlayPlayground({
   variant,
 }: {
   content: string
-  variant?: 'response' | 'plan'
+  variant?: 'response'
 }) {
   const [isOpen, setIsOpen] = useState(true)
 
@@ -1890,7 +1890,6 @@ export const fullscreenOverlayComponents: ComponentEntry[] = [
           type: 'select',
           options: [
             { label: 'Response', value: 'response' },
-            { label: 'Plan', value: 'plan' },
           ],
         },
         defaultValue: 'response',
@@ -1910,7 +1909,7 @@ export const fullscreenOverlayComponents: ComponentEntry[] = [
         description: 'Plan view with green header badge',
         props: {
           content: samplePlanContent,
-          variant: 'plan',
+          variant: 'response',
         },
       },
       {

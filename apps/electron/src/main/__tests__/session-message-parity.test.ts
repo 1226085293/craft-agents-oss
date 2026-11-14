@@ -64,7 +64,6 @@ function createFullMessage(): Message {
     errorDetails: ['DNS lookup failed'],
     errorOriginal: 'ENOTFOUND',
     errorCanRetry: true,
-    planPath: '/plans/plan.md',
     authRequestId: 'auth-req-1',
     authRequestType: 'credential',
     authSourceSlug: 'linear',
@@ -169,7 +168,6 @@ describe('messageToStored/storedToMessage round-trip', () => {
     expect(restored.errorDetails).toEqual(original.errorDetails)
     expect(restored.errorOriginal).toBe(original.errorOriginal)
     expect(restored.errorCanRetry).toBe(original.errorCanRetry)
-    expect(restored.planPath).toBe(original.planPath)
     expect(restored.authRequestId).toBe(original.authRequestId)
     expect(restored.authRequestType).toBe(original.authRequestType)
     expect(restored.authSourceSlug).toBe(original.authSourceSlug)
@@ -190,7 +188,7 @@ describe('messageToStored/storedToMessage round-trip', () => {
   })
 
   it('role ↔ type mapping works for each MessageRole', () => {
-    const roles: MessageRole[] = ['user', 'assistant', 'tool', 'error', 'info', 'warning', 'plan', 'auth-request']
+    const roles: MessageRole[] = ['user', 'assistant', 'tool', 'error', 'info', 'warning', 'auth-request']
 
     for (const role of roles) {
       const msg = createMinimalMessage(role)
@@ -304,21 +302,19 @@ describe('persistence pipeline filtering', () => {
       createMessageWithRole('status'),
       createMessageWithRole('info'),
       createMessageWithRole('error'),
-      createMessageWithRole('plan'),
       createMessageWithRole('auth-request'),
     ]
 
     // Mirror: persistSession filter
     const filtered = messages.filter(m => m.role !== 'status')
 
-    expect(filtered).toHaveLength(7)
+    expect(filtered).toHaveLength(6)
     expect(filtered.map(m => m.role)).not.toContain('status')
     expect(filtered.map(m => m.role)).toContain('user')
     expect(filtered.map(m => m.role)).toContain('assistant')
     expect(filtered.map(m => m.role)).toContain('tool')
     expect(filtered.map(m => m.role)).toContain('info')
     expect(filtered.map(m => m.role)).toContain('error')
-    expect(filtered.map(m => m.role)).toContain('plan')
     expect(filtered.map(m => m.role)).toContain('auth-request')
   })
 

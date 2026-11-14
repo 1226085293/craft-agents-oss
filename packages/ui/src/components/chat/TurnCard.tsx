@@ -83,8 +83,6 @@ import { useAnnotationIslandPresentation } from '../annotations/use-annotation-i
 import { useAnnotationIslandEvents } from '../annotations/use-annotation-island-events'
 import { useAnnotationCancelRestore } from '../annotations/use-annotation-cancel-restore'
 import { DocumentFormattedMarkdownOverlay } from '../overlay'
-import { AcceptPlanDropdown } from './AcceptPlanDropdown'
-import { CompactAcceptPlanDrawer } from './CompactAcceptPlanDrawer'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -219,7 +217,7 @@ export const SIZE_CONFIG = {
 // ============================================================================
 
 export type ActivityStatus = 'pending' | 'running' | 'completed' | 'error' | 'backgrounded'
-export type ActivityType = 'tool' | 'thinking' | 'intermediate' | 'status' | 'plan'
+export type ActivityType = 'tool' | 'thinking' | 'intermediate' | 'status'
 export type AnnotationInteractionMode = 'interactive' | 'tooltip-only'
 
 // ============================================================================
@@ -279,8 +277,6 @@ export interface ResponseContent {
   text: string
   isStreaming: boolean
   streamStartTime?: number
-  /** Whether this response is a plan (renders with plan variant) */
-  isPlan?: boolean
   /** ID of the underlying message (for branching + annotations) */
   messageId?: string
   /** Persisted annotations attached to the response message */
@@ -345,10 +341,6 @@ export interface TurnCardProps {
   todos?: TodoItem[]
   /** Optional render prop for actions menu (Electron provides dropdown) */
   renderActionsMenu?: () => React.ReactNode
-  /** Callback when user accepts the plan (plan responses only) */
-  onAcceptPlan?: () => void
-  /** Callback when user accepts the plan with compaction (compact conversation first, then execute) */
-  onAcceptPlanWithCompact?: () => void
   /** Whether this is the last response in the session (shows Accept Plan button only for last response) */
   isLastResponse?: boolean
   /** Session folder path for stripping from file paths in tool display */
@@ -1456,24 +1448,17 @@ export interface ResponseCardProps {
   onOpenUrl?: (url: string) => void
   /** Callback to open response in Monaco editor */
   onPopOut?: () => void
-  /** Card variant - 'response' for AI messages, 'plan' for plan messages */
-  variant?: 'response' | 'plan'
   /** Parent session ID (used to reset local annotation/island UI state on session switches) */
   sessionId?: string
   /** Underlying message ID for annotation actions */
   messageId?: string
   /** Persisted annotations for this response */
   annotations?: AnnotationV1[]
-  /** Callback when user accepts the plan (plan variant only) */
-  onAccept?: () => void
-  /** Callback when user accepts the plan with compaction (compact first, then execute) */
-  onAcceptWithCompact?: () => void
-  /** Whether this is the last response in the session (shows Accept Plan button only for last response) */
+  /** Render variant. Only `response` exists now: plan messages and their Accept button are gone. */
+  variant?: 'response'
+  /** Whether this is the last response in the session */
   isLastResponse?: boolean
-  /** Whether to show the Accept Plan button (default: true) */
-  showAcceptPlan?: boolean
-  /** Compact-footer layout. Hides Copy / Markdown / Branch in the response footer;
-   *  keeps the Accept Plan dropdown when a plan is the last response. */
+  /** Compact-footer layout. Hides Copy / Markdown / Branch in the response footer. */
   compactMode?: boolean
   /** Callback to branch the session from this response */
   onBranch?: (options?: { newPanel?: boolean }) => void
@@ -1699,7 +1684,6 @@ function applyTextHighlightRange(
  *
  * Variants:
  * - 'response': Buffered streaming response with smart content gating
- * - 'plan': Plan message with header and Accept Plan button
  *
  * Response variant implements smart buffering:
  * - Waits for 40+ words with structure OR
@@ -1721,10 +1705,7 @@ export function ResponseCard({
   sessionId,
   messageId,
   annotations,
-  onAccept,
-  onAcceptWithCompact,
   isLastResponse = true,
-  showAcceptPlan = true,
   compactMode = false,
   onBranch,
   onAddAnnotation,
@@ -2508,8 +2489,7 @@ export function ResponseCard({
   }
 
   // Completed response or plan - show with max height and footer
-  if (isCompleted || variant === 'plan') {
-    const isPlan = variant === 'plan'
+  if (isCompleted) {
 
     return (
       <>
@@ -2531,18 +2511,6 @@ export function ResponseCard({
           </button>
           )}
 
-          {/* Plan header - only shown for plan variant */}
-          {isPlan && (
-            <div
-              className={cn(
-                "px-4 py-2 border-b border-border/30 flex items-center gap-2 bg-success/5 select-none",
-                SIZE_CONFIG.fontSize
-              )}
-            >
-              <ListTodo className={cn(SIZE_CONFIG.iconSize, "text-success")} />
-              <span className="font-medium text-success">Plan</span>
-            </div>
-          )}
 
           {/* Scrollable content area with subtle fade at edges (dark mode only) */}
           <div
@@ -2618,48 +2586,11 @@ export function ResponseCard({
 
               {/* Right side */}
               <div className="flex items-center gap-3">
-                {/* Accept Plan dropdown (plan variant only, last response) */}
-                {isPlan && showAcceptPlan && onAccept && onAcceptWithCompact && (
-                  <div
-                    className={cn(
-                      "flex items-center gap-3 transition-all duration-200",
-                      isLastResponse
-                        ? "opacity-100 translate-x-0"
-                        : "opacity-0 translate-x-2 pointer-events-none"
-                    )}
-                  >
-                    <AcceptPlanDropdown
-                      onAccept={onAccept}
-                      onAcceptWithCompact={onAcceptWithCompact}
-                      acceptLabel={hasActiveFollowUpAnnotations ? t('plan.acceptAndSendFollowups') : t('plan.acceptPlan')}
-                      acceptOptionLabel={hasActiveFollowUpAnnotations ? t('plan.acceptAndSendFollowups') : t('plan.accept')}
-                    />
-                  </div>
-                )}
                 {onBranch && <BranchDropdown onBranch={onBranch} />}
               </div>
             </div>
           )}
 
-          {/* Compact footer — Accept Plan only (mobile / auto-compact / popover).
-              Uses a bottom-sheet drawer to match the CompactPermissionModeSelector
-              / CompactModelSelector pattern. Guarded by isLastResponse so older
-              plans don't render an empty strip with a hidden-but-focusable button. */}
-          {compactMode && isPlan && showAcceptPlan && isLastResponse && onAccept && onAcceptWithCompact && (
-            <div
-              className={cn(
-                "pl-3 pr-2 py-1.5 border-t border-border/30 flex items-center justify-end bg-muted/20",
-                SIZE_CONFIG.fontSize
-              )}
-            >
-              <CompactAcceptPlanDrawer
-                onAccept={onAccept}
-                onAcceptWithCompact={onAcceptWithCompact}
-                acceptLabel={hasActiveFollowUpAnnotations ? t('plan.acceptAndSendFollowups') : t('plan.acceptPlan')}
-                acceptOptionLabel={hasActiveFollowUpAnnotations ? t('plan.acceptAndSendFollowups') : t('plan.accept')}
-              />
-            </div>
-          )}
         </div>
 
         {/* Fullscreen overlay for reading/annotating response and plan content. */}
@@ -2667,7 +2598,6 @@ export function ResponseCard({
           content={text}
           isOpen={isFullscreen}
           onClose={() => setIsFullscreen(false)}
-          variant={isPlan ? 'plan' : undefined}
           onOpenUrl={onOpenUrl}
           onOpenFile={onOpenFile}
           sessionId={sessionId}
@@ -2856,8 +2786,6 @@ export const TurnCard = React.memo(function TurnCard({
   hasEditOrWriteActivities,
   todos,
   renderActionsMenu,
-  onAcceptPlan,
-  onAcceptPlanWithCompact,
   isLastResponse,
   sessionFolderPath,
   displayMode = 'detailed',
@@ -2988,15 +2916,7 @@ export const TurnCard = React.memo(function TurnCard({
     [activities]
   )
 
-  // Plans are rendered as full ResponseCards, not in the collapsible activities section.
-  const planActivities = useMemo(
-    () => allSortedActivities.filter(a => a.type === 'plan'),
-    [allSortedActivities]
-  )
-  const sortedActivities = useMemo(
-    () => allSortedActivities.filter(a => a.type !== 'plan'),
-    [allSortedActivities]
-  )
+  const sortedActivities = allSortedActivities
 
   // Check if we have any Task subagents - if so, use grouped view
   const hasTaskSubagents = useMemo(
@@ -3339,36 +3259,6 @@ export const TurnCard = React.memo(function TurnCard({
         </div>
       )}
 
-      {/* Plan Activities - rendered as full ResponseCards, time-sorted with other activities */}
-      {planActivities.map((planActivity, index) => (
-        <div key={planActivity.id} className={cn("select-text", (hasActivities || index > 0) && "mt-2")}>
-          <ResponseCard
-            text={planActivity.content || ''}
-            isStreaming={false}
-            sessionId={sessionId}
-            onOpenFile={onOpenFile}
-            onOpenUrl={onOpenUrl}
-            onPopOut={onPopOut ? () => onPopOut(planActivity.content || '') : undefined}
-            variant="plan"
-            messageId={planActivity.messageId}
-            annotations={planActivity.annotations}
-            onAddAnnotation={onAddAnnotation}
-            onRemoveAnnotation={onRemoveAnnotation}
-            onUpdateAnnotation={onUpdateAnnotation}
-            onSaveAndSendFollowUp={onSaveAndSendFollowUp}
-            onAccept={onAcceptPlan}
-            onAcceptWithCompact={onAcceptPlanWithCompact}
-            isLastResponse={isLastResponse && index === planActivities.length - 1}
-            compactMode={compactMode}
-            onBranch={onBranch ? (options?: { newPanel?: boolean }) => onBranch(planActivity.messageId ?? planActivity.id, options) : undefined}
-            sendMessageKey={sendMessageKey}
-            hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}
-            openAnnotationRequest={openAnnotationRequest}
-            annotationInteractionMode={annotationInteractionMode}
-          />
-        </div>
-      ))}
-
       {/* Response Section - only shown when not buffering */}
       {/* Animated version for playground demos */}
       {animateResponse && (
@@ -3388,15 +3278,13 @@ export const TurnCard = React.memo(function TurnCard({
                 onOpenFile={onOpenFile}
                 onOpenUrl={onOpenUrl}
                 onPopOut={onPopOut ? () => onPopOut(response.text) : undefined}
-                variant={response.isPlan ? 'plan' : 'response'}
+                variant="response"
                 messageId={response.messageId}
                 annotations={response.annotations}
                 onAddAnnotation={onAddAnnotation}
                 onRemoveAnnotation={onRemoveAnnotation}
                 onUpdateAnnotation={onUpdateAnnotation}
                 onSaveAndSendFollowUp={onSaveAndSendFollowUp}
-                onAccept={onAcceptPlan}
-                onAcceptWithCompact={onAcceptPlanWithCompact}
                 isLastResponse={isLastResponse}
                 compactMode={compactMode}
                 onBranch={onBranch && response.messageId ? (options?: { newPanel?: boolean }) => onBranch(response.messageId!, options) : undefined}
@@ -3421,15 +3309,13 @@ export const TurnCard = React.memo(function TurnCard({
             onOpenFile={onOpenFile}
             onOpenUrl={onOpenUrl}
             onPopOut={onPopOut ? () => onPopOut(response.text) : undefined}
-            variant={response.isPlan ? 'plan' : 'response'}
+            variant="response"
             messageId={response.messageId}
             annotations={response.annotations}
             onAddAnnotation={onAddAnnotation}
             onRemoveAnnotation={onRemoveAnnotation}
             onUpdateAnnotation={onUpdateAnnotation}
             onSaveAndSendFollowUp={onSaveAndSendFollowUp}
-            onAccept={onAcceptPlan}
-            onAcceptWithCompact={onAcceptPlanWithCompact}
             isLastResponse={isLastResponse}
             compactMode={compactMode}
             onBranch={onBranch && response.messageId ? (options?: { newPanel?: boolean }) => onBranch(response.messageId!, options) : undefined}

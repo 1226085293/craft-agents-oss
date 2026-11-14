@@ -93,7 +93,7 @@ describe('supervisor lanes', () => {
    */
   it('owns no task write, because it cannot dispatch', () => {
     const tools = userLaneTools()
-    for (const name of ['task_create', 'task_update', 'task_handoff', 'SubmitPlan', 'dispatch']) {
+    for (const name of ['task_create', 'task_update', 'task_handoff', 'dispatch']) {
       expect(tools.has(name)).toBe(false)
     }
   })

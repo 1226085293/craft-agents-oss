@@ -303,7 +303,6 @@ const EXPECTED_CHANNELS: string[] = [
   "sessions:getFiles",
   "sessions:getMessages",
   "sessions:getNotes",
-  "sessions:getPendingPlanExecution",
   "sessions:getPermissionModeState",
   "sessions:getUnreadSummary",
   "sessions:import",

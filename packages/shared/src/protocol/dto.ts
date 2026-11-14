@@ -86,7 +86,7 @@ export interface Session {
    * single supervisor, which behaved as `task`.
    */
   supervisorLane?: 'user' | 'task'
-  lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error'
+  lastMessageRole?: 'user' | 'assistant' | 'tool' | 'error'
   lastFinalMessageId?: string
   isAsyncOperationOngoing?: boolean
   /** @deprecated Use isAsyncOperationOngoing instead */
@@ -411,11 +411,7 @@ export type SessionCommand =
   | { type: 'revokeShare' }
   | { type: 'refreshTitle' }
   | { type: 'setConnection'; connectionSlug: string }
-  | { type: 'setPendingPlanExecution'; planPath: string; draftInputSnapshot?: string }
-  | { type: 'markCompactionComplete' }
   | { type: 'clearSession' }
-  | { type: 'markPendingPlanExecutionDispatched' }
-  | { type: 'clearPendingPlanExecution' }
   | { type: 'cancelQueuedMessage'; messageId: string }
   | { type: 'guideQueuedMessage'; messageId: string }
   /** Reorder the pending queue. `messageIds` is the full new order; rows not

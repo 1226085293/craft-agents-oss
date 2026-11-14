@@ -124,7 +124,7 @@ export function appendMessage(
   }
 
   // Determine if this message role should update lastMessageRole (for badge display)
-  const badgeRoles = ['user', 'assistant', 'plan', 'tool', 'error'] as const
+  const badgeRoles = ['user', 'assistant', 'tool', 'error'] as const
   const roleForBadge = badgeRoles.includes(message.role as typeof badgeRoles[number])
     ? message.role as Session['lastMessageRole']
     : undefined

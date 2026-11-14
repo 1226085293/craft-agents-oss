@@ -17,7 +17,6 @@ import { debug } from '../utils/debug.ts';
 import { readJsonFileSync } from '../utils/files.ts';
 import { CONFIG_DIR } from './paths.ts';
 import type { StoredAttachment, StoredMessage } from '@craft-agent/core/types';
-import type { Plan } from '../agent/plan-types.ts';
 import type { PermissionMode } from '../agent/mode-manager.ts';
 import type { ThinkingLevel } from '../agent/thinking-levels.ts';
 import { isValidThinkingLevel, normalizeThinkingLevel } from '../agent/thinking-levels.ts';
@@ -1182,53 +1181,6 @@ export function clearWorkspaceConversation(workspaceId: string): void {
   const filePath = join(WORKSPACES_DIR, workspaceId, 'conversation.json');
   if (existsSync(filePath)) {
     writeFileSync(filePath, '{}', 'utf-8');
-  }
-
-  // Also clear any active plan (plans are session-scoped)
-  clearWorkspacePlan(workspaceId);
-}
-
-// ============================================
-// Plan Storage (Session-Scoped)
-// Plans are stored per-workspace and cleared with /clear
-// ============================================
-
-/**
- * Save a plan for a workspace.
- * Plans are session-scoped - they persist during the session but are
- * cleared when the user runs /clear or starts a new session.
- */
-export function saveWorkspacePlan(workspaceId: string, plan: Plan): void {
-  const dir = ensureWorkspaceDir(workspaceId);
-  const filePath = join(dir, 'plan.json');
-  writeFileSync(filePath, JSON.stringify(plan, null, 2), 'utf-8');
-}
-
-/**
- * Load the current plan for a workspace.
- * Returns null if no plan exists.
- */
-export function loadWorkspacePlan(workspaceId: string): Plan | null {
-  const filePath = join(WORKSPACES_DIR, workspaceId, 'plan.json');
-
-  try {
-    if (!existsSync(filePath)) {
-      return null;
-    }
-    return readJsonFileSync<Plan>(filePath);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Clear the plan for a workspace.
- * Called when user runs /clear or cancels a plan.
- */
-export function clearWorkspacePlan(workspaceId: string): void {
-  const filePath = join(WORKSPACES_DIR, workspaceId, 'plan.json');
-  if (existsSync(filePath)) {
-    rmSync(filePath);
   }
 }
 

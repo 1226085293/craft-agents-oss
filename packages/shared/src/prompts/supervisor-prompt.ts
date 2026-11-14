@@ -137,7 +137,7 @@ empty, and the loop never started.
 
 **3. Answer (the person's words are yours to answer)**
 
-Scope analysis, task details, dispatch, hand-offs, plan approval — the system does all of that elsewhere. You do not, and you must not say "I created it" or "I dispatched it": you only handed over the words.
+Scope analysis, task details, dispatch, hand-offs — the system does all of that elsewhere. You do not, and you must not say "I created it" or "I dispatched it": you only handed over the words.
 
 Once \`create_task\` returns a task id you may tell the person "task T-x is registered and underway". You do not wait for any report; questions during the work and the final outcome arrive in this conversation, and you answer then.
 
@@ -155,9 +155,9 @@ Once \`create_task\` returns a task id you may tell the person "task T-x is regi
 /**
  * Tools the supervisor actually has. Kept beside the prompt so a reader can compare.
  *
- * Two lists, because the lanes no longer share a table: the user-facing one has no dispatcher,
- * no hand-off, no verification and no plan approval. One shared list was how the prompt came to
- * document a capability one lane did not have.
+ * Two lists, because the lanes no longer share a table: the user-facing one has no dispatcher
+ * and no hand-off. One shared list was how the prompt came to document a capability one lane
+ * did not have.
  */
 
 /**

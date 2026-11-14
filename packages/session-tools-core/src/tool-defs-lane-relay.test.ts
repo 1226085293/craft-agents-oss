@@ -26,7 +26,7 @@ describe('supervisor lanes: one writer, one reader', () => {
 
   it('gives the user lane no way to write a task', () => {
     const tools = userTools();
-    for (const denied of ['task_create', 'task_update', 'task_handoff', 'SubmitPlan']) {
+    for (const denied of ['task_create', 'task_update', 'task_handoff']) {
       expect(tools.has(denied)).toBe(false);
     }
   });

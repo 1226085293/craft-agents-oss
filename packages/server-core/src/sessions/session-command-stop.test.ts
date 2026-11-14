@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createSession, getPendingPlanExecution, setPendingPlanExecution } from '@craft-agent/shared/sessions'
+import { createSession } from '@craft-agent/shared/sessions'
 import { SessionManager, createManagedSession } from './SessionManager.ts'
 
 /**
@@ -81,16 +81,6 @@ describe('executeSessionCommand /stop', () => {
     // The queue is deliberately NOT cleared: an explicit stop ends the current
     // turn only, and the receipt must say so instead of implying a full halt.
     expect(result.queueLength).toBe(1)
-  })
-
-  it('clears a pending Accept & Compact plan so it cannot auto-execute after a stop', async () => {
-    const stored = await createSession(tmpRoot, { name: 'pending plan' })
-    await setPendingPlanExecution(tmpRoot, stored.id, '/plans/pending.md')
-    buildSession(stored.id)
-
-    await sm.executeSessionCommand(stored.id, stop)
-
-    expect(getPendingPlanExecution(tmpRoot, stored.id)).toBeNull()
   })
 
   it('loads messages before writing the abort marker', async () => {

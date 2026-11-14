@@ -198,24 +198,6 @@ describe('turn grouping stability across reload', () => {
     expect(lastReload?.response?.text).toBe('Here are the results.')
   })
 
-  it('plan message turn: planPath survives reload', () => {
-    const messages: Message[] = [
-      createMessage('user', { content: 'Plan it' }),
-      createMessage('plan', {
-        content: '# Implementation Plan\n\n1. Do thing',
-        planPath: '/sessions/123/plans/plan.md',
-      }),
-      createMessage('user', { content: 'Looks good, execute' }),
-      createMessage('assistant', { content: 'Done.', turnId: 'turn-6' }),
-    ]
-
-    const reloaded = simulatePersistAndReload(messages)
-    const planMsg = reloaded.find(m => m.role === 'plan')
-
-    expect(planMsg).toBeDefined()
-    expect(planMsg?.planPath).toBe('/sessions/123/plans/plan.md')
-  })
-
   it('error turn: typed error fields survive reload', () => {
     const messages: Message[] = [
       createMessage('user', { content: 'Do something' }),

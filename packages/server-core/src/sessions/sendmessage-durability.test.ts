@@ -611,7 +611,7 @@ describe('sendMessage durability', () => {
     }
   })
 
-  it.each(['error', 'info', 'new-user', 'final', 'plan', 'auth', 'stop', 'later-error', 'stop-without-error'])('restart error recovery respects terminal boundaries (%s)', (ending) => {
+  it.each(['error', 'info', 'new-user', 'final', 'auth', 'stop', 'later-error', 'stop-without-error'])('restart error recovery respects terminal boundaries (%s)', (ending) => {
     const managed = buildSession(`recover-terminal-${ending}`)
     managed.isProcessing = true
     managed.messages.push(
@@ -627,7 +627,6 @@ describe('sendMessage durability', () => {
       }
       managed.messages.push({ id: 'continued-tool', role: 'tool', content: 'Running Bash...', timestamp: 4, toolName: 'Bash' })
       if (ending === 'final') managed.messages.push({ id: 'final', role: 'assistant', content: 'done', timestamp: 5 })
-      if (ending === 'plan') managed.messages.push({ id: 'plan', role: 'plan', content: 'awaiting approval', timestamp: 5 })
       if (ending === 'auth') managed.messages.push({ id: 'auth', role: 'auth-request', content: 'awaiting credentials', timestamp: 5 })
       if (ending === 'later-error') managed.messages.push({ id: 'fatal', role: 'error', content: 'failed again', timestamp: 5 })
       if (ending === 'stop' || ending === 'stop-without-error') {

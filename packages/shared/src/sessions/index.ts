@@ -50,11 +50,6 @@ export {
   setSessionProjectId,
   unbindProjectFromSessions,
   // Pending plan execution (Accept & Compact flow)
-  setPendingPlanExecution,
-  markCompactionComplete,
-  markPendingPlanExecutionDispatched,
-  clearPendingPlanExecution,
-  getPendingPlanExecution,
   // Session filtering
   // Archive management
   archiveSession,
@@ -63,14 +58,6 @@ export {
   listActiveSessions,
   deleteOldArchivedSessions,
   // Plan storage
-  formatPlanAsMarkdown,
-  parsePlanFromMarkdown,
-  savePlanToFile,
-  loadPlanFromFile,
-  loadPlanFromPath,
-  listPlanFiles,
-  deletePlanFile,
-  getMostRecentPlanFile,
   // Async persistence queue
   sessionPersistenceQueue,
   // Header metadata signature (for self-triggered event suppression)

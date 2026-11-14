@@ -92,7 +92,7 @@ export const MOCK_SESSIONS: SessionMeta[] = [
     workspaceId: MOBILE_WORKSPACE_ID,
     lastMessageAt: now() - 2 * ONE_HOUR,
     hasUnread: true,
-    lastMessageRole: 'plan',
+    lastMessageRole: 'assistant',
   },
   {
     id: 'mobile-s-4',

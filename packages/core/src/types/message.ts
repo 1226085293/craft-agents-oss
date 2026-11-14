@@ -13,7 +13,6 @@ export type MessageRole =
   | 'status'
   | 'info'
   | 'warning'
-  | 'plan'
   | 'auth-request';
 
 /**
@@ -400,8 +399,6 @@ export interface Message {
     url?: string;
     sourceSlug?: string;
   }>;
-  // Plan-specific fields (for role='plan')
-  planPath?: string;  // Path to the plan markdown file
   // Auth-request-specific fields (for role='auth-request')
   authRequestId?: string;         // Unique ID for the auth request
   authRequestType?: AuthRequestType;
@@ -486,8 +483,6 @@ export interface StoredMessage {
     url?: string;
     sourceSlug?: string;
   }>;
-  // Plan-specific fields (for role='plan')
-  planPath?: string;
   // Auth-request-specific fields (for role='auth-request')
   authRequestId?: string;
   authRequestType?: AuthRequestType;

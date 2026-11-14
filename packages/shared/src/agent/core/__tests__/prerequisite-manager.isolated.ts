@@ -88,7 +88,7 @@ describe('PrerequisiteManager', () => {
 
     it('exempts session MCP tools', () => {
       mockExistsPaths.add(guidePath('session'));
-      const result = manager.checkPrerequisites('mcp__session__SubmitPlan');
+      const result = manager.checkPrerequisites('mcp__session__config_validate');
       expect(result.allowed).toBe(true);
     });
 

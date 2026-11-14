@@ -153,11 +153,6 @@ import {
   deleteSession as deleteStoredSession,
   updateSessionMetadata,
   canUpdateSdkCwd,
-  setPendingPlanExecution as setStoredPendingPlanExecution,
-  markCompactionComplete as markStoredCompactionComplete,
-  markPendingPlanExecutionDispatched as markStoredPendingPlanExecutionDispatched,
-  clearPendingPlanExecution as clearStoredPendingPlanExecution,
-  getPendingPlanExecution as getStoredPendingPlanExecution,
   getSessionAttachmentsPath,
   getSessionPath as getSessionStoragePath,
   expandSessionPathInMemory,
@@ -1662,7 +1657,7 @@ export interface ManagedSession {
   // System prompt preset for mini agents ('default' | 'mini')
   systemPromptPreset?: 'default' | 'mini' | string
   // Role/type of the last message (for badge display without loading messages)
-  lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error'
+  lastMessageRole?: 'user' | 'assistant' | 'tool' | 'error'
   // ID of the last final (non-intermediate) assistant message - pre-computed for unread detection
   lastFinalMessageId?: string
   // Turn baseline: last final assistant message ID at turn start (runtime-only, not persisted)
@@ -3489,7 +3484,6 @@ export class SessionManager implements ISessionManager {
       if (
         // A relayed row is not this session's answer; see `isOwnReply`.
         isOwnReply(m) ||
-        m.role === 'plan' ||
         m.role === 'auth-request' ||
         (m.role === 'error' && !continuedAfterError) ||
         // A compaction notice ENDS the turn: the compaction path yields
@@ -3551,7 +3545,6 @@ export class SessionManager implements ISessionManager {
         break
       }
       const settled =
-        m.role === 'plan' ||
         m.role === 'auth-request' ||
         m.role === 'error' ||
         (m.role === 'info' &&
@@ -10013,72 +10006,6 @@ ${request.prompt}`;
   }
 
   // ============================================
-  // Pending Plan Execution (Accept & Compact)
-  // ============================================
-
-  /**
-   * Set pending plan execution state.
-   * Called when user clicks "Accept & Compact" to persist the plan path
-   * so execution can resume after compaction (even if page reloads).
-   */
-  async setPendingPlanExecution(sessionId: string, planPath: string, draftInputSnapshot?: string): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (managed) {
-      await setStoredPendingPlanExecution(managed.workspace.rootPath, sessionId, planPath, draftInputSnapshot)
-      sessionLog.info(`Session ${sessionId}: set pending plan execution for ${planPath}`)
-    }
-  }
-
-  /**
-   * Mark compaction as complete for pending plan execution.
-   * Called when compaction_complete event fires - allows reload recovery
-   * to know that compaction finished and plan can be executed.
-   */
-  async markCompactionComplete(sessionId: string): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (managed) {
-      await markStoredCompactionComplete(managed.workspace.rootPath, sessionId)
-      sessionLog.info(`Session ${sessionId}: compaction marked complete for pending plan`)
-    }
-  }
-
-  /**
-   * Mark pending plan execution as already dispatched from the UI.
-   * This prevents reload recovery from double-submitting the same plan if
-   * sending succeeded but cleanup failed due a reconnect/disconnect.
-   */
-  async markPendingPlanExecutionDispatched(sessionId: string): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (managed) {
-      await markStoredPendingPlanExecutionDispatched(managed.workspace.rootPath, sessionId)
-      sessionLog.info(`Session ${sessionId}: marked pending plan execution as dispatched`)
-    }
-  }
-
-  /**
-   * Clear pending plan execution state.
-   * Called after plan execution is triggered, on new user message,
-   * or when the pending execution is no longer relevant.
-   */
-  async clearPendingPlanExecution(sessionId: string): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (managed) {
-      await clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
-      sessionLog.info(`Session ${sessionId}: cleared pending plan execution`)
-    }
-  }
-
-  /**
-   * Get pending plan execution state for a session.
-   * Used on reload/init to check if we need to resume plan execution.
-   */
-  getPendingPlanExecution(sessionId: string): { planPath: string; draftInputSnapshot?: string; awaitingCompaction: boolean; executionDispatched: boolean } | null {
-    const managed = this.sessions.get(sessionId)
-    if (!managed) return null
-    return getStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
-  }
-
-  // ============================================
   // Session Sharing
   // ============================================
 
@@ -11368,7 +11295,6 @@ ${request.prompt}`;
     this.messageLoadingPromises.delete(sessionId)
     this.clearAdminRememberApprovalsForSession(sessionId)
     this.clearPendingPermissionRequestsForSession(sessionId)
-    await clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
 
     managed.messages = []
     managed.streamingText = ''
@@ -11553,11 +11479,6 @@ ${request.prompt}`;
       managed.mobileEngaged = false
     }
     this.setLastMessageClientId(sessionId, rpcContext?.callerClientId)
-
-    // Clear any pending plan execution state when a new user message is sent.
-    // This acts as a safety valve - if the user moves on, we don't want to
-    // auto-execute an old plan later.
-    await duringSourceStartup(clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId))
 
     // Ensure messages are loaded before we try to add new ones
     await duringSourceStartup(this.ensureMessagesLoaded(managed))
@@ -12628,10 +12549,6 @@ ${request.prompt}`;
 
     switch (command.name) {
       case 'stop': {
-        // Stopping must also invalidate a pending "Accept & Compact" plan;
-        // otherwise the plan auto-executes right after the user asked to stop.
-        await clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
-
         // Capture the flag before cancelling: cancelProcessing no-ops when idle,
         // so this is the only way to tell a real stop from a silent no-op.
         const stopped = managed.isProcessing === true
@@ -15681,12 +15598,6 @@ ${request.prompt}`;
           }
           managed.messages.push(compactionMessage)
 
-          // Mark compaction complete in the session state.
-          // This is done here (backend) rather than in the renderer so it's
-          // not affected by CMD+R during compaction. The frontend reload
-          // recovery will see awaitingCompaction=false and trigger execution.
-          void markStoredCompactionComplete(managed.workspace.rootPath, sessionId)
-          sessionLog.info(`Session ${sessionId}: compaction complete, marked pending plan ready`)
           // NOTE: do NOT re-emit `usage_update` here with the pre-compaction
           // tokenUsage — that would pin the context-usage ring to the stale
           // (pre-compaction) size. The Pi adapter emits a fresh `usage_update`

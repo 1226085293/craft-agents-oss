@@ -136,7 +136,8 @@ describe('acceptance gate', () => {
       'sess_w',
     );
     expect(result.passed).toBe(true);
-    expect(result.task.status).toBe('completed');
+    // `delivered` ends the round; `completed` is now the supervisor's call, not a side effect.
+    expect(result.task.status).toBe('backlog');
   });
 
   it('rejects an empty artifact (exists is not the same as readable)', async () => {

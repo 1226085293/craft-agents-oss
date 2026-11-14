@@ -63,6 +63,7 @@ import {
   type TaskStatus,
   type TaskTrigger,
 } from '@craft-agent/shared/tasks';
+import { resetRoundState } from '@craft-agent/shared/tasks/round-reset';
 
 export interface TaskServiceDeps {
   workspaceRoot: string;
@@ -516,9 +517,22 @@ export class TaskService {
       status: 'running',
       pauseReason: null,
       ...(isPlaceholder ? {} : { currentSessionId: sessionId }),
+      // Lifetime history: never pruned, because deleting the task uses it to take the conversations
+      // with it. Placeholders are not sessions, so they never enter either list.
       sessionIds: isPlaceholder || task.sessionIds.includes(sessionId)
         ? task.sessionIds
         : [...task.sessionIds, sessionId],
+      /**
+       * The round's own list — the sessions to archive when this round closes.
+       *
+       * Separate from `sessionIds` on purpose: a round can dispatch several agents in turn, and the
+       * round is over for all of them at once. Kept deduped so a retried bind does not double-count.
+       */
+      roundSessionIds: isPlaceholder
+        ? task.roundSessionIds
+        : task.roundSessionIds?.includes(sessionId)
+          ? task.roundSessionIds
+          : [...(task.roundSessionIds ?? []), sessionId],
       stats: {
         // Spread first: this literal is rebuilt on every start, so any field it did not name was
         // silently erased — `rounds` was reset to nothing on the second round of a recurring task,
@@ -778,66 +792,43 @@ export class TaskService {
       data: { round, outcome: 'delivered', summary, plan: snapshot },
     });
 
-    const resetPlan = plan.map((step) => ({
-      ...step,
-      status: 'todo' as const,
-      // `note` survives: it is the evidence for why the step counted as done last time (「跑过 pnpm
-      // test，12 passed」), and the next round starts from the same instruction. Clearing it threw away
-      // the only on-record reason anything was believed, leaving just the journal.
-      executedBy: undefined,
-      updatedAt: now,
-    }));
-
     /**
-     * A recurring round does not inherit the plan it just finished.
+     * One reset, in one place.
      *
-     * Resetting the statuses kept every step, so the next round's model saw last round's outline still
-     * sitting there and appended to it: live, five minutes of 「每分钟你好N」 produced six sections
-     * (每轮执行 / 读取上轮结果 / 第2轮执行 / 第3轮执行 / 第4轮执行 / 第5轮执行), each round stacked on the last
-     * until the plan described history instead of work. The round's plan *is* the round (that is what
-     * closes it), so it is cleared with the round and the next one files its own. The finished outline
-     * is not lost: it is in the journal entry below (`plan: snapshot`) and in `handoffs`.
+     * Everything that described this round — its plan, its hand-off timeline, its sessions, its
+     * acceptance counter — is cleared; what the next round continues from (`runs`, `rounds`,
+     * `lastRound`) is kept. `resetRoundState` owns that decision so it can be tested directly;
+     * this method only decides *when* a round is over.
      */
-    const nextPlan = isRecurring(task) ? [] : resetPlan;
-
-    /**
-     * The payload lives on the round, not on every hand-off.
-     *
-     * `handoffs` keeps the history of attempts; a recurring task adds one per round, so carrying the
-     * payload on each of them grew the record by the whole dataset every round (5 rounds ≈ 22 KB in
-     * one measured run) while only the latest is ever read. `lastRound.result.data` is that latest
-     * copy — the same decision as 「只保留最新一轮」, applied to the payload.
-     */
-    const trimmedHandoffs = (task.handoffs ?? []).map((handoff) =>
-      handoff.roundResult === undefined
-        ? handoff
-        : (() => {
-            const { roundResult: _dropped, ...rest } = handoff;
-            return rest as typeof handoff;
-          })(),
+    const { task: reset, archivedSessionIds } = resetRoundState(
+      task,
+      // A recurring round does not inherit the plan it just finished: keeping the steps (even as
+      // `todo`) let each round append its own section onto the last one until the plan described
+      // history. The finished outline is in the journal entry above.
+      { now, clearPlan: isRecurring(task) },
     );
 
-    /**
-     * The session that ran this round is released with it.
-     *
-     * Clearing `currentSessionId` is what makes the next dispatch open a new session instead of
-     * continuing in this one: `dispatch` reuses it only when it is set, present and unarchived.
-     */
-    const ranBy = task.currentSessionId ?? task.stats?.lockSessionId;
     const closed: Task = {
-      ...task,
-      currentSessionId: undefined,
-      handoffs: trimmedHandoffs,
-      spec: task.spec ? { ...task.spec, plan: nextPlan } : task.spec,
+      ...reset,
       stats: {
-        ...stats,
+        ...(reset.stats ?? { runs: 0, activeMs: 0 }),
         rounds: { ok: (stats.rounds?.ok ?? 0) + 1, failed: stats.rounds?.failed ?? 0 },
         lastRound: { round, finishedAt: now, outcome: 'delivered', summary, ...(result ? { result } : {}) },
       },
     };
 
     const closedTask = applyTransition(closed, 'backlog', { now }).task;
-    if (ranBy) this.deps.onRoundEnd?.(task.id, ranBy);
+    /**
+     * Every session the round used goes with it, not just the last one.
+     *
+     * A round can dispatch several agents in turn — one per section — and each may open its own
+     * conversation. The round is over for all of them at once, so archiving only `currentSessionId`
+     * left the earlier ones alive and unreachable: nobody reuses them, nobody cleans them up.
+     */
+    for (const sessionId of archivedSessionIds) {
+      if (sessionId.startsWith('pending:')) continue;
+      this.deps.onRoundEnd?.(task.id, sessionId);
+    }
     // The round is over and the trigger backlog is not: let it start now rather than at the next tick.
     this.deps.pokeScheduler?.();
     return closedTask;
@@ -1633,8 +1624,23 @@ export class TaskService {
     return this.heartbeat(task.id);
   }
 
-  attachSession(id: string, sessionId: string): Task {
-    const task = attachSession(this.require(id), sessionId, this.now());
+  /**
+   * Record a session against the task.
+   *
+   * `options.round` also puts it in the round's list, which is what the budget counts and what a
+   * close archives. Default false: an ad-hoc attachment (a manual dispatch, a test seeding history)
+   * is history, not 「this round's executor」.
+   */
+  attachSession(id: string, sessionId: string, options?: { round?: boolean }): Task {
+    const attached = attachSession(this.require(id), sessionId, this.now());
+    const task = options?.round
+      ? {
+          ...attached,
+          roundSessionIds: attached.roundSessionIds?.includes(sessionId)
+            ? attached.roundSessionIds
+            : [...(attached.roundSessionIds ?? []), sessionId],
+        }
+      : attached;
     this.save(task);
     appendJournal(this.root, id, { type: 'assigned', at: this.now(), data: { sessionId } });
     return task;
@@ -2347,19 +2353,27 @@ export class TaskService {
        * supervisor, which already receives this report, decides whether the task is still wanted.
        * Closing it is a decision, not an automatic consequence of one round succeeding.
        */
-      next = isRecurring(next)
-        ? this.closeRound(next, {
-            now,
-            summary: handoff.summary,
-            result: {
-              ...(handoff.artifacts?.length ? { artifacts: handoff.artifacts.map((a) => a.path) } : {}),
-              ...(handoff.verify ? { verify: handoff.verify } : {}),
-              // The payload the next round compares against — this is the whole point of keeping
-              // the round's delivery on the record rather than only in the journal.
-              ...(handoff.roundResult !== undefined ? { data: handoff.roundResult } : {}),
-            },
-          })
-        : applyTransition(next, 'completed', { now }).task;
+      /**
+       * `delivered` ends the round, never the task.
+       *
+       * It used to mean two things depending on `isRecurring()`: 「this round is over」 for a scheduled
+       * task and 「the task is over」 for a one-off. The worker could not say which it meant — the record
+       * decided by looking at whether a trigger happened to be configured — and the same sentence
+       * produced a different outcome after someone edited the schedule. End-of-task is now a decision
+       * the supervisor makes (`task_update(status: 'completed')`), so a round is a round for every task
+       * and the only difference between the two kinds is what happens after the reset.
+       */
+      next = this.closeRound(next, {
+        now,
+        summary: handoff.summary,
+        result: {
+          ...(handoff.artifacts?.length ? { artifacts: handoff.artifacts.map((a) => a.path) } : {}),
+          ...(handoff.verify ? { verify: handoff.verify } : {}),
+          // The payload the next round compares against — this is the whole point of keeping
+          // the round's delivery on the record rather than only in the journal.
+          ...(handoff.roundResult !== undefined ? { data: handoff.roundResult } : {}),
+        },
+      });
     } else if (
       /**
        * A finished plan ends the round, whichever word the worker used.

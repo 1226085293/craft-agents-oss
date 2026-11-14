@@ -55,7 +55,9 @@ describe('a pause reason the record can prove', () => {
   it('labels a pause whose budget is spent as budget', () => {
     const { svc, make } = harness();
     const task = make('超预算');
-    for (let i = 0; i < 9; i += 1) svc.attachSession(task.id, `sess_${i}`);
+    // The budget counts the round now, so seeding history alone no longer trips it: these sessions
+    // have to be the round's own for the cap to mean 「this round used another conversation」.
+    for (let i = 0; i < 9; i += 1) svc.attachSession(task.id, `sess_${i}`, { round: true });
 
     expect(svc.setStatus(task.id, 'paused').pauseReason).toBe('budget');
   });
@@ -104,7 +106,7 @@ describe('a pause reason the record can prove', () => {
     // One function answers both: if the card says 「预算用尽」, the gate must refuse for the budget.
     const { svc, make } = harness();
     const task = make('超预算');
-    for (let i = 0; i < 9; i += 1) svc.attachSession(task.id, `sess_${i}`);
+    for (let i = 0; i < 9; i += 1) svc.attachSession(task.id, `sess_${i}`, { round: true });
 
     const paused = svc.setStatus(task.id, 'paused');
     expect(paused.pauseReason).toBe('budget');

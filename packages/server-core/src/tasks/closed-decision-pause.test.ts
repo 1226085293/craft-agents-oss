@@ -72,7 +72,9 @@ describe('a decision that closed leaves no pause behind', () => {
     // then pause on the budget gate. The budget is spent for real — the reason is derived from the
     // record now, so a pause that merely claims `budget` would be cleared to nothing.
     svc.resolveDecision(task.id, 'approved', 'ok')
-    for (let i = 0; i < 9; i += 1) svc.attachSession(task.id, `sess_${i}`)
+    // The budget counts the round now, so seeding history alone no longer trips it: these sessions
+    // have to be the round's own for the cap to mean 「this round used another conversation」.
+    for (let i = 0; i < 9; i += 1) svc.attachSession(task.id, `sess_${i}`, { round: true })
     svc.setStatus(task.id, 'running')
     svc.setStatus(task.id, 'paused', { pauseReason: 'budget' })
     expect(svc.get(task.id)!.pauseReason).toBe('budget')

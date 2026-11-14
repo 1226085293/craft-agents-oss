@@ -147,7 +147,11 @@ describe('a recurring round ends, not the task', () => {
     expect(after.status).toBe('backlog');
   });
 
-  it('still completes a one-shot task', async () => {
+  it('does not complete a one-shot task on its own', async () => {
+    // `delivered` ends a round, never a task — for both kinds. The record used to decide by looking at
+    // whether a trigger happened to be configured, so the worker could not say which it meant and the
+    // same sentence changed meaning when someone edited the schedule. End-of-task is the supervisor's
+    // call (`task_update(status: 'completed')`), and until it makes one the task waits in `backlog`.
     const svc = service();
     const artifact = join(root, 'out.md');
     writeFileSync(artifact, 'done', 'utf-8');
@@ -163,7 +167,27 @@ describe('a recurring round ends, not the task', () => {
 
     await deliver(svc, task.id, artifact);
 
-    // No enabled trigger → this really was the end.
+    expect(svc.get(task.id)!.status).toBe('backlog');
+    expect(svc.get(task.id)!.stats?.rounds?.ok).toBe(1);
+  });
+
+  it('completes when the supervisor says so', async () => {
+    // The other half of the rule: the decision exists, it is just no longer automatic.
+    const svc = service();
+    const artifact = join(root, 'out.md');
+    writeFileSync(artifact, 'done', 'utf-8');
+    const task = svc.create({
+      name: '一次性',
+      instruction: '写一个文件',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_3',
+      spec: { plan: [{ id: '1.1', title: '写文件', status: 'todo', agent: 'builtin-default' }] },
+    });
+    svc.startRun(task.id, 'sess_w1');
+    svc.updatePlan(task.id, { id: '1.1', status: 'done' });
+    await deliver(svc, task.id, artifact);
+
+    svc.setStatus(task.id, 'completed');
     expect(svc.get(task.id)!.status).toBe('completed');
   });
 

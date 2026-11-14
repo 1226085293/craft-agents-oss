@@ -497,7 +497,16 @@ export function resumeRefusal(
   const budget = checkBudget(
     task.budget,
     {
-      sessions: task.sessionIds.length,
+      /**
+       * Counted per round, not for the task's whole life.
+       *
+       * `sessionIds` keeps every session the task ever used — that list is what deleting a task needs.
+       * Counting it here made the budget a round cap in disguise: a per-minute task added a session a
+       * minute, and after eight minutes it paused for budget while the person had asked for a loop.
+       * `roundSessionIds` is cleared with the round, so this asks the question the budget means:
+       * 「may this round use another conversation」.
+       */
+      sessions: (task.roundSessionIds ?? (task.currentSessionId ? [task.currentSessionId] : [])).length,
       runs: task.stats?.runs ?? 0,
       activeMinutes: Math.floor((task.stats?.activeMs ?? 0) / 60_000),
     },

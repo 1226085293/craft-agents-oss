@@ -75,6 +75,13 @@ export interface TaskDetailView {
    */
   willRetry?: boolean
   sessionIds: string[]
+  /**
+   * The sessions this round used — the list the budget counts and the round archives.
+   *
+   * Separate from `sessionIds`, which is every conversation the task has ever had (deleting a task
+   * uses that one). Optional: records written before it existed fall back to `currentSessionId`.
+   */
+  roundSessionIds?: string[]
   currentSessionId?: string
   handoffs: TaskHandoffView[]
   budget: { maxSessions: number; maxRuns: number; activeMinutes: number; deadline?: number | null }

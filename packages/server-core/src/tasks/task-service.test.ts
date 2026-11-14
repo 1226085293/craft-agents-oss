@@ -126,7 +126,8 @@ describe('handoff gate', () => {
       'sess_worker',
     );
     expect(result.passed).toBe(true);
-    expect(result.task.status).toBe('completed');
+    // `delivered` ends the round; `completed` is now the supervisor's call, not a side effect.
+    expect(result.task.status).toBe('backlog');
   });
 
   it('pauses on a needs_decision handoff', async () => {
@@ -347,7 +348,8 @@ describe('budget guard', () => {
   it('pauses when the session cap is exceeded', () => {
     const { svc } = service(workspace());
     const task = create(svc);
-    for (let i = 0; i < 9; i += 1) svc.attachSession(task.id, `sess_${i}`);
+    // The cap counts the round, so the sessions have to be the round's own.
+    for (let i = 0; i < 9; i += 1) svc.attachSession(task.id, `sess_${i}`, { round: true });
     const paused = svc.setStatus(task.id, 'running');
     expect(paused.status).toBe('paused');
     expect(paused.pauseReason).toBe('budget');
@@ -641,11 +643,16 @@ describe('handoff milestones', () => {
     expect(svc.get(task.id)?.handoffs).toHaveLength(1);
   })
 
-  it('marks completion as a milestone', async () => {
+  it('records the delivered round as the milestone, not a rejected attempt', async () => {
+    // The timeline is the round's, and the round leaves with it — so what survives is `lastRound`.
+    // `milestone` still decides what the person sees *while* the round is open; this pins the part
+    // that outlives it: the delivered round is the one the record remembers.
     const { svc, task } = prepared();
     await svc.reportHandoff(task.id, handoff({ outcome: 'delivered' }), 'sess_w');
-    expect(svc.get(task.id)?.status).toBe('completed');
-    expect(svc.get(task.id)?.handoffs.at(-1)?.milestone).toBe(true);
+    const after = svc.get(task.id)!
+    expect(after.status).toBe('backlog');
+    expect(after.handoffs).toEqual([]);
+    expect(after.stats?.lastRound?.outcome).toBe('delivered');
   })
 
   it('marks a decision request as a milestone', async () => {
@@ -1080,7 +1087,7 @@ describe('delivered requires the plan to be finished', () => {
     svc.updatePlan(task.id, { id: '2', remove: true })
     const result = await svc.reportHandoff(task.id, delivered, 'sess_w')
     expect(result.passed).toBe(true)
-    expect(svc.get(task.id)?.status).toBe('completed')
+    expect(svc.get(task.id)?.status).toBe('backlog')
   })
 
   it('ignores an outline whose sub-steps are all done', async () => {

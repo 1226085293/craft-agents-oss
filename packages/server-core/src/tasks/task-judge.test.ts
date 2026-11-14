@@ -327,9 +327,17 @@ describe('terminal-only acceptance (C2′ + C4)', () => {
     expect(judgeCalls).toBe(1);
     expect(result.passed).toBe(true);
     const current = svc.get(task.id)!;
-    expect(current.verify.lastVerdict).toBe('pass');
-    expect(current.verifyRounds).toBe(1);
-    expect(current.status).toBe('completed');
+    /**
+     * The verdict is read off `stats.lastRound`, not off `verify`.
+     *
+     * `verify.lastVerdict` and `verifyRounds` belong to the round that spent them: left on the record
+     * they read as 「this round already passed」, and a fourth round would start at the acceptance cap
+     * without a single judgement in it. So the round's acceptance is gone with the round.
+     */
+    expect(current.verifyRounds).toBe(0);
+    expect(current.verify.lastVerdict).toBeUndefined();
+    expect(current.stats?.lastRound?.round).toBe(1);
+    expect(current.status).toBe('backlog');
   });
 
   it('pauses and escalates once terminal acceptance exceeds maxIterations', async () => {

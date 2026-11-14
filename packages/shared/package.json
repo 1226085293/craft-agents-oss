@@ -70,6 +70,7 @@
     "./tasks": "./src/tasks/index.ts",
     "./tasks/cron": "./src/tasks/cron.ts",
     "./tasks/plan": "./src/tasks/plan.ts",
+    "./tasks/round-reset": "./src/tasks/round-reset.ts",
     "./tool-layering": "./src/tool-layering/index.ts",
     "./tools": "./src/tools/index.ts",
     "./usage": "./src/usage/index.ts",

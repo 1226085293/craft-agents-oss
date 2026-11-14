@@ -120,9 +120,8 @@ describe('a round hands its data to the next round', () => {
         await round(svc, task.id, `w${i}`, { total: i, ids: Array.from({ length: 50 }, (_, k) => k) }, `第 ${i} 轮`)
       }
       const after = svc.get(task.id)!
-      expect(after.handoffs.length).toBe(1)
-      expect(after.handoffs[0]?.round).toBe(3)
-      expect(after.handoffs.filter((h) => h.roundResult !== undefined).length).toBe(0)
+      // The timeline left with the round; the payload it delivered is what the next round reads.
+      expect(after.handoffs).toEqual([])
       expect((after.stats?.lastRound?.result?.data as { total: number }).total).toBe(3)
     })()
   })
@@ -133,10 +132,13 @@ describe('a round hands its data to the next round', () => {
     const svc = service()
     const task = recurring(svc)
     await round(svc, task.id, 'w1', { total: 1 }, '第一轮')
-    expect(svc.get(task.id)!.handoffs.map((h) => h.round)).toEqual([1])
+    // Closed rounds leave nothing behind: `handoffs` is the round in progress, and the round is over.
+    expect(svc.get(task.id)!.handoffs).toEqual([])
+    expect(svc.get(task.id)!.stats?.lastRound?.round).toBe(1)
 
     await round(svc, task.id, 'w2', { total: 2 }, '第二轮')
-    expect(svc.get(task.id)!.handoffs.map((h) => h.round)).toEqual([2])
+    expect(svc.get(task.id)!.handoffs).toEqual([])
+    expect(svc.get(task.id)!.stats?.lastRound?.round).toBe(2)
   })
 
   it('keeps every attempt inside the same round', async () => {

@@ -85,6 +85,8 @@ round's delivery, not in the plan.
 
 **When does a task start running? Only when you \`dispatch\` it.** Do not expect \`task_update({status:'running'})\` to start it — that value is refused outright: status is only for **stopping** (paused / canceled) or **closing** (completed / failed). The start is always a dispatch.
 
+**And who says a task is finished? You do.** A delivered hand-off ends the round, not the task: the record resets and waits in backlog. A scheduled task's next firing picks it up; a one-off task has nobody left to pick it up, so close it with task_update status=completed when it is really done.
+
 **If the task has a plan, you must pass \`stepId\`** (the id of that step, e.g. \`1.2\`): the system checks it against the plan and refuses steps already recorded as done. Omitting \`stepId\` means giving up that check — measured once: 34 seconds after 1.2 was marked done it was dispatched again, the worker re-read the same file and filed a second report, and the person received two "hand-off accepted" notices.
 
 \`dispatch\` can also target an **existing session** you judge suitable (\`target.kind = 'session'\`) or a **new session** (\`target.kind = 'new'\`), but **the system refuses any dispatch without a task**:

@@ -102,7 +102,8 @@ describe('a task from creation to completion', () => {
       'sess_worker',
     );
     expect(result.passed).toBe(true);
-    expect(result.task.status).toBe('completed');
+    // The round is over and the record is back in `backlog`; `completed` is the supervisor's call.
+    expect(result.task.status).toBe('backlog');
     // The run is over: lock released, nothing left to dispose, and the supervisor told.
     expect(result.task.stats?.lockSessionId).toBeUndefined();
     expect(w.stopped).toEqual([]);

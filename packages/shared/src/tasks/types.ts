@@ -624,8 +624,27 @@ export interface Task {
   decisions?: TaskDecision[];
 
   supervisorSessionId: string;
-  /** Every session that has worked on this task, oldest first. */
+  /**
+   * Every session that has ever worked on this task, oldest first — never pruned.
+   *
+   * It is the record's answer to 「which conversations belong to this task」, which is what deleting a
+   * task needs in order to take them with it (`delete` detaches and removes every id here). It is
+   * therefore *not* the round's list: a per-minute task adds one per minute, and a lifetime count of
+   * that is a counter that only ever grows.
+   */
   sessionIds: string[];
+  /**
+   * The sessions this round used — the ones to archive when the round closes.
+   *
+   * A round can use several agents in turn (each dispatch may open a new conversation), so 「the
+   * session that ran the round」 is a list, not a field. This is cleared with the round, which also
+   * makes it the honest answer to 「how many sessions has this task used」: the budget counts here,
+   * because the lifetime list would pause a task for once having been a loop.
+   *
+   * Optional so records written before it existed still load; absent means the round has not started
+   * a session yet, and a close falls back to `currentSessionId`/`lockSessionId`.
+   */
+  roundSessionIds?: string[];
   currentSessionId?: string;
   assigneeAgentId?: string;
 

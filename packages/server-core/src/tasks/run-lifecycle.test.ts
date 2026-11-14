@@ -336,7 +336,8 @@ describe('a completed hand-off releases everything it held', () => {
       'sess_worker',
     );
 
-    expect(result.task.status).toBe('completed');
+    // A delivered round returns to `backlog`; only the supervisor turns that into `completed`.
+    expect(result.task.status).toBe('backlog');
     expect(result.task.stats?.activeMs).toBe(60_000);
     expect(locked(result.task)).toBeUndefined();
   });
@@ -467,6 +468,6 @@ describe('a hand-off that leaves work behind', () => {
       { outcome: 'delivered', ...handoff, summary: '1.2 读回确认，全部完成' },
       'sess_worker',
     );
-    expect(done.task.status).toBe('completed');
+    expect(done.task.status).toBe('backlog');
   });
 });

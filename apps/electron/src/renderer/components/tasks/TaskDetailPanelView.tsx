@@ -558,6 +558,15 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
   // Placeholders hold the run lock before a session exists; they are not sessions.
   const realSessions = detail.sessionIds.filter((id) => !id.startsWith('pending:'))
   /**
+   * The counter the budget speaks about, and the one a person can act on.
+   *
+   * `sessionIds` is the task's whole life — that is what deleting a task uses to take its
+   * conversations with it, and a per-minute task adds one a minute. Printed next to `maxSessions` it
+   * read as 「0 / 8」 on a task that had already used two, then 「9 / 8」 on one that was working
+   * fine, because the budget now counts the round. `roundSessionIds` is cleared with the round.
+   */
+  const roundSessions = (detail.roundSessionIds ?? []).filter((id) => !id.startsWith('pending:'))
+  /**
    * The timeline is a history of the task, not a log of attempts.
    *
    * Every `report_result` used to add a row, so one file produced seven entries:
@@ -1082,9 +1091,9 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
           累计执行时间, so every task claimed exactly 120 minutes of work.
         */}
         <MetricCard
-          label="会话"
-          value={`${realSessions.length} / ${detail.budget.maxSessions}`}
-          hint="已使用 / 上限"
+          label="本轮会话"
+          value={`${roundSessions.length} / ${detail.budget.maxSessions}`}
+          hint="本轮已用 / 单轮上限"
         />
         <MetricCard label="连续失败" value={`${detail.lifecycle.consecutiveFailures} / ${FAILURE_FUSE}`} hint="触发暂停阈值" tone={detail.lifecycle.consecutiveFailures > 0 ? 'warning' : 'default'} />
         <MetricCard

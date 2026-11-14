@@ -328,6 +328,12 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.events.INSTALL_MCP,
   RPC_CHANNELS.events.READ_ATTACHMENT,
   RPC_CHANNELS.events.OPEN_ATTACHMENT,
+  // Plugin sign-in (QR / pairing code) — relayed to the plugin's control service
+  RPC_CHANNELS.events.PLUGIN_AUTH_START,
+  RPC_CHANNELS.events.PLUGIN_AUTH_STATE,
+  RPC_CHANNELS.events.PLUGIN_AUTH_SUBMIT,
+  RPC_CHANNELS.events.PLUGIN_AUTH_CANCEL,
+  RPC_CHANNELS.events.PLUGIN_AUTH_EVENT,
 
   // taskboard — tasks are workspace state, not renderer state
   RPC_CHANNELS.taskboard.RUN,
@@ -532,12 +538,6 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.messaging.UNBIND_SUPERGROUP,
   RPC_CHANNELS.messaging.UNBIND,
   RPC_CHANNELS.messaging.UNBIND_BINDING,
-  RPC_CHANNELS.messaging.WECHAT_START_CONNECT,
-  RPC_CHANNELS.messaging.WECHAT_SUBMIT_VERIFYCODE,
-  RPC_CHANNELS.messaging.WECHAT_UI_EVENT,
-  RPC_CHANNELS.messaging.WA_START_CONNECT,
-  RPC_CHANNELS.messaging.WA_SUBMIT_PHONE,
-  RPC_CHANNELS.messaging.WA_UI_EVENT,
   // messaging access control — UI ↔ Server, per-platform owners + per-binding allow-list
   RPC_CHANNELS.messaging.GET_PLATFORM_OWNERS,
   RPC_CHANNELS.messaging.SET_PLATFORM_OWNERS,

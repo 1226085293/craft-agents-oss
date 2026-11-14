@@ -24,6 +24,13 @@ import { runInstallCommand, type InstallResult } from '../../events/dependency-i
 import { installMcp, type McpInstallResult } from '../../events/mcp-registry';
 import { fetchReportedDeps, postDepAction } from '../../events/listener-control';
 import {
+  startPluginAuth,
+  readPluginAuth,
+  submitPluginAuthCode,
+  cancelPluginAuth,
+  type PluginAuthResult,
+} from '../../events/plugin-auth';
+import {
   loadSubscriptions,
   saveSubscriptions,
   matchesFilter,
@@ -32,6 +39,7 @@ import {
 } from '@craft-agent/shared/events/subscriptions.ts';
 import type { EventFilter, EventMeta, EventRecord } from '@craft-agent/shared/events/event-store.ts';
 import type { EventAttachmentContentDto } from '@craft-agent/shared/protocol';
+import type { PluginAuthStateDto } from '@craft-agent/shared/protocol';
 import {
   readAttachmentContent,
   resolveAttachmentPath,
@@ -329,6 +337,118 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
       if (!id || !depId) throw new Error('id and depId are required');
       const workspace = requireWorkspace(workspaceId);
       return postDepAction(join(workspace.rootPath, 'events-data', id), depId);
+    },
+  );
+
+  // --- Plugin sign-in (QR / pairing code) ----------------------------------
+  //
+  // These four are relays. The plugin owns the platform protocol; Craft shapes
+  // the answer, broadcasts it, and — on `connected` — writes the credentials
+  // into the plugin's own config so the next start finds them in
+  // `<dataDir>/config.json`. Nothing here names a platform.
+
+  /** Broadcast one sign-in snapshot to the workspace's renderers. */
+  const pushAuthEvent = (workspaceId: string, state: PluginAuthStateDto) => {
+    pushTyped(
+      server,
+      RPC_CHANNELS.events.PLUGIN_AUTH_EVENT,
+      { to: 'workspace', workspaceId },
+      workspaceId,
+      state,
+    );
+  };
+
+  /**
+   * Persist credentials the plugin handed back, then restart it.
+   *
+   * The config is merged rather than replaced: a plugin that wrote its own
+   * `token` during sign-in must not lose an unrelated field the person filled
+   * in earlier. `saveListenerConfig` restarts a running plugin with the old
+   * config as a fallback, which is exactly the transition we want — the plugin
+   * comes back up already holding the credential.
+   */
+  const applyAuthCredentials = async (
+    workspaceId: string,
+    listenerId: string,
+    workspaceRoot: string,
+    credentials: Record<string, unknown>,
+  ): Promise<void> => {
+    const svc = await getEventService(workspaceId, workspaceRoot, undefined);
+    const current = loadListeners({ workspaceRoot, skipProbes: true }).find(
+      (entry) => entry.id === listenerId,
+    );
+    const merged = { ...(current?.config ?? {}), ...credentials };
+    await svc.saveListenerConfig(workspaceRoot, listenerId, merged);
+    pushListenerChanged(workspaceId, listenerId, 'config');
+  };
+
+  /** Common tail of the four handlers: broadcast, and save credentials once. */
+  const finishAuth = async (
+    workspaceId: string,
+    listenerId: string,
+    workspaceRoot: string,
+    result: PluginAuthResult,
+  ) => {
+    if (result.state) pushAuthEvent(workspaceId, result.state);
+    if (result.ok && result.state?.phase === 'connected' && result.credentials) {
+      try {
+        await applyAuthCredentials(workspaceId, listenerId, workspaceRoot, result.credentials);
+      } catch (error) {
+        // The sign-in itself succeeded; only the hand-over failed. Say so
+        // instead of reporting a failed scan the person just completed.
+        return {
+          ...result,
+          ok: false,
+          code: 'rejected' as const,
+          error: `授权成功，但写入插件配置失败：${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    // `credentials` never leaves the host: the renderer gets the snapshot only.
+    const { credentials: _credentials, ...safe } = result;
+    return safe;
+  };
+
+  server.handle(
+    RPC_CHANNELS.events.PLUGIN_AUTH_START,
+    async (_ctx, workspaceId: string, listenerId: string) => {
+      if (!listenerId) throw new Error('listenerId is required');
+      const workspace = requireWorkspace(workspaceId);
+      const dataDir = join(workspace.rootPath, 'events-data', listenerId);
+      const result = await startPluginAuth(listenerId, dataDir);
+      return finishAuth(workspaceId, listenerId, workspace.rootPath, result);
+    },
+  );
+
+  server.handle(
+    RPC_CHANNELS.events.PLUGIN_AUTH_STATE,
+    async (_ctx, workspaceId: string, listenerId: string) => {
+      if (!listenerId) throw new Error('listenerId is required');
+      const workspace = requireWorkspace(workspaceId);
+      const dataDir = join(workspace.rootPath, 'events-data', listenerId);
+      return readPluginAuth(listenerId, dataDir);
+    },
+  );
+
+  server.handle(
+    RPC_CHANNELS.events.PLUGIN_AUTH_SUBMIT,
+    async (_ctx, workspaceId: string, listenerId: string, code: string) => {
+      if (!listenerId) throw new Error('listenerId is required');
+      const workspace = requireWorkspace(workspaceId);
+      const dataDir = join(workspace.rootPath, 'events-data', listenerId);
+      const result = await submitPluginAuthCode(listenerId, dataDir, code ?? '');
+      return finishAuth(workspaceId, listenerId, workspace.rootPath, result);
+    },
+  );
+
+  server.handle(
+    RPC_CHANNELS.events.PLUGIN_AUTH_CANCEL,
+    async (_ctx, workspaceId: string, listenerId: string) => {
+      if (!listenerId) throw new Error('listenerId is required');
+      const workspace = requireWorkspace(workspaceId);
+      const dataDir = join(workspace.rootPath, 'events-data', listenerId);
+      const result = await cancelPluginAuth(listenerId, dataDir);
+      return finishAuth(workspaceId, listenerId, workspace.rootPath, result);
     },
   );
 

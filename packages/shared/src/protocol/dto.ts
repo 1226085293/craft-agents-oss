@@ -1072,6 +1072,10 @@ export interface ListenerDto {
       default?: string | number | boolean
       secret?: boolean
       enum?: Array<string | number>
+      /** Numeric bounds/granularity for `type: 'number'` — advisory UI facts. */
+      min?: number
+      max?: number
+      step?: number
     }>
     required?: string[]
   }
@@ -1090,3 +1094,64 @@ export interface ListenerDto {
    */
   readme?: string
 }
+
+/**
+ * Where a plugin's sign-in flow stands.
+ *
+ * The names are deliberately platform-neutral: a QR code, a pairing code and a
+ * device-code flow are all "the person must do something on their phone", and
+ * the UI does not need to learn which platform it is looking at. The plugin
+ * decides what the states mean; Craft only relays them.
+ *
+ *   idle           — nothing started, or the last attempt was cleared
+ *   awaiting       — an artifact (QR string / code) is ready to show
+ *   scanned        — the person scanned it; waiting for their confirmation
+ *   need_code      — the platform asked for a short code shown on the phone
+ *   connected      — sign-in finished; credentials were handed over
+ *   expired        — the artifact timed out; start again for a fresh one
+ *   failed         — the attempt broke; `error` says why
+ */
+export type PluginAuthPhase =
+  | 'idle'
+  | 'awaiting'
+  | 'scanned'
+  | 'need_code'
+  | 'connected'
+  | 'expired'
+  | 'failed'
+
+/** One snapshot of a plugin's sign-in flow, pushed on every change. */
+export interface PluginAuthStateDto {
+  listenerId: string
+  phase: PluginAuthPhase
+  /**
+   * Raw text to encode as the artifact — never a data URL and never base64 of
+   * an image. A QR string is what the platform issued; the UI decides how to
+   * draw it (`qrcode.react` already ships with the app).
+   */
+  qr?: string
+  /** Short code the person reads off their phone (pairing-code flows). */
+  code?: string
+  /** Milliseconds since epoch when `qr`/`code` stops being valid. */
+  expiresAt?: number
+  /** Human-readable line for the UI; the plugin's own words. */
+  detail?: string
+  /** Why a `failed` / `expired` attempt ended. */
+  error?: string
+  /** Monotonic counter within one attempt, so the UI can drop stale events. */
+  attempt?: number
+}
+
+/** Why an auth call could not even be attempted. */
+export type PluginAuthErrorCode =
+  /** The plugin ships no sign-in flow (nothing to do). */
+  | 'unsupported'
+  /** The plugin process is not running, so there is nobody to ask. */
+  | 'not-running'
+  /** The plugin's control service never answered in time. */
+  | 'timeout'
+  /** The control service answered, but not with something we can read. */
+  | 'bad-payload'
+  /** The plugin rejected the call itself. */
+  | 'rejected'
+

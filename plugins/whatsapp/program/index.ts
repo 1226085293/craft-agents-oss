@@ -18,6 +18,8 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { Buffer } from 'node:buffer'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   encodeMessage,
   parseFrames,
@@ -544,7 +546,296 @@ export class WhatsAppAdapter implements PlatformAdapter {
 /**
  * Entry point the host loads. The adapter lives here, in the plugin — Craft only
  * knows the filename and this export name.
+ *
+ * `options.config` is the plugin's own saved config (`<dataDir>/config.json`).
+ * Two of its values are paths the plugin cannot invent for itself:
+ *
+ *   workerEntry   the built Baileys worker (a .cjs bundle run by node)
+ *   authStateDir  where Baileys keeps its multi-file auth state
+ *
+ * Leaving them to be passed in is what broke this adapter: `createAdapter()`
+ * used to take no arguments, so both were always undefined and `initialize`
+ * threw on every start — the plugin sat in `degraded` forever with `/health`
+ * pinned at 503 and no way to show a QR. They are now filled from `options`
+ * with defaults derived from the plugin's own data dir, so a fresh install can
+ * pair without the person editing JSON first.
  */
-export function createAdapter(): WhatsAppAdapter {
-  return new WhatsAppAdapter()
+export function createAdapter(options?: Record<string, unknown>): WhatsAppAdapter {
+  return withInjectedConfig(new WhatsAppAdapter(), options)
+}
+
+/**
+ * The config a plugin start will actually use.
+ *
+ * Exported because it is the whole fix for "initialize always throws": the two
+ * required keys are resolved here, from the plugin's own data dir, instead of
+ * being expected from a caller that never had them.
+ */
+export function resolveWhatsAppConfig(options?: Record<string, unknown>): WhatsAppConfig {
+  const config = (options?.config ?? {}) as Record<string, unknown>
+  const dataDir = typeof options?.dataDir === 'string' ? options.dataDir : ''
+  const str = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.trim() ? v.trim() : undefined
+
+  return {
+    ...config,
+    // Baileys state belongs beside the plugin's own data, never in the repo.
+    authStateDir: str(config.authStateDir) ?? (dataDir ? join(dataDir, 'wa-auth') : ''),
+    workerEntry: str(config.workerEntry) ?? defaultWorkerEntry() ?? '',
+    nodeBin: str(config.nodeBin) ?? defaultNodeBin(),
+  } as WhatsAppConfig
+}
+
+/**
+ * Fill in the two paths from the plugin's own data dir, without changing the
+ * adapter's own contract: `initialize(config)` still receives a complete
+ * `WhatsAppConfig`, it just no longer arrives with the required keys missing.
+ */
+function withInjectedConfig(
+  adapter: WhatsAppAdapter,
+  options?: Record<string, unknown>,
+): WhatsAppAdapter {
+  const resolved = resolveWhatsAppConfig(options)
+
+  const original = adapter.initialize.bind(adapter)
+  adapter.initialize = async (incoming: PlatformConfig): Promise<void> =>
+    original({ ...resolved, ...incoming, ...pickMissing(incoming, resolved) })
+  return adapter
+}
+
+/**
+ * Keep the adapter's own config precedence, but never let a key the caller left
+ * out erase one we resolved: `initialize` is given `{...resolved, ...incoming}`,
+ * and `incoming` may carry an explicit `workerEntry: undefined`.
+ */
+function pickMissing(incoming: PlatformConfig, resolved: WhatsAppConfig): Partial<WhatsAppConfig> {
+  const out: Partial<WhatsAppConfig> = {}
+  const source = incoming as Record<string, unknown>
+  if (!source.authStateDir && resolved.authStateDir) out.authStateDir = resolved.authStateDir
+  if (!source.workerEntry && resolved.workerEntry) out.workerEntry = resolved.workerEntry
+  return out
+}
+
+/**
+ * Which runtime owns the worker.
+ *
+ * The worker is a CommonJS bundle built for Node (Baileys' crypto deps depend on
+ * Node's runtime). The plugin itself usually runs under Bun, and
+ * `process.execPath` would then point at bun — which is not what the worker was
+ * built for. Prefer `node` whenever we are hosted by Bun; fall back to the
+ * current executable otherwise, so a plugin already running on Node keeps using
+ * itself.
+ */
+function defaultNodeBin(): string {
+  return process.versions.bun ? 'node' : process.execPath
+}
+
+/**
+ * Locate the bundled worker the same way the app does.
+ *
+ * In-repo the worker is built to `packages/messaging-whatsapp-worker/dist/`;
+ * a packaged app ships it next to the plugin. Returns undefined when neither
+ * exists, which surfaces as a clear initialize error instead of a spawn ENOENT.
+ */
+function defaultWorkerEntry(): string | undefined {
+  const candidates = [
+    join(process.cwd(), 'packages', 'messaging-whatsapp-worker', 'dist', 'worker.cjs'),
+    join(process.cwd(), '..', '..', 'packages', 'messaging-whatsapp-worker', 'dist', 'worker.cjs'),
+    join(process.cwd(), 'resources', 'wa-worker', 'worker.cjs'),
+  ]
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) return candidate
+    } catch {
+      // Unreadable path: try the next candidate.
+    }
+  }
+  return undefined
+}
+
+/**
+ * Host entry point for sign-in.
+ *
+ * WhatsApp pairing is driven by the worker inside the adapter: it emits `qr`
+ * while pairing and `connected` once the phone confirms. This keeps the latest
+ * one so Craft can ask at any time instead of having caught the event, because
+ * the adapter may emit the QR before the UI has opened its dialog.
+ */
+export function createAuth(options?: Record<string, unknown>): WhatsAppAuth {
+  const resolved = resolveWhatsAppConfig(options)
+  return new WhatsAppAuth(
+    () => new WhatsAppAdapter(),
+    resolved,
+    (event, extra) => console.log(JSON.stringify({ event, ...(extra ?? {}) })),
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Sign-in (pairing) surface for the host
+// ---------------------------------------------------------------------------
+
+/**
+ * WhatsApp pairing, wrapped so Craft can drive it.
+ *
+ * The adapter already knows how to pair — it spawns the worker, which emits
+ * `qr` and then `connected`. What was missing was a place to keep the latest QR:
+ * the worker can emit it before the person opens the dialog, and an event that
+ * only fires once is easy to miss. This holds the most recent state so
+ * `state()` always answers, and keeps the adapter alive across the flow.
+ */
+export class WhatsAppAuth {
+  private snapshot: WeChatLikeState = { phase: 'idle' }
+
+  private adapter: WhatsAppAdapter | null = null
+
+  private unsubscribe: (() => void) | null = null
+
+  private attempt = 0
+
+  constructor(
+    private readonly makeAdapter: () => WhatsAppAdapter,
+    private readonly adapterConfig: Record<string, unknown>,
+    private readonly log: (event: string, extra?: Record<string, unknown>) => void = () => {},
+  ) {}
+
+  state(): WeChatLikeState {
+    return this.snapshot
+  }
+
+  async start(): Promise<WeChatLikeState> {
+    this.attempt += 1
+    this.snapshot = { phase: 'awaiting', attempt: this.attempt, detail: '正在启动 WhatsApp 配对…' }
+
+    // Reuse a live adapter if one is already pairing; starting a second would
+    // open a second socket for the same account.
+    if (!this.adapter) {
+      const adapter = this.makeAdapter()
+      this.unsubscribe = adapter.onEvent((event) => {
+        switch (event.type) {
+          case 'qr':
+            this.snapshot = {
+              phase: 'awaiting',
+              qr: event.qr,
+              attempt: this.attempt,
+              detail: '请用手机 WhatsApp 扫描二维码配对',
+            }
+            this.log('whatsapp_qr_ready', { attempt: this.attempt })
+            break
+          case 'pairing_code':
+            this.snapshot = {
+              phase: 'awaiting',
+              code: event.code,
+              attempt: this.attempt,
+              detail: '在手机上输入配对码',
+            }
+            break
+          case 'connected':
+            this.snapshot = {
+              phase: 'connected',
+              attempt: this.attempt,
+              detail: event.name ? `已连接：${event.name}` : '已连接',
+              // Baileys keeps its own auth state on disk; there is no token to
+              // hand back. `connected` is therefore the whole credential for
+              // this platform, which is why no `credentials` key is emitted.
+            }
+            this.log('whatsapp_connected', { attempt: this.attempt })
+            break
+          case 'disconnected':
+            this.snapshot = {
+              phase: event.loggedOut ? 'expired' : 'failed',
+              attempt: this.attempt,
+              error: event.reason ?? (event.loggedOut ? '已退出登录，请重新扫码' : '连接断开'),
+            }
+            break
+          case 'unavailable':
+            this.snapshot = { phase: 'failed', attempt: this.attempt, error: event.message }
+            break
+          case 'error':
+            this.snapshot = { phase: 'failed', attempt: this.attempt, error: event.message }
+            break
+          default:
+            break
+        }
+      })
+      this.adapter = adapter
+    }
+
+    try {
+      await this.adapter.initialize(this.adapterConfig as PlatformConfig)
+    } catch (error) {
+      this.snapshot = {
+        phase: 'failed',
+        attempt: this.attempt,
+        error: error instanceof Error ? error.message : String(error),
+      }
+      return this.snapshot
+    }
+
+    // initialize() only starts the worker; the QR (or a crash) arrives on an
+    // event a moment later. Waiting a bounded time for that first signal means
+    // a broken worker reports `failed` immediately instead of leaving the UI on
+    // "启动中" until the person gives up.
+    await this.waitForFirstSignal(FIRST_SIGNAL_TIMEOUT_MS)
+    return this.snapshot
+  }
+
+  /** Resolve when the snapshot stops being the pre-QR placeholder, or on timeout. */
+  private waitForFirstSignal(timeoutMs: number): Promise<void> {
+    const startedAt = Date.now()
+    const pendingPhase = this.snapshot.phase
+    return new Promise((resolve) => {
+      const tick = () => {
+        const moved = this.snapshot.phase !== pendingPhase || Boolean(this.snapshot.qr)
+        if (moved || Date.now() - startedAt >= timeoutMs) {
+          resolve()
+          return
+        }
+        setTimeout(tick, 100)
+      }
+      tick()
+    })
+  }
+
+  async submit(code: string): Promise<WeChatLikeState> {
+    const trimmed = code.trim()
+    if (!trimmed) return this.snapshot
+    try {
+      await this.adapter?.requestPairingCode(trimmed)
+      return { ...this.snapshot, detail: '已提交手机号，等待配对码' }
+    } catch (error) {
+      return {
+        ...this.snapshot,
+        phase: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
+  async cancel(): Promise<WeChatLikeState> {
+    this.unsubscribe?.()
+    this.unsubscribe = null
+    try {
+      await this.adapter?.destroy()
+    } catch {
+      // Destroying a half-started adapter is best-effort.
+    }
+    this.adapter = null
+    this.snapshot = { phase: 'idle', attempt: this.attempt }
+    return this.snapshot
+  }
+}
+
+/** How long `start()` waits for the worker's first QR / failure signal. */
+const FIRST_SIGNAL_TIMEOUT_MS = 12_000
+
+/** One snapshot shape, shared with the WeChat provider. */
+interface WeChatLikeState {
+  phase: 'idle' | 'awaiting' | 'scanned' | 'need_code' | 'connected' | 'expired' | 'failed'
+  qr?: string
+  code?: string
+  expiresAt?: number
+  detail?: string
+  error?: string
+  attempt?: number
+  credentials?: Record<string, unknown>
 }

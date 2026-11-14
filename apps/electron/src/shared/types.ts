@@ -870,6 +870,38 @@ export interface ElectronAPI {
       changed: { listenerId: string; reason: 'enabled' | 'config' | 'dependency' },
     ) => void
   ): () => void
+  /**
+   * Plugin sign-in (QR / pairing code).
+   *
+   * The plugin owns the platform protocol; these four calls only relay to its
+   * control service, so a new platform needs no change here. Every call resolves
+   * with a snapshot: `ok:false` carries a machine-readable `code` that the UI
+   * maps to a sentence (see PluginAuthErrorCode).
+   */
+  startPluginAuth(
+    workspaceId: string,
+    listenerId: string
+  ): Promise<{ ok: boolean; state?: import('@craft-agent/shared/protocol/dto').PluginAuthStateDto; code?: import('@craft-agent/shared/protocol/dto').PluginAuthErrorCode; error?: string }>
+  getPluginAuthState(
+    workspaceId: string,
+    listenerId: string
+  ): Promise<{ ok: boolean; state?: import('@craft-agent/shared/protocol/dto').PluginAuthStateDto; code?: import('@craft-agent/shared/protocol/dto').PluginAuthErrorCode; error?: string }>
+  submitPluginAuthCode(
+    workspaceId: string,
+    listenerId: string,
+    code: string
+  ): Promise<{ ok: boolean; state?: import('@craft-agent/shared/protocol/dto').PluginAuthStateDto; code?: import('@craft-agent/shared/protocol/dto').PluginAuthErrorCode; error?: string }>
+  cancelPluginAuth(
+    workspaceId: string,
+    listenerId: string
+  ): Promise<{ ok: boolean; state?: import('@craft-agent/shared/protocol/dto').PluginAuthStateDto; code?: import('@craft-agent/shared/protocol/dto').PluginAuthErrorCode; error?: string }>
+  /** Pushed on every change of a plugin's sign-in flow. */
+  onPluginAuthEvent(
+    callback: (
+      workspaceId: string,
+      state: import('@craft-agent/shared/protocol/dto').PluginAuthStateDto,
+    ) => void
+  ): () => void
   listEventSubscriptions(
     workspaceId: string,
     sessionId: string
@@ -936,10 +968,6 @@ export interface ElectronAPI {
   testQQCredentials(creds: { appId: string; appSecret: string }): Promise<{ success: boolean; botName?: string; error?: string }>
   saveQQCredentials(creds: { appId: string; appSecret: string; mainQqOpenIds?: string[] }): Promise<void>
   saveWeChatCredentials(creds: { botToken: string; baseUrl?: string; botId?: string; userId?: string }): Promise<void>
-  // WeChat QR login flow
-  startWeChatConnect(): Promise<{ success: boolean }>
-  submitWeChatVerifyCode(code: string): Promise<{ success: boolean }>
-  onWeChatEvent(callback: (payload: { workspaceId: string; event: WeChatUiEvent }) => void): () => void
   disconnectMessagingPlatform(platform: string): Promise<void>
   forgetMessagingPlatform(platform: string): Promise<void>
   getMessagingBindings(): Promise<Array<{ id: string; workspaceId: string; sessionId: string; platform: string; channelId: string; threadId?: number; channelName?: string; enabled: boolean; createdAt: number; accessMode?: MessagingBindingAccessMode; allowedSenderIds?: string[] }>>
@@ -954,10 +982,6 @@ export interface ElectronAPI {
   unbindMessagingBinding(bindingId: string): Promise<{ success: boolean }>
   onMessagingBindingChanged(callback: (workspaceId: string) => void): () => void
   onMessagingPlatformStatus(callback: (workspaceId: string, platform: string, status: MessagingPlatformRuntimeInfo) => void): () => void
-  // WhatsApp (subprocess-based Baileys adapter)
-  startWhatsAppConnect(): Promise<{ success: boolean }>
-  submitWhatsAppPhone(phoneNumber: string): Promise<{ success: boolean }>
-  onWhatsAppEvent(callback: (payload: { workspaceId: string; event: WhatsAppUiEvent }) => void): () => void
   // Messaging access control (Phase 3)
   getMessagingPlatformOwners(platform: string): Promise<MessagingPlatformOwnerInfo[]>
   setMessagingPlatformOwners(platform: string, owners: MessagingPlatformOwnerInfo[]): Promise<MessagingPlatformOwnerInfo[]>

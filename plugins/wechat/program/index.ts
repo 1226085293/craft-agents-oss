@@ -28,6 +28,7 @@ function generateClientId(): string {
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
+import { WeChatQrLogin } from './login.ts'
 
 import type {
   AdapterCapabilities,
@@ -673,3 +674,19 @@ export function createAdapter(): WeChatAdapter {
 
 /** Host entry point: this platform's credential format lives here, not in Craft. */
 export const parseCredentials = parseWeChatCredentials
+
+/**
+ * Host entry point for sign-in.
+ *
+ * Craft calls this and renders whatever comes back; it never learns the iLink
+ * protocol, the seven platform statuses, or what a bot token looks like. The
+ * module keeps the attempt in this process, so a slow long poll cannot stall
+ * the host's request.
+ */
+export function createAuth(options?: Record<string, unknown>): WeChatQrLogin {
+  const config = (options?.config ?? {}) as Record<string, unknown>
+  const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim() ? config.baseUrl.trim() : undefined
+  return new WeChatQrLogin(baseUrl, (event, extra) => {
+    console.log(JSON.stringify({ event, ...(extra ?? {}) }))
+  })
+}

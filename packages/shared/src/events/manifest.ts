@@ -129,6 +129,18 @@ export interface ListenerConfigProperty {
   /** Render as a password field and keep the value out of logs. */
   secret?: boolean;
   enum?: Array<string | number>;
+  /**
+   * Numeric bounds and granularity, for `type: 'number'`.
+   *
+   * Declared so a plugin can say "this is a TCP port" without a host release:
+   * the renderer reads them defensively (a missing key just means no bound),
+   * and the host rebuilds an honest `number` input instead of a free-text box.
+   * They are advisory UI facts — the host does not police them, because the
+   * plugin is the only thing that knows what the value is for.
+   */
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 export interface ListenerConfigSchema {

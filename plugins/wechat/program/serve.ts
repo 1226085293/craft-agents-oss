@@ -26,13 +26,27 @@
  */
 
 import { createServer } from 'node:http'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { join } from 'node:path'
 
 const PORT = Number(process.env.CRAFT_PLUGIN_PORT ?? 0)
 const PLUGIN_ID = process.env.CRAFT_LISTENER_ID ?? 'plugin'
 const EVENTS_URL = process.env.CRAFT_EVENTS_URL ?? ''
 const EVENTS_TOKEN = process.env.CRAFT_EVENTS_TOKEN ?? ''
 const CONFIG_PATH = process.env.CRAFT_LISTENER_CONFIG ?? ''
+/** Where the plugin may write `control.json` — Craft reads the service from there. */
+const DATA_DIR = process.env.CRAFT_LISTENER_DATA ?? ''
+/**
+ * Bearer token for the loopback control service.
+ *
+ * Craft and the plugin run on the same machine but not in the same address
+ * space, so the port alone would let any local process drive this plugin's
+ * sign-in flow. A fresh random token per process, published only in a mode-600
+ * file beside the data dir, closes that: nothing outside this process and Craft
+ * ever sees it.
+ */
+const CONTROL_TOKEN = randomBytes(32).toString('hex')
 
 interface IncomingLike {
   channelId?: string
@@ -55,10 +69,38 @@ interface PlatformAdapterLike {
 
 interface ActionModule {
   createAdapter?: (options?: Record<string, unknown>) => PlatformAdapterLike
+  /**
+   * The plugin's own sign-in flow, when it has one.
+   *
+   * Craft never learns the platform protocol: it calls these four and renders
+   * whatever state comes back. `start` returns as soon as there is something to
+   * show — long polling happens in this process, not inside the request, so the
+   * host never waits on a slow platform.
+   */
+  createAuth?: (options?: Record<string, unknown>) => PluginAuthLike | null
   performAction?: (
     action: string,
     args: Record<string, unknown>,
   ) => Promise<{ ok: boolean; message?: string }>
+}
+
+/** One snapshot of the sign-in flow. `credentials` is relayed to the host only. */
+interface PluginAuthState {
+  phase: 'idle' | 'awaiting' | 'scanned' | 'need_code' | 'connected' | 'expired' | 'failed'
+  qr?: string
+  code?: string
+  expiresAt?: number
+  detail?: string
+  error?: string
+  attempt?: number
+  credentials?: Record<string, unknown>
+}
+
+interface PluginAuthLike {
+  start: () => Promise<PluginAuthState>
+  state: () => PluginAuthState
+  submit: (code: string) => Promise<PluginAuthState>
+  cancel: () => Promise<PluginAuthState>
 }
 
 /** The plugin's own config values, as the user filled them in. */
@@ -145,6 +187,8 @@ const plugin = (await import(url)) as ActionModule
 
 const config = readConfig()
 const adapter = plugin.createAdapter?.({ config }) ?? null
+/** Null when the plugin ships no sign-in flow; /auth/* then answers 404. */
+const auth = plugin.createAuth?.({ config, dataDir: DATA_DIR }) ?? null
 
 function readJson(req: import('node:http').IncomingMessage): Promise<unknown> {
   return new Promise((resolve) => {
@@ -187,6 +231,58 @@ const server = createServer((req, res) => {
       // 200 once the platform is actually connected; 503 while it is waiting for
       // credentials. Craft shows "starting" rather than claiming it is healthy.
       send(connected ? 200 : 503, { ok: connected, plugin: PLUGIN_ID })
+      return
+    }
+
+    // Everything below drives the plugin, so it needs the token from
+    // control.json. Without this the published token would be decoration: any
+    // local process could post /action or start a sign-in on the user's behalf.
+    const presented = req.headers.authorization ?? ''
+    if (presented !== `Bearer ${CONTROL_TOKEN}`) {
+      send(401, { error: 'unauthorized' })
+      return
+    }
+
+    // Sign-in flow (`craft-auth/1`). 404 is the honest answer for a plugin with
+    // no such flow — Craft maps it to "unsupported" rather than an error.
+    if (req.url?.startsWith('/auth/')) {
+      if (!auth) {
+        send(404, { error: 'no_auth_flow' })
+        return
+      }
+      const route = req.url.slice('/auth/'.length).split('?')[0]
+      try {
+        if (route === 'start' && req.method === 'POST') {
+          send(200, await auth.start())
+          return
+        }
+        if (route === 'state' && req.method === 'GET') {
+          send(200, auth.state())
+          return
+        }
+        if (route === 'submit' && req.method === 'POST') {
+          const body = (await readJson(req)) as { code?: unknown } | null
+          const code = typeof body?.code === 'string' ? body.code.trim() : ''
+          if (!code) {
+            send(400, { error: 'code_required' })
+            return
+          }
+          send(200, await auth.submit(code))
+          return
+        }
+        if (route === 'cancel' && req.method === 'POST') {
+          send(200, await auth.cancel())
+          return
+        }
+        send(404, { error: 'unknown_auth_route' })
+      } catch (error) {
+        // A throwing provider is a broken attempt, not a broken plugin: report
+        // it as `failed` so the UI can offer "try again" instead of a dead end.
+        send(200, {
+          phase: 'failed',
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
       return
     }
 
@@ -244,6 +340,28 @@ server.listen(PORT, '127.0.0.1', () => {
   const address = server.address()
   const port = typeof address === 'object' && address ? address.port : 0
   console.log(JSON.stringify({ ready: true, port }))
+
+  // Publish the control service so Craft can reach us (`craft-deps/1` contract).
+  // The port is ephemeral and the token is per-process: Craft reads both from
+  // this file, so no port is ever guessed and a stale file cannot impersonate a
+  // fresh process. mode 600 — the token is a bearer credential for 127.0.0.1.
+  if (DATA_DIR) {
+    try {
+      mkdirSync(DATA_DIR, { recursive: true })
+      writeFileSync(
+        join(DATA_DIR, 'control.json'),
+        `${JSON.stringify({ port, token: CONTROL_TOKEN, pid: process.pid }, null, 2)}\n`,
+        { encoding: 'utf8', mode: 0o600 },
+      )
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'control_json_failed',
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    }
+  }
 })
 
 // Inbound: the adapter owns the platform connection; this only forwards.

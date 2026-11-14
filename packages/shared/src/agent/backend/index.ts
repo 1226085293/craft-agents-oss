@@ -32,7 +32,6 @@ export type {
   BackendConfig,
   BackendHostRuntimeContext,
   PermissionCallback,
-  PlanCallback,
   AuthCallback,
   SourceChangeCallback,
   ChatOptions,

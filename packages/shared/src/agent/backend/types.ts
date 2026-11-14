@@ -91,7 +91,6 @@ export type PermissionCallback = (request: {
  * Plan submission callback signature.
  * Called when agent submits a plan for user review.
  */
-export type PlanCallback = (planPath: string) => void;
 
 /**
  * Auth request callback signature.

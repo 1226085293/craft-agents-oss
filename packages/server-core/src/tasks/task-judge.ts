@@ -15,8 +15,6 @@
 
 import type { Handoff, Task } from '@craft-agent/shared/tasks';
 
-export const JUDGE_VERDICT_TIMEOUT_MS = 180_000;
-
 /** Build the judge prompt. Kept byte-stable for prompt caching. */
 export function buildJudgePrompt(task: Task, handoff: Handoff): string {
   const requirement = task.verify.requirement ?? '(未填写)';

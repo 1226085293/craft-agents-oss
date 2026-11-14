@@ -162,9 +162,6 @@ export interface TaskServiceDeps {
   newId?: () => string;
 }
 
-/** A task that keeps handing off in one session gets a fresh one. */
-export const MAX_HANDOFFS_PER_SESSION = 4;
-
 /**
  * How many consecutive hand-offs with no plan movement count as "spinning".
  *

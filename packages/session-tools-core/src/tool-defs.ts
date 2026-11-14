@@ -386,14 +386,6 @@ export const DeliverFileSchema = z.object({
   platform: z.enum(['telegram', 'whatsapp', 'lark', 'qq', 'wechat']).optional().describe('Optionally restrict delivery to one messaging platform.'),
 });
 
-export const ListMessagingChannelsSchema = z.object({
-  sessionId: z.string().optional().describe('Session ID to list bindings for. Defaults to current session.'),
-});
-
-export const UnbindMessagingChannelSchema = z.object({
-  platform: z.enum(['telegram', 'whatsapp']).optional().describe('Platform to unbind. If omitted, unbinds all.'),
-});
-
 // ============================================================
 // Canonical Tool Descriptions (base — no DOC_REFS)
 // ============================================================

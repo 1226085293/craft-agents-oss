@@ -372,17 +372,6 @@ export function loadPluginLocales(
   return {};
 }
 
-/** Every enabled plugin's strings for one locale. */
-export function loadAllPluginLocales(
-  options: LoadListenersOptions & { locale: string },
-): Record<string, string> {
-  const merged: Record<string, string> = {};
-  for (const plugin of loadListeners(options)) {
-    Object.assign(merged, loadPluginLocales(plugin, options.locale));
-  }
-  return merged;
-}
-
 /**
  * Whether a plugin may be used at all.
  *

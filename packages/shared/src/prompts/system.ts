@@ -294,7 +294,7 @@ export interface SystemPromptOptions {
   workspaceRootPath?: string;
   /** Working directory for context file discovery (monorepo support) */
   workingDirectory?: string;
-  /** Backend name for "powered by X" text (default: 'Claude Code') */
+  /** Backend name for "powered by X" text (default: 'Craft Agents Backend') */
   backendName?: string;
 }
 
@@ -347,7 +347,7 @@ Prefer built-in tools over ad-hoc CLI commands when they cover the same task.
  * @param workspaceRootPath - Root path of the workspace
  * @param workingDirectory - Working directory for context file discovery
  * @param preset - System prompt preset ('default' | 'mini' | custom string)
- * @param backendName - Backend name for "powered by X" text (default: 'Claude Code')
+ * @param backendName - Backend name for "powered by X" text (default: 'Craft Agents Backend')
  */
 export function getSystemPrompt(
   pinnedPreferencesPrompt?: string,
@@ -584,10 +584,10 @@ function getCraftAgentEnvironmentMarker(): string {
  * ${APP_ROOT}/docs/ and is read on-demand when topics come up.
  *
  * @param workspaceRootPath - Root path of the workspace
- * @param backendName - Backend name for "powered by X" text (default: 'Claude Code')
+ * @param backendName - Backend name for "powered by X" text (default: 'Craft Agents Backend')
  * @param includeCoAuthoredBy - Whether to include the Co-Authored-By git trailer instruction (default: true)
  */
-function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = 'Claude Code', includeCoAuthoredBy: boolean = true): string {
+function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = 'Craft Agents Backend', includeCoAuthoredBy: boolean = true): string {
   // Default to ${APP_ROOT}/workspaces/{id} if no path provided
   const workspacePath = workspaceRootPath || `${APP_ROOT}/workspaces/{id}`;
 
@@ -732,53 +732,6 @@ Mode switching is normal — adapt to current mode, honor the user's latest inte
 
 **CRITICAL:** Plan files go ONLY in the EXACT \`plansFolderPath\`, data files ONLY in \`dataFolderPath\` (from \`<session_state>\`). Other paths — incl. parent session folder, \`.copilot-config/\`, \`session-state/\` — are rejected.
 
-${backendName === 'Codex' ? `
-## MCP Tool Naming
-
-MCP tools from connected sources follow the naming pattern \`mcp__sources__{slug}__{tool}\`:
-
-- **\`slug\`** is the source's **slug** from the \`<sources>\` block above (e.g., \`linear\`, \`github\`)
-- Do **NOT** use source IDs, provider names, or config.json \`id\` fields
-- Example: Linear source (slug: \`linear\`) → \`mcp__sources__linear__list_issues\`, \`mcp__sources__linear__create_issue\`
-- Example: Craft source (slug: \`craft\`) → \`mcp__sources__craft__search_spaces\`, \`mcp__sources__craft__get_block\`
-- The \`session\` MCP server provides workspace tools: \`mcp__session__source_test\`, \`mcp__session__config_validate\`, etc.
-
-**Tool discovery:** Call \`mcp__sources__{slug}__list_tools\` or try calling a specific tool directly — the error response will list available tools.
-- **NEVER** use \`list_mcp_resources\` — it lists resources, not tools. It will not help you discover available tools.
-- **NEVER** use shell/bash to call MCP tools. MCP tools are first-class functions you call directly, just like \`exec_command\` or \`apply_patch\`.
-
-**After OAuth completes:** MCP tools become available on the next turn. If tools were not available before auth, try calling them directly now — they will work after authentication. Do NOT keep running \`source_test\` to check — just call the tools.
-
-## Source Management Tools
-
-The \`session\` MCP server provides tools for managing external sources:
-
-| Tool | Purpose |
-|------|---------|
-| \`source_test\` | Validate config, test connection, check auth status |
-| \`source_oauth_trigger\` | Start OAuth for MCP sources (Linear, Notion, etc.) |
-| \`source_google_oauth_trigger\` | Google OAuth (Gmail, Calendar, Drive, Docs, Sheets, YouTube, Search Console) |
-| \`source_slack_oauth_trigger\` | Slack OAuth |
-| \`source_microsoft_oauth_trigger\` | Microsoft OAuth (Outlook, Teams, OneDrive) |
-| \`source_credential_prompt\` | Prompt user for API key / bearer token |
-
-**Source creation workflow:**
-1. Read \`${DOC_REFS.sources}\` for the full setup guide
-2. Check the product docs (https://thecraftagents.com/docs) for service-specific guides
-3. Create \`config.json\` in \`sources/{slug}/\`
-4. Create \`permissions.json\` for Explore mode
-5. Write \`guide.md\` with usage instructions
-6. Run \`source_test\` to validate — **once only, before auth**
-7. Trigger the appropriate auth tool
-
-**STRICT RULES:**
-- Run \`source_test\` at most **ONCE** per source. It validates config structure only. Repeating it gives the same result.
-- When a user asks you to call a specific tool, call **THAT tool and nothing else**. Do not run \`source_test\` or other tools instead.
-- **Do NOT** grep the workspace, search session files, or do web searches to find source config patterns. Read the source's \`config.json\` and \`guide.md\` directly.
-- **If an existing source is already configured**, read its \`config.json\` + \`guide.md\`, then use it. Do not recreate or search for how to set it up.
-
-**If MCP connection fails after OAuth with "Auth required":** The source needs to be re-enabled in the session for the new credentials to take effect. Do NOT keep retrying the same failing call or investigating log files — ask the user to re-enable the source or restart the session.
-` : ''}
 **Full reference on what commands are enablled:** \`${DOC_REFS.permissions}\` (bash command lists, blocked constructs, planning workflow, customization). Read if unsure, or user has questions about permissions.
 
 ## Web Search

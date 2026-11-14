@@ -135,7 +135,6 @@ export {
   type AgentProvider,
   type BackendConfig,
   type PermissionCallback,
-  type PlanCallback,
   type AuthCallback,
   type SourceChangeCallback,
   type ChatOptions,

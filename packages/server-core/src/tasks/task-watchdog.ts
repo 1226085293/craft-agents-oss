@@ -815,9 +815,6 @@ export function runWatchdogPass(deps: WatchdogDeps): number {
 /** Default cadence: often enough to catch a stall, cheap enough to ignore. */
 export const WATCHDOG_INTERVAL_MS = 5 * 60_000;
 
-/** A silent session is suspicious after this long, not immediately. */
-export const SILENT_SESSION_MS = 5 * 60_000;
-
 /** No progress at all for this long is a different (worse) signal. */
 export const STALE_TASK_MS = 30 * 60_000;
 

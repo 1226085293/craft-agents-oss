@@ -37,7 +37,6 @@ import type {
   AgentBackend,
   ChatOptions,
   PermissionCallback,
-  PlanCallback,
   AuthCallback,
   SourceChangeCallback,
   SdkMcpServerConfig,

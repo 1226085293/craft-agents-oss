@@ -69,18 +69,6 @@ export function setImageProcessor(proc: ImageProcessor) {
 }
 
 /**
- * Get image dimensions from a buffer.
- * Returns { width, height } or null if the buffer is not a valid image.
- */
-export async function getImageSize(buffer: Buffer): Promise<{ width: number; height: number } | null> {
-  try {
-    return await imageProcessor.getMetadata(buffer)
-  } catch {
-    return null
-  }
-}
-
-/**
  * Resize an image buffer to fit within maxSize×maxSize, output as PNG.
  * Returns the resized PNG buffer, or undefined if the input is invalid.
  */

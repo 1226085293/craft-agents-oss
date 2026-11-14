@@ -163,6 +163,12 @@ function ListenerAuthDialog({
   const [busy, setBusy] = React.useState(false)
   const [code, setCode] = React.useState('')
   const attemptRef = React.useRef(0)
+  // Ties the code image to the sentence that explains what to do with it.
+  const instructionId = React.useId()
+  // The actions swap as the phase moves (重新获取 disappears once the flow
+  // ends). If one of them held focus, keep the keyboard inside the dialog
+  // instead of dropping it to the document body.
+  const closeRef = React.useRef<HTMLButtonElement | null>(null)
 
   const apply = React.useCallback((next: AuthState | null | undefined) => {
     if (!next) return
@@ -278,6 +284,11 @@ function ListenerAuthDialog({
     }
   }
 
+  React.useEffect(() => {
+    if (!open) return
+    if (document.activeElement === document.body) closeRef.current?.focus()
+  }, [open, phase])
+
   const showQr = Boolean(state?.qr) && phase !== 'connected' && phase !== 'failed'
   const live = phase ? LIVE_PHASES.includes(phase) : false
   const statusText = error ?? (phase ? state?.detail ?? PHASE_TEXT[phase] : '正在联系插件…')
@@ -318,6 +329,7 @@ function ListenerAuthDialog({
                 level="M"
                 role="img"
                 aria-label="授权二维码"
+                aria-describedby={instructionId}
                 title="授权二维码"
               />
             </div>
@@ -331,8 +343,11 @@ function ListenerAuthDialog({
                 {state.qr}
               </a>
             )}
-            <p className="text-[11px] text-muted-foreground text-center">
+            <p id={instructionId} className="text-[11px] text-muted-foreground text-center">
               用手机扫描上方二维码。二维码失效后点「重新获取」。
+              {state?.qr && !/^https?:\/\//i.test(state.qr)
+                ? '若无法扫描，请在该插件里重新发起连接。'
+                : null}
             </p>
           </div>
         )}
@@ -394,6 +409,7 @@ function ListenerAuthDialog({
             </button>
           )}
           <button
+            ref={closeRef}
             type="button"
             onClick={() => close(false)}
             className="h-7 px-2.5 inline-flex items-center gap-1.5 rounded-md border border-border text-xs text-muted-foreground hover:text-foreground"

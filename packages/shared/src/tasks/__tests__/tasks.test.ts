@@ -70,6 +70,17 @@ describe('state machine', () => {
     expect(() => assertTransition('completed', 'running')).toThrow(IllegalTransitionError);
   });
 
+  it('lets a paused task finish its round, because the pause can land mid-turn', () => {
+    // A watchdog stall check (or a budget stop) pauses the task while the worker's turn is still
+    // running — stopping a session is cooperative, so the `report_result` already in flight still
+    // arrives. `closeRound` ends by returning the record to `backlog`; with no edge there, that
+    // write threw `IllegalTransitionError` straight out of `reportHandoff`.
+    const paused = applyTransition(task(), 'paused', { now: 10, pauseReason: 'process_lost' }).task;
+    const closed = applyTransition(paused, 'backlog', { now: 20 });
+    expect(closed.changed).toBe(true);
+    expect(closed.task.status).toBe('backlog');
+  });
+
   it('lets a paused task be closed, because the pause is what the person decides on', () => {
     // The supervisor learns a task is done by reading why it paused (a failure, a budget stop, a
     // worker that went quiet). Without this edge that decision was refused by the state machine and

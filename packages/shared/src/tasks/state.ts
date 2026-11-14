@@ -50,7 +50,16 @@ const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
    * no edge here, that decision was refused by the state machine — the task was stuck in `paused` with
    * no way to reach a terminal state except `canceled`, which says something different.
    */
-  paused: ['running', 'completed', 'canceled', 'failed'],
+  /**
+   * `paused → backlog` closes a round that was delivered while the task was paused.
+   *
+   * This is not a corner case: a pause lands mid-round all the time (the watchdog's stall check, a
+   * budget stop) and the worker's turn keeps going — stopping a session is cooperative, so the
+   * `report_result` already in flight still arrives. `closeRound` ends by returning the record to
+   * `backlog`, and without this edge that write threw `IllegalTransitionError` out of
+   * `reportHandoff`, turning a correct report into an error the worker has to interpret.
+   */
+  paused: ['running', 'backlog', 'completed', 'canceled', 'failed'],
   completed: [],
   failed: ['backlog', 'running', 'canceled'],
   canceled: [],

@@ -2363,10 +2363,29 @@ export class TaskService {
           ? 1
           : (task.verifyRounds ?? 0) + 1,
     };
-    // A handoff ends the worker's run no matter what the verdict decides next:
-    // the lock is released and the active time banked here, through the one
-    // release shape, before any branch below re-parks the task.
+    /**
+     * A handoff ends the worker's run, but it does not end the round.
+     *
+     * The lock is released and the active time banked here, through the one release shape, before
+     * any branch below re-parks the task — that ordering is deliberate, a hand-off must end the
+     * worker's run whatever the verdict decides next.
+     *
+     * What must not end here is `runStartedAt`: this round is still open until the branches below
+     * close or park it. Keeping it is what lets a claim that lands in this window recognise the
+     * round it belongs to, instead of counting a second run for it. Live: a per-minute task reached
+     * `runs: 8` against `rounds.ok: 6`, and `runs` is the budget's clock.
+     */
     next = this.releaseRunRecord(next, now);
+    /**
+     * Keep the round open only when the branches below will close it.
+     *
+     * `delivered` is the one outcome that reaches `closeRound` in this call; every other outcome
+     * parks the task (a question, another executor, a failure) and that park ends the round — so the
+     * marker goes with it, or the next legitimate run would not be counted at all.
+     */
+    if (handoff.outcome === 'delivered') {
+      next = { ...next, stats: { ...(next.stats ?? { runs: 0, activeMs: 0 }), runStartedAt: task.stats?.runStartedAt } }
+    }
     this.disposeRun(task.id, 'ended');
 
     if (handoff.outcome === 'needs_decision') {

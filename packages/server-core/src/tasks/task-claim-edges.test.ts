@@ -191,3 +191,43 @@ describe('a placeholder claim keeps its deadline until it binds', () => {
     expect(svc.get(task.id)!.stats?.lockDeadlineAt).toBeUndefined();
   })
 })
+
+describe('a trigger claim is handed over, not defended', () => {
+  /**
+   * Live: every round after the first of a per-minute task was dead.
+   *
+   * The cron fired, claimed `pending:cron:…` so the next minute would bank instead of starting a
+   * second round, and woke the supervisor. The supervisor dispatched the step — and
+   * `assertDispatchCanStart` read that claim as 「someone else is already running」 and refused.
+   * Six `run_started` placeholders, one `run_bound`, `hello-2.md` never written, and the trigger
+   * spent on a round that could not begin.
+   *
+   * The lock stops two rounds running at once; it must not stop a round from starting.
+   */
+  it('lets the dispatch take over what the trigger claimed', () => {
+    const svc = service();
+    const task = recurring(svc);
+    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' });
+    expect(svc.get(task.id)!.stats?.lockSessionId?.startsWith('pending:cron')).toBe(true);
+
+    const takeover = svc.startRun(task.id, 'pending:dispatch');
+    expect(takeover.ok).toBe(true);
+    expect(svc.get(task.id)!.stats?.lockSessionId).toBe('pending:dispatch');
+
+    const bind = svc.startRun(task.id, 'sess_worker');
+    expect(bind.ok).toBe(true);
+    expect(svc.get(task.id)!.stats?.lockSessionId).toBe('sess_worker');
+  })
+
+  it('counts the whole hand-over as one run, because `runs` is the budget\'s clock', () => {
+    // Two writes describe one round (trigger claim, dispatch takeover) and a third ends it (bind).
+    // Counting all three made `runs` climb by two per round, and `runs > maxRuns` is the budget —
+    // so a task that promised twelve rounds stopped at six.
+    const svc = service();
+    const task = recurring(svc);
+    svc.claimTrigger(task.id, { kind: 'cron', at: 1000, detail: 'cron:*/1 * * * *' });
+    svc.startRun(task.id, 'pending:dispatch');
+    svc.startRun(task.id, 'sess_worker');
+    expect(svc.get(task.id)!.stats?.runs).toBe(1);
+  })
+})

@@ -510,7 +510,18 @@ export class TaskService {
      * counted when it was claimed.
      */
     const heldLock = task.stats?.lockSessionId;
-    const isBind = !isPlaceholder && Boolean(heldLock && heldLock.startsWith('pending:'));
+    /**
+     * Handing the round over is not starting a new one.
+     *
+     * Three writes describe one round: the trigger claims (`pending:cron:…`), the dispatch takes
+     * that claim over (`pending:dispatch`), and the spawn binds the real session id. Counting the
+     * first two as runs made a per-minute task's `runs` climb by two per round — and `runs` is the
+     * budget's clock (`runs > maxRuns`), so it ran out at half the rounds it promised.
+     */
+    const isBind =
+      (!isPlaceholder || !heldLock?.startsWith('pending:')) &&
+      Boolean(heldLock && heldLock.startsWith('pending:'));
+    const isTakeover = isPlaceholder && Boolean(heldLock && heldLock.startsWith('pending:'));
 
     let next: Task = {
       ...task,
@@ -538,7 +549,9 @@ export class TaskService {
         // silently erased — `rounds` was reset to nothing on the second round of a recurring task,
         // which made every round look like the first one.
         ...task.stats,
-        runs: (task.stats?.runs ?? 0) + (isBind ? 0 : 1),
+        // `isBind` hands a placeholder to a real session, `isTakeover` hands one placeholder to
+        // another; both continue a run that was already counted.
+        runs: (task.stats?.runs ?? 0) + (isBind || isTakeover ? 0 : 1),
         activeMs: task.stats?.activeMs ?? 0,
         lastHeartbeatAt: now,
         lockSessionId: sessionId,

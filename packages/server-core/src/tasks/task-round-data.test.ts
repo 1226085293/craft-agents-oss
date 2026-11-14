@@ -106,9 +106,11 @@ describe('a round hands its data to the next round', () => {
   })
 
 
-  it('keeps the payload only on the latest round, not on every hand-off', () => {
-    // `handoffs` grows one entry per round; carrying the payload on each grew the record by the whole
-    // dataset every round (5 rounds ≈ 22 KB measured) while only the latest is ever read.
+  it('keeps only the round in progress, and the payload only on lastRound', () => {
+    // `handoffs` used to grow one entry per round, carrying the payload on each: after three rounds the
+    // record held three rounds of attempts (~22 KB measured over five) while only the latest is read.
+    // The timeline is the round in progress — every attempt is still in the journal, and `lastRound` is
+    // what the next round continues from.
     const svc = service()
     const task = recurring(svc)
 
@@ -117,10 +119,46 @@ describe('a round hands its data to the next round', () => {
         await round(svc, task.id, `w${i}`, { total: i, ids: Array.from({ length: 50 }, (_, k) => k) }, `第 ${i} 轮`)
       }
       const after = svc.get(task.id)!
-      expect(after.handoffs.length).toBe(3)
+      expect(after.handoffs.length).toBe(1)
+      expect(after.handoffs[0]?.round).toBe(3)
       expect(after.handoffs.filter((h) => h.roundResult !== undefined).length).toBe(0)
       expect((after.stats?.lastRound?.result?.data as { total: number }).total).toBe(3)
     })()
+  })
+
+  it('drops the finished round when the next one files its first report', async () => {
+    // The live symptom: 「交接时间线」 carried every round of a per-minute task, so twelve rounds of
+    // attempts read as one round's work. The journal keeps each attempt; this array is the round.
+    const svc = service()
+    const task = recurring(svc)
+    await round(svc, task.id, 'w1', { total: 1 }, '第一轮')
+    expect(svc.get(task.id)!.handoffs.map((h) => h.round)).toEqual([1])
+
+    await round(svc, task.id, 'w2', { total: 2 }, '第二轮')
+    expect(svc.get(task.id)!.handoffs.map((h) => h.round)).toEqual([2])
+  })
+
+  it('keeps every attempt inside the same round', async () => {
+    // The looping detector reads attempts, not deliveries — a refused report that vanishes from the
+    // array would let a worker file the same claim forever without being noticed.
+    const svc = service()
+    const task = recurring(svc)
+    const artifact = join(root, 'same-round.json')
+    writeFileSync(artifact, '{}', 'utf-8')
+    svc.startRun(task.id, 'w1')
+
+    for (const summary of ['第一次尝试', '第二次尝试', '第三次尝试']) {
+      await svc.reportHandoff(task.id, {
+        outcome: 'handoff',
+        summary,
+        stepId: '1.1',
+        artifacts: [{ path: artifact }],
+      })
+    }
+
+    const handoffs = svc.get(task.id)!.handoffs
+    expect(handoffs.length).toBe(3)
+    expect(new Set(handoffs.map((h) => h.round))).toEqual(new Set([1]))
   })
 
   it('states the previous round once, not twice', async () => {

@@ -2213,11 +2213,25 @@ export class TaskService {
       handoff.outcome === 'handoff' &&
       contextUtilization >= ROTATE_CONTEXT_THRESHOLD;
 
+    /**
+     * The timeline belongs to the round in progress.
+     *
+     * A per-minute task appended one report per attempt per round and never dropped any, so after
+     * twelve rounds the timeline was twelve rounds of attempts — for a repeating task that is the
+     * history of the schedule, not of this round. The first report of a new round replaces the last
+     * round's entries: `lastRound` is what the next round continues from, and every attempt is still
+     * in the journal.
+     */
+    const roundInProgress = (task.stats?.rounds?.ok ?? 0) + 1;
+    const keptHandoffs =
+      task.stats?.handoffsRound === roundInProgress ? task.handoffs : [];
+
     let next: Task = {
       ...task,
       // The gate's verdict travels with the attempt: `handoffs` is the log, `passed` is
       // what makes 「filed a report」 different from 「tried and was refused」.
-      handoffs: [...task.handoffs, { ...handoff, passed: accepted }],
+      handoffs: [...keptHandoffs, { ...handoff, passed: accepted, round: roundInProgress }],
+      stats: { ...(task.stats ?? { runs: 1, activeMs: 0 }), handoffsRound: roundInProgress },
       updatedAt: now,
       lifecycle: recordRunResult(task.lifecycle, accepted, now, accepted ? undefined : reasons.join('; ')),
       // Intermediate hand-offs do not touch the verdict: 「验收：通过」 may not

@@ -568,6 +568,14 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
    */
   const milestones = detail.handoffs.filter((handoff) => handoff.milestone !== false)
   const foldedAttempts = detail.handoffs.length - milestones.length
+  /**
+   * Which round the timeline is about.
+   *
+   * The array holds the round in progress, so 「第 N 轮」 is read off the entries rather than guessed
+   * from the record's total — after a round closes the panel still shows that round until the next one
+   * files its first report, and that is the round a person is asking about.
+   */
+  const timelineRound = [...detail.handoffs].reverse().find((handoff) => handoff.round)?.round
   // A hand-off names the session that produced it by id. An id is a storage key,
   // not something a person can match against the session list, so it is resolved to
   // the name the user sees — and falls back to the id when the session is gone,
@@ -1135,6 +1143,9 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <h2 id="task-handoff-heading" className="td-heading text-foreground">交接时间线</h2>
+            {timelineRound ? (
+              <span className="text-xs tabular-nums text-muted-foreground">第 {timelineRound} 轮</span>
+            ) : null}
             <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-xs tabular-nums text-muted-foreground">{milestones.length}</span>
           </div>
         </div>

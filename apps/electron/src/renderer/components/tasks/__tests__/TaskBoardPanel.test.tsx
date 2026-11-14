@@ -471,6 +471,22 @@ describe('the trigger is editable from the page', () => {
   })
 
 
+  it('says which round the timeline is about', () => {
+    // The array holds the round in progress, so the panel can name it. Before this the timeline of a
+    // per-minute task was every round at once and 「这一轮做到哪」 had no answer.
+    const html = renderDetail({
+      ...detail,
+      handoffs: [{ ...detail.handoffs[0]!, round: 7 }],
+    })
+    expect(html).toContain('第 7 轮')
+  })
+
+  it('says nothing about rounds when the record has none', () => {
+    // A one-off task never repeats; labelling it 「第 1 轮」 would invent a concept it does not have.
+    const html = renderDetail(detail)
+    expect(html).not.toContain('第 1 轮')
+  })
+
   it('keeps the cron expression literal instead of letting Markdown eat the stars', () => {
     // Live: every cron task read 「定时 · **** (Asia/Shanghai)」 because `* * * * *` is emphasis in
     // Markdown. The person could not tell one cadence from another, and 「每分钟」 looked broken.

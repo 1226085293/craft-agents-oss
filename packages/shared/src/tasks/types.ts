@@ -250,6 +250,16 @@ export interface TaskStats {
     };
   };
   /**
+   * Which round the `handoffs` on the record belong to.
+   *
+   * `handoffs` is the timeline of the round in progress, not the task's whole life. Without this the
+   * array only ever grew: a per-minute task held every attempt of every round, so 「这一轮做到哪」 could
+   * not be read off the timeline and `task_get` handed the supervisor the whole history every time.
+   * The journal (`handoff` entries) is the audit log, and `lastRound` is what the next round continues
+   * from — so dropping the finished rounds here loses nothing that is read.
+   */
+  handoffsRound?: number;
+  /**
    * Triggers that fired while the task could not start, in order.
    *
    * Delivered to the supervisor as one summary once the run ends, then cleared. On the record
@@ -377,6 +387,19 @@ export interface HandoffVerify {
 export interface Handoff {
   at: number;
   fromSessionId: string;
+  /**
+   * Which round of a repeating task this report belongs to.
+   *
+   * A recurring task delivers every round, and the timeline showed the hand-offs of all of them:
+   * after twelve rounds the record held twelve rounds of attempts, and 「这一轮做到哪」 could not be
+   * read off it. The record now keeps the round in progress (see `stats.handoffsRound`); the number on
+   * each entry is what makes 「第几轮」 answerable without counting, and the journal keeps every
+   * attempt for audit.
+   *
+   * Optional: records written before it existed still load, and a task that never repeats has only
+   * ever had one round.
+   */
+  round?: number;
   /**
    * The plan step this report covers (`1.2`).
    *

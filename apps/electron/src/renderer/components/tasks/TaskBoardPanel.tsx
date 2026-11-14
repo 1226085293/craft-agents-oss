@@ -51,6 +51,8 @@ export interface TaskHandoffView {
   outcome: 'delivered' | 'handoff' | 'needs_decision'
   /** Did this change the task's state or its executor? See `Handoff.milestone`. */
   milestone?: boolean
+  /** Which round of a repeating task this belongs to; the timeline shows one round at a time. */
+  round?: number
   summary: string
   keyFindings?: string[]
   nextAction?: string

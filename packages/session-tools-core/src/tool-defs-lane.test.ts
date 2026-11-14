@@ -22,8 +22,9 @@ const taskLaneTools = () => getSessionToolNames({ role: 'supervisor', supervisor
 describe('supervisor lanes', () => {
   it('keeps the dispatcher on the working lane', () => {
     const tools = taskLaneTools()
-    // The four that route or approve work, and nothing else.
-    for (const name of ['dispatch', 'task_handoff', 'SubmitPlan', 'send_agent_message']) {
+    // The three that route work, and nothing else. (Plan approval is gone: a task's plan is
+    // `task_plan`, which lives on the record and needs no accept click.)
+    for (const name of ['dispatch', 'task_handoff', 'send_agent_message']) {
       expect(tools.has(name)).toBe(true)
     }
   })

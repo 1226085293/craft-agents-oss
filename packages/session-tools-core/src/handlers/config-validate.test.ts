@@ -12,7 +12,6 @@ function createCtx(workspacePath: string) {
     get skillsPath() { return join(workspacePath, 'skills'); },
     plansFolderPath: join(workspacePath, 'plans'),
     callbacks: {
-      onPlanSubmitted: () => {},
       onAuthRequest: () => {},
     },
     fs: {

@@ -87,15 +87,6 @@ export interface TaskSpec {
    */
   baseline?: string;
   /**
-   * True when the plan was written by the creator from what the user asked for.
-   *
-   * The plan stays append-only in that case: a worker may add steps it discovers, but
-   * must not insert them before or between the agreed outlines, because the order the
-   * user agreed to is the one they will read. A plan the worker shaped itself carries
-   * no flag and keeps the original freedom entirely.
-   */
-  planAgreed?: boolean;
-  /**
    * The slice this task is responsible for ("检查范围").
    *
    * Without it a worker either checks everything (and never finishes) or checks

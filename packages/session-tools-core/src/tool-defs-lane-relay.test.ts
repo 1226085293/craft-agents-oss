@@ -35,7 +35,7 @@ describe('supervisor lanes: one writer, one reader', () => {
     // Creation moved to the user lane (`create_task`), which is also the only path that can carry
     // `triggers`. Everything that *maintains* an existing task stays here.
     const tools = taskTools();
-    for (const name of ['task_update', 'task_handoff', 'dispatch', 'SubmitPlan']) {
+    for (const name of ['task_update', 'task_handoff', 'dispatch']) {
       expect(tools.has(name)).toBe(true);
     }
     expect(tools.has('task_create')).toBe(false);
@@ -115,11 +115,11 @@ describe('supervisor lanes: one writer, one reader', () => {
     expect(getSessionToolNames({ role: 'supervisor' }).has('dispatch')).toBe(true);
   });
 
-  it('gives workers neither lane table, and keeps SubmitPlan', () => {
+  it('gives workers neither lane table', () => {
     const worker = getSessionToolNames({ role: 'worker' });
-    expect(worker.has('SubmitPlan')).toBe(true);
     expect(worker.has('dispatch')).toBe(false);
     expect(worker.has('task_create')).toBe(false);
+    expect(worker.has('SubmitPlan')).toBe(false);
   });
 
   it('names every supervisor tool the prompt advertises', () => {

@@ -263,15 +263,6 @@ export interface NameChangedEvent {
 }
 
 /**
- * Plan submitted event
- */
-export interface PlanSubmittedEvent {
-  type: 'plan_submitted'
-  sessionId: string
-  message: Message
-}
-
-/**
  * Typed error event
  */
 export interface TypedErrorEvent {
@@ -656,7 +647,6 @@ export type AgentEvent =
   | SessionArchivedEvent
   | SessionUnarchivedEvent
   | NameChangedEvent
-  | PlanSubmittedEvent
   | StatusEvent
   | InfoEvent
   | InterruptedEvent

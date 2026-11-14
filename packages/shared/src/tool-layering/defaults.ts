@@ -127,7 +127,6 @@ export const DEFAULT_TOOL_CATEGORIES: ToolCategoriesConfig = {
         //
         'task_plan',
         'report_result',
-        'SubmitPlan',
         'browser_tool',
         'spawn_session',
         'subscribe_session',

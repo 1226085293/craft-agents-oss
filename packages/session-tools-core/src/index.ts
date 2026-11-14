@@ -150,8 +150,6 @@ export { createNodeFileSystem } from './context.ts';
 
 // Handlers
 export {
-  // SubmitPlan
-  handleSubmitPlan,
   // Config Validate
   handleConfigValidate,
   // Skill Validate
@@ -189,7 +187,6 @@ export {
 } from './handlers/index.ts';
 
 export type {
-  SubmitPlanArgs,
   ConfigValidateArgs,
   SkillValidateArgs,
   MermaidValidateArgs,
@@ -217,7 +214,6 @@ export type {
 // Tool definitions — single source of truth
 export {
   // Individual Zod schemas
-  SubmitPlanSchema,
   ConfigValidateSchema,
   SkillValidateSchema,
   MermaidValidateSchema,

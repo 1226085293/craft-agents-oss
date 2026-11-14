@@ -797,7 +797,6 @@ export interface AgentBackend {
   onPermissionRequest: PermissionCallback | null;
 
   /** Called when agent submits a plan */
-  onPlanSubmitted: PlanCallback | null;
 
   /** Called when agent writes global memory (host should broadcast memory:changed). */
   onMemoryChanged: (() => void) | null;

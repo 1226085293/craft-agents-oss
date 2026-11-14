@@ -5,10 +5,6 @@
  * These handlers are used by the Pi agent.
  */
 
-// SubmitPlan
-export { handleSubmitPlan } from './submit-plan.ts';
-export type { SubmitPlanArgs } from './submit-plan.ts';
-
 // Config Validate
 export { handleConfigValidate } from './config-validate.ts';
 export type { ConfigValidateArgs } from './config-validate.ts';

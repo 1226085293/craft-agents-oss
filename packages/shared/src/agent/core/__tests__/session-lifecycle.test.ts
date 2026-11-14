@@ -77,7 +77,7 @@ describe('SessionLifecycleManager', () => {
 
     it('should return previous abort reason when setting new one', () => {
       manager.setAbortReason(AbortReason.UserStop);
-      const previous = manager.setAbortReason(AbortReason.PlanSubmitted);
+      const previous = manager.setAbortReason(AbortReason.Redirect);
       expect(previous).toBe(AbortReason.UserStop);
     });
 
@@ -92,7 +92,7 @@ describe('SessionLifecycleManager', () => {
       expect(manager.wasUserAbort()).toBe(false);
       manager.setAbortReason(AbortReason.UserStop);
       expect(manager.wasUserAbort()).toBe(true);
-      manager.setAbortReason(AbortReason.PlanSubmitted);
+      manager.setAbortReason(AbortReason.Redirect);
       expect(manager.wasUserAbort()).toBe(false);
     });
   });
@@ -187,7 +187,6 @@ describe('SessionLifecycleManager', () => {
 describe('AbortReason enum', () => {
   it('should have expected values', () => {
     expect(AbortReason.UserStop as string).toBe('user_stop');
-    expect(AbortReason.PlanSubmitted as string).toBe('plan_submitted');
     expect(AbortReason.AuthRequest as string).toBe('auth_request');
     expect(AbortReason.Redirect as string).toBe('redirect');
     expect(AbortReason.Timeout as string).toBe('timeout');

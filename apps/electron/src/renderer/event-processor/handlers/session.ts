@@ -19,7 +19,6 @@ import type {
   NameChangedEvent,
   PermissionRequestEvent,
   CredentialRequestEvent,
-  PlanSubmittedEvent,
   StatusEvent,
   InfoEvent,
   SystemStopNoticeEvent,
@@ -1080,24 +1079,6 @@ export function handleCredentialRequest(
       type: 'credential_request',
       request: event.request,
     }]
-  }
-}
-
-/**
- * Handle plan_submitted - add plan message to session
- */
-export function handlePlanSubmitted(
-  state: SessionState,
-  event: PlanSubmittedEvent
-): ProcessResult {
-  const { session, streaming } = state
-
-  return {
-    state: {
-      session: appendMessage(session, event.message),
-      streaming,
-    },
-    effects: [],
   }
 }
 

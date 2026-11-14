@@ -34,7 +34,6 @@ function createCtx(workspacePath: string, overrides: CtxOverrides = {}): Session
     },
     plansFolderPath: join(workspacePath, 'plans'),
     callbacks: {
-      onPlanSubmitted: () => {},
       onAuthRequest: () => {},
     },
     fs: {

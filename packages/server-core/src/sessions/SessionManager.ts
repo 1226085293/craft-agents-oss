@@ -37,7 +37,7 @@ import {
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
 import type { Task } from '@craft-agent/shared/tasks'
-import { checkAgreedPlanAppend, readJournal, appendJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatPauseBrief, formatUnreportedBrief, formatDispatchTaskContext, stepParent, normalizeSpec, normalizeTrigger, normalizeTriggers, undeliveredQuestions, allDecisions } from '@craft-agent/shared/tasks'
+import { readJournal, appendJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatPauseBrief, formatUnreportedBrief, formatDispatchTaskContext, stepParent, normalizeSpec, normalizeTrigger, normalizeTriggers, undeliveredQuestions, allDecisions } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -933,14 +933,6 @@ const SOURCE_RELOAD_THROTTLE_MS = 10_000
 const USAGE_FLUSH_INTERVAL_MS = 30_000
 
 /**
- * Text sent to the session when a plan is approved from outside the desktop
- * UI (e.g. Telegram button). Mirrors the English `plan.approved` i18n key
- * used by the desktop flow at `plan-approval-message.ts`. Not localized —
- * the agent reads this, not the end user.
- */
-const PLAN_APPROVAL_MESSAGE = 'Plan approved, please execute.'
-
-/**
  * Every background-task nudge starts with this marker — `[background-task-`
  * followed by `completed]`, `failed]`, `stopped]`, … The injected steer text is
  * matched on this prefix to prove a task's result actually reached the model;
@@ -1275,7 +1267,6 @@ async function resolveToolDisplayMeta(
       // Internal MCP server tools (session)
       const internalMcpServers: Record<string, Record<string, string>> = {
         'session': {
-          'SubmitPlan': 'Submit Plan',
           'call_llm': 'LLM Query',
           'config_validate': 'Validate Config',
           'skill_validate': 'Validate Skill',
@@ -6432,9 +6423,9 @@ export class SessionManager implements ISessionManager {
               (managed.role === 'supervisor' && task.supervisorSessionId === managed.id)
             if (!owns) return { ok: false, error: `本会话没有绑定任务 ${task.id}，不能改它的计划` }
             /**
-             * Deliberately not gated by `checkAgreedPlanAppend`.
+             * Deliberately not gated by an agreed-plan check.
              *
-             * That check protects the *order* of outlines the user approved from being shuffled
+             * That kind of check would protect the *order* of outlines from being shuffled
              * silently. A restructure is the one case where rewriting them is the point — and it
              * is not silent: it is a separate tool call, it is journaled with the titles it
              * replaced, and it cannot touch anything already started.
@@ -6487,16 +6478,6 @@ export class SessionManager implements ISessionManager {
             // section to a role nobody meant. Assignment happens below, when a
             // section is first expanded.
             void patch.agent
-
-            /**
-             * The agreement is append-only, not frozen — see `checkAgreedPlanAppend`.
-             */
-            const appendError = checkAgreedPlanAppend(
-              task.spec?.plan,
-              patch.id,
-              task.spec?.planAgreed,
-            )
-            if (appendError) return { ok: false, error: appendError }
 
             const beforeIds = new Set((task.spec?.plan ?? []).map((step) => step.id))
             const result = service.updatePlan(identifier, {
@@ -7071,91 +7052,6 @@ export class SessionManager implements ISessionManager {
         this.broadcastMemoryChanged(managed.workspace.id)
       }
 
-      // Wire up onPlanSubmitted to add plan message to conversation
-      managed.agent.onPlanSubmitted = async (planPath) => {
-        sessionLog.info(`Plan submitted for session ${managed.id}:`, planPath)
-        try {
-          // Read the plan file content
-          const planContent = await readFile(planPath, 'utf-8')
-
-          // Mark the SubmitPlan tool message as completed (it won't get a tool_result due to forceAbort)
-          const submitPlanMsg = managed.messages.find(
-            m => m.toolName?.includes('SubmitPlan') && m.toolStatus === 'executing'
-          )
-          if (submitPlanMsg) {
-            submitPlanMsg.toolStatus = 'completed'
-            submitPlanMsg.content = 'Plan submitted for review'
-            submitPlanMsg.toolResult = 'Plan submitted for review'
-          }
-
-          // Create a plan message
-          const planMessage = {
-            id: `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            role: 'plan' as const,
-            content: planContent,
-            timestamp: this.monotonic(),
-            planPath,
-          }
-
-          // Add to session messages
-          managed.messages.push(planMessage)
-
-          // Update lastMessageRole for badge display
-          managed.lastMessageRole = 'plan'
-
-          // Send event to renderer
-          this.sendEvent({
-            type: 'plan_submitted',
-            sessionId: managed.id,
-            message: planMessage,
-          }, managed.workspace.id)
-
-          // Interrupt execution - plan presentation is a stopping point
-          // The user needs to review and respond before continuing
-          if (managed.isProcessing && managed.agent) {
-            sessionLog.info(`Interrupting for plan submission in session ${managed.id}`)
-            managed.agent.interruptForHandoff(AbortReason.PlanSubmitted)
-            this.setProcessing(managed, false)
-
-            // Release browser overlay + session binding because the agent is no longer running.
-            // Plan submission pauses execution until user review, so browser ownership should not remain locked.
-            await releaseBrowserOwnershipOnForcedStop(
-              (sid) => this.getBrowserPaneManagerForSession(sid),
-              managed.id,
-            )
-
-            // Send complete event so renderer knows processing stopped (include tokenUsage for real-time updates)
-            this.sendEvent({ type: 'complete', sessionId: managed.id, tokenUsage: managed.tokenUsage, backgroundTasksAlive: this.keepBackgroundTasksAlive }, managed.workspace.id)
-
-            // Persist session state
-            this.persistSession(managed)
-            this.queueTurnLogArchive(managed)
-
-            // Plan handoff bypasses onProcessingStopped, so it never reaches the
-            // notifySpawnParent / emitSessionComplete calls that live in the
-            // queue-empty completion branch. Emit them here so spawned
-            // sub-sessions that end on SubmitPlan still report back to their
-            // seam advances. The backend's trailing {type:'complete'} is
-            // already skipped by the !isProcessing guard in the chat loop, so
-            // there is no double fire. shouldNotifyParent still excludes
-            // unaffected.
-            const planFinalMsgId = this.getLastFinalAssistantMessageId(managed.messages)
-            this.emitSessionComplete({
-              sessionId: managed.id,
-              workspaceId: managed.workspace.id,
-              reason: 'complete',
-              finalMessageId: planFinalMsgId,
-              finalText: planFinalMsgId
-                ? managed.messages.find(m => m.id === planFinalMsgId)?.content
-                : undefined,
-              tokenUsage: managed.tokenUsage,
-            })
-            this.notifySubscribers(managed, 'complete', planFinalMsgId)
-          }
-        } catch (error) {
-          sessionLog.error(`Failed to read plan file:`, error)
-        }
-      }
 
       // Wire up onAuthRequest to add auth message to conversation and pause execution
       managed.agent.onAuthRequest = (request) => {
@@ -7192,7 +7088,7 @@ export class SessionManager implements ISessionManager {
         managed.pendingAuthRequestId = request.requestId
         managed.pendingAuthRequest = request
 
-        // Interrupt execution (like SubmitPlan)
+        // Interrupt execution
         if (managed.isProcessing && managed.agent) {
           sessionLog.info(`Interrupting for auth request in session ${managed.id}`)
           managed.agent.interruptForHandoff(AbortReason.AuthRequest)
@@ -10180,37 +10076,6 @@ ${request.prompt}`;
     const managed = this.sessions.get(sessionId)
     if (!managed) return null
     return getStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
-  }
-
-  /**
-   * Dispatch a plan approval for a session, equivalent to the desktop
-   * "Accept plan" button. Switches the session out of Explore mode (safe)
-   * into allow-all if needed so the plan can execute without per-tool
-   * prompts, then sends the approval message through the normal sendMessage
-   * path.
-   */
-  async acceptPlan(sessionId: string, _planPath?: string): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (!managed) {
-      sessionLog.warn(`acceptPlan: session ${sessionId} not found`)
-      return
-    }
-
-    if (managed.permissionMode === 'safe') {
-      this.setSessionPermissionMode(sessionId, 'allow-all')
-    }
-
-    await this.sendMessage(sessionId, PLAN_APPROVAL_MESSAGE)
-  }
-
-  /**
-   * Reject a plan for a session. Notifies the user and pauses the session.
-   */
-  async rejectPlan(sessionId: string): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (!managed) return
-    // Send a rejection message to pause the session
-    await this.sendMessage(sessionId, '/reject')
   }
 
   // ============================================

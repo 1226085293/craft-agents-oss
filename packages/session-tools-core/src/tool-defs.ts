@@ -17,7 +17,6 @@ import type { SessionToolContext } from './context.ts';
 import type { ToolResult } from './types.ts';
 
 // Handlers
-import { handleSubmitPlan } from './handlers/submit-plan.ts';
 import { handleListPluginActions, handlePluginCall } from './handlers/plugins.ts';
 import { handleConfigValidate } from './handlers/config-validate.ts';
 import { handleSkillValidate } from './handlers/skill-validate.ts';
@@ -91,10 +90,6 @@ import { handleAddMemory, handleQueryMemories } from './handlers/memory.ts';
 // ============================================================
 // Canonical Zod Schemas
 // ============================================================
-
-export const SubmitPlanSchema = z.object({
-  planPath: z.string().describe('Absolute path to the plan markdown file you wrote'),
-});
 
 export const ConfigValidateSchema = z.object({
   target: z.enum(['config', 'sources', 'statuses', 'preferences', 'permissions', 'automations', 'tool-icons', 'all'])
@@ -404,7 +399,6 @@ export const UnbindMessagingChannelSchema = z.object({
 // ============================================================
 
 export const TOOL_DESCRIPTIONS = {
-  SubmitPlan: `Submit a plan for user review. Write the plan to a markdown file first, then call this to present it. IMPORTANT: after this returns, execution pauses until the user accepts/modifies/rejects the plan. Do not call any tools or output text after SubmitPlan.`,
   config_validate: `Validate Craft Agent config files after editing, before they take effect. Targets: config (config.json), sources, statuses, preferences, permissions, automations, tool-icons, all. Returns structured errors/warnings/suggestions.`,
   skill_validate: `Validate a skill SKILL.md: slug format (lowercase alnum + hyphens), file exists/readable, YAML frontmatter valid (name+description required), non-empty body, icon format if present.`,
   mermaid_validate: `Validate Mermaid diagram syntax before outputting (complex diagrams, many nodes, failed renders). Returns specific error messages if invalid. Include the raw diagram code.`,
@@ -517,7 +511,6 @@ export type SessionToolDef = RegistrySessionToolDef | BackendSessionToolDef;
 // ============================================================
 
 export const SESSION_TOOL_DEFS: SessionToolDef[] = [
-  { name: 'SubmitPlan', description: TOOL_DESCRIPTIONS.SubmitPlan, inputSchema: SubmitPlanSchema, executionMode: 'registry', safeMode: 'allow', handler: handleSubmitPlan },
   { name: 'config_validate', description: TOOL_DESCRIPTIONS.config_validate, inputSchema: ConfigValidateSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleConfigValidate },
   { name: 'skill_validate', description: TOOL_DESCRIPTIONS.skill_validate, inputSchema: SkillValidateSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleSkillValidate },
   { name: 'mermaid_validate', description: TOOL_DESCRIPTIONS.mermaid_validate, inputSchema: MermaidValidateSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleMermaidValidate },
@@ -670,7 +663,6 @@ export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
    * supervisor may plan a task it supervises; a worker may plan the task it runs.
    */
   'task_plan',
-  'SubmitPlan',
   // Tier 3 of the event funnel delivers "有一条未处理的事件（id: …）" to this
   // session, so it must be able to read what it was handed. Denying the read
   // tools left the supervisor hunting a tool that did not exist in its own
@@ -721,7 +713,6 @@ export const USER_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'task_update',
   'task_handoff',
   'task_plan',
-  'SubmitPlan',
   'send_agent_message',
   'ask_user',
   'list_questions',
@@ -773,9 +764,8 @@ export function getSessionToolDefs(options?: SessionToolFilterOptions): SessionT
     /**
      * The lane narrows the role the same way the scope does: it can only take tools away.
      *
-     * Only for supervisors. A worker carries `SubmitPlan` so an ordinary session can ask its
-     * person to accept a plan, and a stray lane value on a worker must not remove it — the field
-     * is a supervisor concept, and reading it for other roles quietly deleted a real capability.
+     * Only for supervisors — a worker has no lane, and reading a stray lane value for one would
+     * quietly delete real capabilities from it.
      */
     if (role === 'supervisor' && !isToolVisibleToLane(def.name, options?.supervisorLane)) return false;
 

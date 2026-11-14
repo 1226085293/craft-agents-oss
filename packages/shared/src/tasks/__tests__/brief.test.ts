@@ -55,18 +55,6 @@ describe('the brief always states the current plan', () => {
     expect(text).not.toContain('no steps yet')
   })
 
-  it('marks the appended-only rule for an agreed plan', () => {
-    const text = formatTaskBrief(
-      task({
-        spec: {
-          planAgreed: true,
-          plan: [{ id: '1', title: '写文件', status: 'todo' }],
-        },
-      }),
-    )
-    expect(text).toContain('append at the end');
-  })
-
   it('tells the worker not to plan the same thing twice', () => {
     // The rule needs a criterion, not an adjective: one action, one id.
     const text = formatTaskBrief(task())

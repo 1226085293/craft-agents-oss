@@ -12,7 +12,6 @@ function context(workspacePath: string, sessionId: string): SessionToolContext {
     workspacePath, sessionId, plansFolderPath: workspacePath,
     get sourcesPath() { return join(workspacePath, 'sources') },
     get skillsPath() { return join(workspacePath, 'skills') },
-    callbacks: { onPlanSubmitted() {}, onAuthRequest() {} },
     fs: {
       exists: (path: string) => { try { readFileSync(path); return true } catch { return false } },
       readFile: (path: string) => readFileSync(path, 'utf8'), readFileBuffer: (path: string) => readFileSync(path),
@@ -29,7 +28,6 @@ function contextWithMiniCompletion(workspacePath: string, sessionId: string, res
     get sourcesPath() { return join(workspacePath, 'sources') },
     get skillsPath() { return join(workspacePath, 'skills') },
     callbacks: {
-      onPlanSubmitted() {}, onAuthRequest() {},
       runMiniCompletion: (prompt: string) => Promise.resolve(respond(prompt)),
     },
     fs: {

@@ -1837,7 +1837,6 @@ const ALWAYS_ALLOWED_TOOLS = new Set([
   'Task', 'TaskOutput',             // Agent orchestration
   'WebFetch', 'WebSearch',          // Web research
   'TodoWrite',                      // Task tracking
-  'SubmitPlan',                     // Plan submission
   'LSP',                            // Language server (read-only)
   // Browser automation tool (canonical wrapper)
   'browser_tool',
@@ -1898,7 +1897,7 @@ export function shouldAllowToolInMode(
     return { allowed: true };
   }
 
-  // Check if tool name ends with an always-allowed tool (for MCP variants like mcp__plan__SubmitPlan)
+  // Check if tool name ends with an always-allowed tool (for MCP variants like mcp__session__source_test)
   for (const allowedTool of ALWAYS_ALLOWED_TOOLS) {
     if (toolName.endsWith(`__${allowedTool}`)) {
       return { allowed: true };

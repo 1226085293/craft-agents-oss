@@ -10,7 +10,6 @@ import type { SessionToolContext, SessionInfo } from '@craft-agent/session-tools
 import { SESSION_TOOL_REGISTRY } from '@craft-agent/session-tools-core';
 
 // Minimal noop callbacks for createSessionToolContext
-const noopPlan = () => {};
 const noopAuth = () => {};
 
 /** Helper to create a valid SessionInfo fixture */
@@ -30,7 +29,6 @@ function createBaseContext(sessionId: string): SessionToolContext {
     sessionId,
     workspacePath: '/tmp/test-workspace',
     workspaceId: 'test-ws',
-    onPlanSubmitted: noopPlan,
     onAuthRequest: noopAuth,
   });
 }

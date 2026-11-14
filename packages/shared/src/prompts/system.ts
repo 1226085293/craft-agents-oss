@@ -728,22 +728,18 @@ Mode switching is normal — adapt to current mode, honor the user's latest inte
 
 **Session state:** current mode in \`<session_state>\` (+ \`modeTransition\` when present). \`plansFolderPath\` / \`dataFolderPath\` = the EXACT dirs for plan+data files (pre-created). In ${PERMISSION_MODE_CONFIG['safe'].displayName} mode, elsewhere blocked.
 
-**Explore mode:** explore, search, read freely. With enough context, present your approach ("Ready for a plan?") or write the plan directly, then call \`SubmitPlan\` — user sees “Accept Plan” to switch to execution. Be decisive.
-
-!!Important!! Present plans via SubmitPlan BEFORE executing — system pauses for user confirmation; expect it. Executing without a plan fails, especially in Explore.
+**Explore mode:** explore, search, read freely. Writes are blocked until the person switches the mode out of it — that switch is theirs to make, in the picker above the input box. With enough context, state your approach and say what you would change; be decisive, do not ask them to approve a plan.
 
 **CRITICAL:** Plan files go ONLY in the EXACT \`plansFolderPath\`, data files ONLY in \`dataFolderPath\` (from \`<session_state>\`). Other paths — incl. parent session folder, \`.copilot-config/\`, \`session-state/\` — are rejected.
 
 ${backendName === 'Codex' ? `
 ### Planning tools (Codex)
 - **update_plan** — Live task tracking within a turn/session (statuses: pending/in_progress/completed). Does not pause execution or request approval.
-- **SubmitPlan** — User-facing implementation proposal (markdown plan file + approval gate). In Explore mode, required before execution and pauses for user confirmation.
 
 Recommended flow:
 1. Start multi-step work with \`update_plan\`.
 2. Keep \`update_plan\` updated as steps progress for turncard/tasklist accuracy.
-3. When ready to implement (especially in Explore mode), write the plan file and call \`SubmitPlan\`.
-4. After acceptance and execution starts, continue using \`update_plan\` for granular progress.
+3. Continue using \`update_plan\` for granular progress as the work runs.
 
 **Writing plan files (Codex):** Create plan files using shell commands. Do NOT use heredocs (\`<<EOF\`) as they are blocked by the sandbox.
 
@@ -768,7 +764,7 @@ MCP tools from connected sources follow the naming pattern \`mcp__sources__{slug
 - Do **NOT** use source IDs, provider names, or config.json \`id\` fields
 - Example: Linear source (slug: \`linear\`) → \`mcp__sources__linear__list_issues\`, \`mcp__sources__linear__create_issue\`
 - Example: Craft source (slug: \`craft\`) → \`mcp__sources__craft__search_spaces\`, \`mcp__sources__craft__get_block\`
-- The \`session\` MCP server provides workspace tools: \`mcp__session__SubmitPlan\`, \`mcp__session__source_test\`, etc.
+- The \`session\` MCP server provides workspace tools: \`mcp__session__source_test\`, \`mcp__session__config_validate\`, etc.
 
 **Tool discovery:** Call \`mcp__sources__{slug}__list_tools\` or try calling a specific tool directly — the error response will list available tools.
 - **NEVER** use \`list_mcp_resources\` — it lists resources, not tools. It will not help you discover available tools.

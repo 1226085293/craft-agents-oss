@@ -72,7 +72,6 @@ export interface SessionToolContextOptions {
   sessionId: string;
   workspacePath: string;
   workspaceId: string;
-  onPlanSubmitted: (planPath: string) => void;
   onAuthRequest: (request: unknown) => void;
 }
 
@@ -87,7 +86,7 @@ export interface SessionToolContextOptions {
  * - Icon management
  */
 export function createSessionToolContext(options: SessionToolContextOptions): SessionToolContext {
-  const { sessionId, workspacePath, workspaceId, onPlanSubmitted, onAuthRequest } = options;
+  const { sessionId, workspacePath, workspaceId, onAuthRequest } = options;
 
   // File system implementation
   const fs: FileSystemInterface = {
@@ -108,7 +107,6 @@ export function createSessionToolContext(options: SessionToolContextOptions): Se
 
   // Callbacks implementation
   const callbacks: SessionToolCallbacks = {
-    onPlanSubmitted,
     onAuthRequest: (request) => onAuthRequest(request),
   };
 

@@ -55,7 +55,6 @@ afterAll(() => {
       skillsPath: join(rootDir, 'skills'),
       plansFolderPath: join(sessionDir, 'plans'),
       callbacks: {
-        onPlanSubmitted: () => {},
         onAuthRequest: () => {},
       },
       fs: {

@@ -260,7 +260,6 @@ export abstract class BaseAgent implements AgentBackend {
   // Callbacks (public for facade wiring)
   // ============================================================
   onPermissionRequest: PermissionCallback | null = null;
-  onPlanSubmitted: PlanCallback | null = null;
   onAuthRequest: AuthCallback | null = null;
 
   /**
@@ -609,11 +608,11 @@ export abstract class BaseAgent implements AgentBackend {
   // ============================================================
 
   /**
-   * Handle successful completion of a session MCP tool (SubmitPlan, auth tools).
+   * Handle successful completion of a session MCP tool (auth tools).
    *
    * WHY THIS IS ON BaseAgent:
    * -------------------------
-   * Session-scoped tools (SubmitPlan, source_oauth_trigger, etc.) run in an
+   * Session-scoped tools (source_oauth_trigger, etc.) run in an
    * EXTERNAL MCP server subprocess (packages/session-mcp-server). That subprocess
    * has its own process memory, so when it calls getSessionScopedToolCallbacks(),
    * the callback registry is empty — it was populated in THIS process, not the subprocess.
@@ -625,8 +624,6 @@ export abstract class BaseAgent implements AgentBackend {
    * via the Pi agent, so the callback registry works directly.
    *
    * CALLBACKS FIRED:
-   * - SubmitPlan → this.onPlanSubmitted(planPath)
-   *   → Electron reads plan file, shows plan card, calls interruptForHandoff(PlanSubmitted)
    * - Auth tools → this.onAuthRequest(authRequest)
    *   → Electron shows auth dialog, calls interruptForHandoff(AuthRequest)
    */
@@ -634,18 +631,6 @@ export abstract class BaseAgent implements AgentBackend {
     toolName: string,
     args: Record<string, unknown>
   ): void {
-    // SubmitPlan — trigger plan view in the UI.
-    // The Electron SessionManager's onPlanSubmitted callback will:
-    //   1. Read the plan file content
-    //   2. Create a plan message (role: 'plan')
-    //   3. Send plan_submitted event to renderer
-    //   4. Call interruptForHandoff(AbortReason.PlanSubmitted) → turn terminates
-    if (toolName === 'SubmitPlan' && args.planPath) {
-      this.debug(`SubmitPlan completed: ${args.planPath}`);
-      this.onPlanSubmitted?.(args.planPath as string);
-      return;
-    }
-
     // Auth tools — trigger auth request in the UI.
     // Maps MCP tool names to auth request types.
     const authToolTypes: Record<string, string> = {

@@ -44,13 +44,6 @@ export interface LoadedSource {
  */
 export interface SessionToolCallbacks {
   /**
-   * Called when a plan is submitted.
-   * Claude: calls onPlanSubmitted callback
-   * Codex: sends __CALLBACK__ message to stderr
-   */
-  onPlanSubmitted(planPath: string): void;
-
-  /**
    * Called when authentication is requested.
    * Claude: calls onAuthRequest callback + forceAbort
    * Codex: sends __CALLBACK__ message to stderr

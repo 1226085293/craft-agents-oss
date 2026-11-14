@@ -71,14 +71,13 @@ import type { ProjectPromptContext } from '../projects/types.ts';
 // Credential manager for token storage
 import { getCredentialManager } from '../credentials/manager.ts';
 
-// Session-scoped tool callbacks (for SubmitPlan, source auth, etc.)
+// Session-scoped tool callbacks (for source auth, etc.)
 import {
   registerSessionScopedToolCallbacks,
   mergeSessionScopedToolCallbacks,
   unregisterSessionScopedToolCallbacks,
   getSessionScopedToolCallbacks,
 } from './session-scoped-tool-callback-registry.ts';
-import { setLastPlanFilePath } from './session-plan-state.ts';
 import { attachSessionSelfManagementBindings } from './session-self-management-bindings.ts';
 
 // Session tool proxy definitions (for registering with subprocess)
@@ -1463,7 +1462,7 @@ export class PiAgent extends BaseAgent {
     }
 
     // Register session-scoped tools as proxy tools in the subprocess.
-    // These tools (SubmitPlan, config_validate, source auth, call_llm, etc.)
+    // These tools (config_validate, source auth, call_llm, etc.)
     // are executed in the main process when the LLM calls them.
     this.assertBackendSessionToolParity();
     let sessionToolDefs = getSessionToolProxyDefs(
@@ -1480,18 +1479,6 @@ export class PiAgent extends BaseAgent {
     // tool, so the advertised tool set matches the configured capability.
     if (!getBrowserToolEnabled()) {
       sessionToolDefs = sessionToolDefs.filter(d => d.name !== 'mcp__session__browser_tool');
-    }
-
-    // A session that is executing a task does not ask the user to approve a plan.
-    //
-    // `SubmitPlan` is the human-in-the-loop primitive for an ordinary conversation:
-    // it stops and waits for someone to accept. A worker already has an owner — the
-    // supervisor — and its plan is `task_plan`, which lives on the task, is visible
-    // on the board and needs no approval click. Leaving `SubmitPlan` in place put two
-    // approval chains behind one piece of work, and the one the worker could reach
-    // was the one that stalls it while the supervisor waits for a hand-off.
-    if (this.config.session?.taskId) {
-      sessionToolDefs = sessionToolDefs.filter(d => d.name !== 'mcp__session__SubmitPlan');
     }
 
     // Patch call_llm description with provider-specific model hint
@@ -1867,7 +1854,7 @@ export class PiAgent extends BaseAgent {
         break;
 
       case 'session_tool_completed':
-        // Session MCP tool completed -- fire callbacks (SubmitPlan, auth, etc.)
+        // Session MCP tool completed -- fire callbacks (auth, etc.)
         this.handleSessionToolCompleted(msg);
         break;
 
@@ -2948,7 +2935,7 @@ export class PiAgent extends BaseAgent {
   /**
    * Route a proxy tool call to the appropriate handler based on tool name.
    *
-   * - Session tools (SubmitPlan, config_validate, etc.) -> session-tools-core handlers
+   * - Session tools (config_validate, etc.) -> session-tools-core handlers
    * - call_llm -> preExecuteCallLlm (BaseAgent)
    * - mcp__* tools -> MCP server proxy (TODO)
    * - api_* tools -> API source proxy (TODO)
@@ -3007,7 +2994,7 @@ export class PiAgent extends BaseAgent {
     }
 
     // Session-scoped tools — strip mcp__session__ prefix added by the Pi SDK
-    // registration (tools are registered as mcp__session__SubmitPlan, etc.)
+    // registration (tools are registered as mcp__session__source_test, etc.)
     const strippedName = toolName.startsWith('mcp__session__')
       ? toolName.slice('mcp__session__'.length)
       : toolName;
@@ -3175,10 +3162,6 @@ export class PiAgent extends BaseAgent {
       sessionId,
       workspacePath,
       workspaceId,
-      onPlanSubmitted: (planPath: string) => {
-        setLastPlanFilePath(sessionId, planPath);
-        this.onPlanSubmitted?.(planPath);
-      },
       onAuthRequest: (request: unknown) => {
         this.onAuthRequest?.(request as any);
       },
@@ -3343,7 +3326,7 @@ export class PiAgent extends BaseAgent {
   /**
    * Handle session_tool_completed from subprocess.
    *
-   * NOTE: For proxy-executed session tools, callbacks (onPlanSubmitted, etc.)
+   * NOTE: For proxy-executed session tools, callbacks (onAuthRequest, etc.)
    * are already fired by executeSessionTool() via the SessionToolContext.
    * The subprocess sends this event because handleSessionEvent() detects the
    * mcp__session__ prefix, but we intentionally skip handleSessionMcpToolCompletion()
@@ -3880,13 +3863,12 @@ export class PiAgent extends BaseAgent {
     this.adapter.startTurn();
 
     // Fire UserPromptSubmit hook event (fire-and-forget)
-    // Refresh session-scoped tool callbacks (for SubmitPlan, source auth, etc.)
+    // Refresh session-scoped tool callbacks (for source auth, etc.)
     // IMPORTANT: merge (don't replace) so SessionManager-provided browserPaneFns
     // survives across turns.
     const sessionId = this.config.session?.id;
     if (sessionId) {
       mergeSessionScopedToolCallbacks(sessionId, {
-        onPlanSubmitted: (planPath) => this.onPlanSubmitted?.(planPath),
         onAuthRequest: (request) => this.onAuthRequest?.(request),
         queryFn: (request) => this.queryLlm(request),
       });
@@ -4159,9 +4141,6 @@ ${agentSnapshot.persona.trim()}
       yield* this.eventQueue.drain();
     } catch (error) {
       if (error instanceof Error && error.message.includes('abort')) {
-        if (this.abortReason === AbortReason.PlanSubmitted) {
-          return;
-        }
         if (this.abortReason === AbortReason.AuthRequest) {
           return;
         }
@@ -4513,7 +4492,7 @@ n   * connection can be adopted mid-session.
     // Clear bridge cache for aborted turn.
     this.preToolMetadataByCallId.clear();
 
-    // For PlanSubmitted and AuthRequest, just interrupt the turn — do NOT
+    // For AuthRequest, just interrupt the turn — do NOT
     // close the event queue. The subprocess keeps running (no abort sent to
     // it) and will emit a final agent_end that the adapter's
     // shouldCompleteQueue() puts through the normal lifecycle. If we
@@ -4521,7 +4500,7 @@ n   * connection can be adopted mid-session.
     // or the tool_execute_response for the handoff tool itself) arrive after
     // the queue is closed and are silently dropped. See the 2026-08-24
     // auth-handoff incident.
-    if (reason === AbortReason.PlanSubmitted || reason === AbortReason.AuthRequest) {
+    if (reason === AbortReason.AuthRequest) {
       return;
     }
 

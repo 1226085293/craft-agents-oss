@@ -93,7 +93,6 @@ export function normalizeSpec(raw: unknown): TaskSpec | undefined {
     ...(acceptance.length ? { acceptance } : {}),
     ...(permissions && Object.keys(permissions).length ? { permissions } : {}),
     ...(plan ? { plan } : {}),
-    ...(v.planAgreed === true ? { planAgreed: true } : {}),
     ...(v.directive && typeof v.directive === 'object' && asString((v.directive as { text?: unknown }).text)
       ? {
           directive: {

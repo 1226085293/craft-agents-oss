@@ -206,7 +206,6 @@ export const SUPERVISOR_PROMPT_TOOLS = [
   'get_event', 'list_events', 'list_event_subscriptions',
   'list_subscriptions', 'subscribe_session', 'unsubscribe_session',
   'list_plugin_actions', 'plugin_call',
-  'SubmitPlan',
 ] as const
 
 /** Tools the user-facing lane has: the same list, minus everything that routes or plans work. */

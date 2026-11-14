@@ -7,7 +7,7 @@
  * feature parity with Claude's session-scoped tools.
  *
  * Callback Communication:
- * Tools that need to communicate with the main Electron process (e.g., SubmitPlan
+ * Tools that need to communicate with the main Electron process (e.g., source auth
  * triggering a plan display, OAuth triggers pausing execution) send structured
  * JSON messages to stderr with a "__CALLBACK__" prefix. The main process monitors
  * stderr and handles these callbacks.
@@ -172,13 +172,6 @@ function createCodexContext(config: SessionConfig): SessionToolContext {
 
   // Callback implementation using stderr
   const callbacks = {
-    onPlanSubmitted: (planPath: string) => {
-      sendCallback({
-        __callback__: 'plan_submitted',
-        sessionId,
-        planPath,
-      });
-    },
     onAuthRequest: (request: AuthRequest) => {
       sendCallback({
         __callback__: 'auth_request',

@@ -98,40 +98,6 @@ export function isOutlineStep(id: string): boolean {
 }
 
 /**
- * May this new outline be added to a plan the user agreed to?
- *
- * Returns an error message when it may not, undefined when it may. The plan contract
- * has always allowed steps to be discovered while the work happens — "forcing an
- * accurate plan up front only produces a fake plan" — so appending is fine. What must
- * not happen is the agreement being rewritten: a plan the user stated has an order they
- * will read, and inserting into it renumbers their plan behind their back.
- *
- * A plan the worker shaped itself is not marked `planAgreed` and never reaches here.
- */
-export function checkAgreedPlanAppend(
-  plan: PlanStep[] | undefined,
-  newId: string,
-  agreed: boolean | undefined,
-): string | undefined {
-  if (!agreed) return undefined;
-  if (!isOutlineStep(newId)) return undefined;
-  const steps = plan ?? [];
-  if (steps.some((step) => step.id === newId)) return undefined;
-  const ids = steps
-    .filter((step) => isOutlineStep(step.id))
-    .map((step) => Number(step.id))
-    .filter((n) => Number.isFinite(n));
-  const highest = ids.length ? Math.max(...ids) : 0;
-  const wanted = Number(newId);
-  if (Number.isFinite(wanted) && wanted > highest) return undefined;
-  const listed = steps
-    .filter((step) => isOutlineStep(step.id))
-    .map((step) => `${step.id} ${step.title}`)
-    .join('；');
-  return `用户约定的大纲：${listed}。新步骤可以追加（如 ${highest + 1}），但不能插到它们前面或中间 —— 那会改掉用户已经认可的顺序。`;
-}
-
-/**
  * What an outline item's status actually is, given its sub-steps.
  *
  * The stored status is only what somebody last wrote; a section's real state is

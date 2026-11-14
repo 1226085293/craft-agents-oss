@@ -283,7 +283,6 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
         ...formatPlan(spec.plan),
         '',
         'These are all the steps there are. Compare against them before starting: one thing, one id — an existing action (done, open, or skipped) **keeps its id and its status is advanced**, never reopened under a new name.',
-        ...(spec.planAgreed ? ["The outline's titles and order were agreed with the person: do not change them or insert in between; append at the end if needed."] : []),
       ].join('\n'),
     );
   } else {

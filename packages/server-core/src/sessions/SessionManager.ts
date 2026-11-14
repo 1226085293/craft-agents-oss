@@ -9105,9 +9105,18 @@ ${request.prompt}`;
             spawnDepth: params.spawnDepth,
             // Same reason: a worker that cannot write cannot do the work.
             permissionMode: 'allow-all',
-            // A rule may pin the worker to a directory; without it the worker would
-            // inherit whatever directory the supervisor happens to sit in.
-            ...(params.cwd ? { workingDirectory: params.cwd } : {}),
+            /**
+             * A worker's filesystem is the workspace, never the supervisor's turn directory.
+             *
+             * Left unset, the worker inherited whatever directory its parent happened to sit in, and
+             * live that was the *session* directory: 「write docs/hello-1.md」 landed in
+             * `sessions/<worker>/docs/` while the task's acceptance looked in the workspace root and
+             * reported `missing artifact`. The worker was telling the truth; it was standing
+             * somewhere else.
+             *
+             * A rule may still pin a narrower directory; absent one, it is the workspace root.
+             */
+            workingDirectory: params.cwd ?? getWorkspaceByNameOrId(workspaceId)?.rootPath,
           })
           if (params.taskId) {
             // Bind the pending placeholder to the real session. The lock is already ours, so

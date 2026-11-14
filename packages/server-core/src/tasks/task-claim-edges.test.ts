@@ -364,3 +364,37 @@ describe('run counting survives the lock being released mid-round', () => {
     expect(svc.get(task.id)!.stats?.runs).toBe(2)
   })
 })
+
+describe('a repeating task plans one round', () => {
+  /**
+   * Live, one per-minute task wrote outline `1`, then `1`+`2`, then `3`+`4`, then `1`+`2`+`3` —
+   * numbering rounds instead of describing one — and each round ran more steps than the last while
+   * writing the same single file. The prompt says the rule in one sentence; this is the wall behind
+   * the sentence.
+   */
+  it('refuses a second outline', () => {
+    const svc = service();
+    const task = recurring(svc);
+    // Build the real shape first: the fixture's plan has only `1.1`, so add the outline it hangs
+    // under — otherwise 「one outline」 is trivially true and the test proves nothing.
+    expect(svc.updatePlan(task.id, { id: '1', title: '第一轮' }).ok).toBe(true)
+    const second = svc.updatePlan(task.id, { id: '2', title: '第二轮' })
+    expect(second.ok).toBe(false)
+    expect(second.error).toContain('只能有一个大纲')
+    // And nothing was written.
+    expect((svc.get(task.id)!.spec?.plan ?? []).every((s) => !s.id.startsWith('2'))).toBe(true)
+  })
+
+  it('leaves a one-off task alone, because its plan is the whole job', () => {
+    const svc = service();
+    const task = svc.create({
+      name: '一次性',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_off',
+      spec: { plan: [{ id: '1.1', title: 'w', status: 'todo', agent: 'builtin-default' }] },
+    })
+    expect(svc.updatePlan(task.id, { id: '2', title: '收尾' }).ok).toBe(true)
+    expect(svc.updatePlan(task.id, { id: '2.1', title: 'w', agent: 'builtin-default' }).ok).toBe(true)
+  })
+})

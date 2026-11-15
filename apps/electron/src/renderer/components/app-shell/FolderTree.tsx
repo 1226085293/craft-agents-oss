@@ -22,7 +22,7 @@ import { Separator } from '@/components/ui/separator'
 import { ChevronRight, Folder as FolderIcon, FolderOpen, Pin } from 'lucide-react'
 import type { FolderConfig } from '@craft-agent/shared/sessions/folders'
 import type { FolderTreeNode } from '@craft-agent/shared/sessions/folder-tree'
-import { beginFolderDrag, dragState, endDrag } from './dragState'
+import { beginFolderDrag, dragState, endDrag, DRAG_ENABLED } from './dragState'
 import { sortFolderNodes } from './folder-sort'
 
 const INDENT_PX = 14
@@ -311,8 +311,14 @@ function FolderNode({
         aria-expanded={isExpanded}
         aria-selected={isSelected}
         tabIndex={0}
-        draggable
+        // Off while DRAG_ENABLED is false (dragState.ts): a task's sessions are filed automatically,
+        // and a hand-moved conversation loses the group that says which task it belonged to.
+        draggable={DRAG_ENABLED}
         onDragStart={(event) => {
+          if (!DRAG_ENABLED) {
+            event.preventDefault()
+            return
+          }
           event.dataTransfer.setData('application/x-craft-folder', folder.id)
           event.dataTransfer.effectAllowed = 'move'
           beginFolderDrag(folder.id, folderScopeProjectId)

@@ -23,7 +23,26 @@ export interface DragState {
 
 export const dragState: DragState = { folderId: null, sessionId: null, sessionFolderId: null, projectId: null }
 
+/**
+ * Drag-and-drop is off.
+ *
+ * A task's sessions are filed automatically now: the folder is created from the task id and every
+ * session it opens lands in it, so nobody is re-filing conversations by hand. What drag-and-drop
+ * still offers in that arrangement is the ability to move a row out of the group that explains it —
+ * a worker conversation dragged out of 「T-1」 reads as an unrelated session, and the next reader
+ * has no way to know which task it belonged to.
+ *
+ * Turned off at the one place a drag starts rather than at each source and target: `beginFolderDrag`
+ * and `beginSessionDrag` are the only two ways `dragState` ever becomes non-null, and every drop
+ * handler already reads it to decide whether the gesture is valid. With the state never set, every
+ * target refuses without needing to know this flag exists.
+ *
+ * Re-enabling is a one-line change here; the drag sources and targets are untouched.
+ */
+export const DRAG_ENABLED = false
+
 export function beginFolderDrag(folderId: string, projectId: string | null): void {
+  if (!DRAG_ENABLED) return
   dragState.folderId = folderId
   dragState.sessionId = null
   dragState.sessionFolderId = null
@@ -31,6 +50,7 @@ export function beginFolderDrag(folderId: string, projectId: string | null): voi
 }
 
 export function beginSessionDrag(sessionId: string, folderId: string | null, projectId: string | null): void {
+  if (!DRAG_ENABLED) return
   dragState.sessionId = sessionId
   dragState.folderId = null
   dragState.sessionFolderId = folderId

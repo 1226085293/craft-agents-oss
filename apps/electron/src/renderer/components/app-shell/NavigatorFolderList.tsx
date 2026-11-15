@@ -20,7 +20,7 @@ import { ChevronRight, Folder as FolderIcon, Pin } from 'lucide-react'
 import type { FolderConfig } from '@craft-agent/shared/sessions/folders'
 import { getUniqueFolderName } from '@craft-agent/shared/sessions/folder-tree'
 import type { UseFoldersResult } from '../../hooks/useFolders'
-import { beginFolderDrag, dragState, endDrag } from './dragState'
+import { beginFolderDrag, dragState, endDrag, DRAG_ENABLED } from './dragState'
 import { compareFolders } from './folder-sort'
 import { filterFolderSearchResults } from './folder-search'
 import { rankFolderSearchResults } from './search-ranking'
@@ -266,9 +266,13 @@ export const NavigatorFolderList = React.forwardRef<NavigatorFolderListHandle, N
                 // sidebar tree re-parents it. The tree owns drop validation
                 // (parent→child and self are rejected), so this only publishes
                 // the dragged id for it to read during dragover.
-                draggable={!isRenaming}
+                //
+                // Off while DRAG_ENABLED is false (dragState.ts): a task's sessions are filed
+                // automatically, and re-filing them by hand moves a conversation out of the group
+                // that explains it.
+                draggable={DRAG_ENABLED && !isRenaming}
                 onDragStart={(event) => {
-                  if (isRenaming) {
+                  if (!DRAG_ENABLED || isRenaming) {
                     event.preventDefault()
                     return
                   }
@@ -370,9 +374,14 @@ export const NavigatorFolderList = React.forwardRef<NavigatorFolderListHandle, N
           style={{ left: menu.x, top: menu.y }}
           onClick={(event) => event.stopPropagation()}
         >
-          <MenuItem onClick={() => { setRenaming({ folderId: menu.folder.id, value: menu.folder.name }); setMenu(null) }}>
-            {t('folders.rename')}
-          </MenuItem>
+          {/*
+            * No rename.
+            *
+            * Folder names are the task id and nothing else — the folder is found by that name, so a
+            * rename would either orphan the task's conversations or need a separate identity kept
+            * in sync. The board already shows the title next to the id, so nothing a person was
+            * looking for is lost by not offering this.
+            */}
           <MenuItem onClick={() => { void run(async () => { await foldersApi.pinFolder(menu.folder.id, !menu.folder.pinnedAt) }); setMenu(null) }}>
             {menu.folder.pinnedAt ? t('folders.unpin') : t('folders.pin')}
           </MenuItem>

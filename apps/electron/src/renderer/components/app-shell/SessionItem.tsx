@@ -17,7 +17,7 @@ import { getSessionTitle, getSessionPreviewText, highlightMatch, hasUnreadMeta, 
 import { useSessionListContext } from "@/context/SessionListContext"
 import { useAppShellContext } from "@/context/AppShellContext"
 import { navigate, routes } from "@/lib/navigate"
-import { beginSessionDrag, endDrag } from './dragState'
+import { beginSessionDrag, endDrag, DRAG_ENABLED } from './dragState'
 import type { SessionMeta } from "@/atoms/sessions"
 import { messagingBindingsBySessionAtom } from "@/atoms/messaging"
 import { useAtomValue } from "jotai"
@@ -127,7 +127,10 @@ export function SessionItem({
       buttonProps={{
         ...itemProps,
         // D31: session rows are the drag source; dropping is handled by FolderTree / the list.
-        draggable: true,
+        // Off while DRAG_ENABLED is false — see dragState.ts: a task's sessions are filed
+        // automatically and dragging one out of its task's folder loses the only thing tying it
+        // to the work it belongs to.
+        draggable: DRAG_ENABLED,
         onDragStart: (e: React.DragEvent) => {
           e.dataTransfer.setData('application/x-craft-session', item.id)
           e.dataTransfer.effectAllowed = 'move'

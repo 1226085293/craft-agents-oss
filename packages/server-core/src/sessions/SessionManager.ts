@@ -100,8 +100,22 @@ export interface TaskUpdatePatch {
  *
  * Pure and exported so the rule is testable without a session.
  */
-export function isOwnReply(message: { role?: string; isIntermediate?: boolean; isRelayed?: boolean }): boolean {
-  return message.role === 'assistant' && !message.isIntermediate && !message.isRelayed;
+/**
+ * Whether a folder name is a task's conversation folder.
+ *
+ * The name is the task id, and only the id: a title is decoration that goes stale on rename, and the
+ * folder is found by this comparison — matching on a label would stop finding it the moment the task
+ * was renamed, leaving the archive step with nothing to archive and the next session creating a
+ * second folder for the same task.
+ *
+ * `taskId` alone was the whole name, so this is equality. Kept as a named predicate so the two call
+ * sites that need 「is this a folder for that task」 cannot drift apart.
+ */
+function isTaskFolderName(folderName: string, taskId: string): boolean {
+  return folderName === taskId
+}
+
+export function isOwnReply(message: { role?: string; isIntermediate?: boolean; isRelayed?: boolean }): boolean {  return message.role === 'assistant' && !message.isIntermediate && !message.isRelayed;
 }
 
 function generateShortId(): string {
@@ -8066,7 +8080,7 @@ ${request.prompt}`;
        */
       onTaskDeleted: (taskId) => {
         const folder = loadFolderConfig(workspace.rootPath, { projectId: null }).folders.find(
-          (candidate) => candidate.name === taskId && !candidate.parentId && !candidate.archivedAt,
+          (candidate) => !candidate.parentId && !candidate.archivedAt && isTaskFolderName(candidate.name, taskId),
         )
         if (!folder) return
         void this.archiveFolder(workspace.id, { projectId: null }, folder.id).catch((error) => {
@@ -9853,10 +9867,14 @@ ${request.prompt}`;
    *
    * Every session a task opens — the workers it dispatches, the acceptance session that judges them
    * — belongs to one task, and the session list is otherwise a flat stream of unrelated
-   * conversations. Filing them under the task id is what turns 「T-1」 into something a person can
-   * open: eight worker conversations and the one that graded them, together.
+   * conversations. Filing them under the task turns 「T-1」 into something a person can open: eight
+   * worker conversations and the one that graded them, together.
    *
-   * Name is the task id, because that is what the board calls it and what a person searches for.
+   * The name is the task id and nothing else. A title would read better in a list, but it is also
+   * what the folder is found by, and a rename would then either orphan the conversations in a
+   * folder under the old title or need a rename path here — neither of which buys anything a person
+   * was missing. The board already shows the title next to the id.
+   *
    * Scoped to the workspace root (`projectId: null`): a task is not owned by a project, and its
    * sessions must not disappear from the list when a project is collapsed.
    *
@@ -9866,9 +9884,8 @@ ${request.prompt}`;
   private ensureTaskFolder(workspaceRootPath: string, taskId: string): string | null {
     try {
       const scope: FolderScope = { projectId: null }
-      const existing = loadFolderConfig(workspaceRootPath, scope).folders.find(
-        (folder) => folder.name === taskId && !folder.parentId && !folder.archivedAt,
-      )
+      const folders = loadFolderConfig(workspaceRootPath, scope).folders
+      const existing = folders.find((folder) => !folder.parentId && !folder.archivedAt && isTaskFolderName(folder.name, taskId))
       if (existing) return existing.id
       return createFolder(workspaceRootPath, scope, { name: taskId }).id
     } catch (error) {

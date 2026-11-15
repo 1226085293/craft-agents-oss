@@ -103,6 +103,14 @@ export interface TaskServiceDeps {
    * Asked rather than stored so a system-created judge never consumes the dispatch budget.
    */
   sessionsOfTask?: (taskId: string) => string[];
+  /**
+   * The task's acceptance session.
+   *
+   * Its own callback rather than a filter over `sessionsOfTask`, because the answer is a fact about
+   * the task (`taskPurpose === 'verify'`), not about which sessions happen to be around — picking
+   * 「the other one」 from that list would mistake a second worker for the judge.
+   */
+  verifierSessionOf?: (taskId: string) => string | undefined;
   /** Run one acceptance command; resolves to exit code + output tail. */
   runAcceptanceCommand?: (command: string, cwd?: string) => Promise<{ exitCode: number | null; output?: string }>;
   /**
@@ -2504,7 +2512,7 @@ export class TaskService {
            * group rather than the worker's — the worker has already finished and its provider being
            * reachable says nothing about whether the verdict can be delivered.
            */
-          this.markStageSession(id, this.deps.sessionsOfTask?.(id)?.find((sessionId) => sessionId !== handoff.fromSessionId));
+          this.markStageSession(id, this.deps.verifierSessionOf?.(id));
           const judged = await this.deps.judgeHandoff(task, handoff);
           if (!judged.pass) {
             accepted = false;

@@ -987,3 +987,54 @@ describe('which session the outage probe asks about', () => {
     expect(probe.asked[0]).toEqual(['old-style-worker', 'sup'])
   })
 })
+
+describe('the stage session tracks the baton', () => {
+  /**
+   * Four moments, and the recorded holder has to match the real one at each: created (the
+   * supervisor is deciding), dispatched (a worker is working), handed back (the supervisor decides
+   * again), acceptance (the judge is judging). The probe reads this field, so a stale value asks
+   * about a provider that has nothing to do with why the task cannot move.
+   */
+  const parked3 = (overrides: Partial<Task> = {}) =>
+    task({ status: 'paused', pauseReason: 'upstream' as never, updatedAt: NOW - 5 * 60_000, ...overrides })
+
+  const askedFor = (t: Task): string[] => {
+    let asked: string[] = []
+    inspectTasks(deps([t], {
+      sessionWorking: () => false,
+      strategiesOf: (_task, sessionIds) => {
+        asked = sessionIds
+        return ['commandcode']
+      },
+    }))
+    return asked
+  }
+
+  it('asks the supervisor on a task that has not dispatched yet', () => {
+    expect(askedFor(parked3({
+      currentStageSessionId: 'sup',
+      currentWorkerSessionId: undefined,
+    } as never))).toEqual(['sup'])
+  })
+
+  it('asks the worker while it works', () => {
+    expect(askedFor(parked3({
+      currentStageSessionId: 'sess-1',
+      currentWorkerSessionId: 'sess-1',
+    } as never))).toEqual(['sess-1', 'sup'])
+  })
+
+  it('asks the supervisor again once the report came back', () => {
+    expect(askedFor(parked3({
+      currentStageSessionId: 'sup',
+      currentWorkerSessionId: 'sess-1',
+    } as never))).toEqual(['sup'])
+  })
+
+  it('asks the judge while it judges', () => {
+    expect(askedFor(parked3({
+      currentStageSessionId: 'the-judge',
+      currentWorkerSessionId: 'sess-1',
+    } as never))).toEqual(['the-judge', 'sup'])
+  })
+})

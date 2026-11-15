@@ -8245,6 +8245,19 @@ ${request.prompt}`;
        * The judge is created outside `startRun`, so the record has no field for it; this is the
        * only place that can answer.
        */
+      /**
+       * The task's one acceptance session — a fact about the task, not a guess about the list.
+       */
+      verifierSessionOf: (taskId) => {
+        for (const candidate of this.sessions.values()) {
+          if (candidate.workspace.id !== workspace.id) continue
+          if (candidate.taskId !== taskId) continue
+          if (candidate.taskPurpose !== 'verify') continue
+          if (candidate.isArchived) continue
+          return candidate.id
+        }
+        return undefined
+      },
       sessionsOfTask: (taskId) => {
         const ids: string[] = []
         for (const candidate of this.sessions.values()) {

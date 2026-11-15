@@ -317,6 +317,14 @@ export function createTask(input: CreateTaskInput): Task {
     supervisorSessionId: input.supervisorSessionId,
     sessionIds: [],
     currentWorkerSessionId: undefined,
+    /**
+     * A new task is held by its supervisor.
+     *
+     * Everything before the first dispatch — drawing the plan, choosing who does what — is the
+     * supervisor's work, so it is the session whose provider must be reachable for the task to
+     * start. Written rather than derived so the record says what is true the moment it is created.
+     */
+    currentStageSessionId: input.supervisorSessionId,
     assigneeAgentId: input.assigneeAgentId,
     parentTaskId: input.parentTaskId,
     dependsOn: input.dependsOn ?? [],
@@ -345,14 +353,20 @@ export function createTask(input: CreateTaskInput): Task {
 
 /** Attach a session to a task (idempotent; keeps ordering stable). */
 export function attachSession(task: Task, sessionId: string, now: number): Task {
+  /**
+   * Attaching a session is handing the task to it.
+   *
+   * This is the path a dispatch takes when the session already exists, so both fields move: the
+   * worker is what the run started, and it is also who holds the task from this moment.
+   */
+  const attached = { currentWorkerSessionId: sessionId, currentStageSessionId: sessionId, updatedAt: now };
   if (task.sessionIds.includes(sessionId)) {
-    return { ...task, currentWorkerSessionId: sessionId, updatedAt: now };
+    return { ...task, ...attached };
   }
   return {
     ...task,
     sessionIds: [...task.sessionIds, sessionId],
-    currentWorkerSessionId: sessionId,
-    updatedAt: now,
+    ...attached,
   };
 }
 

@@ -457,24 +457,22 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
      */
     if (task.status === 'paused' && task.pauseReason === 'upstream') {
       /**
-       * One session: whoever is holding the task right now.
+       * The holder and the supervisor — nothing else.
        *
-       * `currentStageSessionId` is the field that means that — the supervisor while it decides, a
-       * worker while it works, the acceptance session while it judges. The flow is serial, so the
-       * question 「is the provider back」 has one answer per task and nothing to reconcile.
+       * `currentStageSessionId` is whoever is holding the task: the supervisor while it decides, a
+       * worker while it works, the acceptance session while it judges. The flow is serial, so
+       * 「is the provider back」 has one answer per task and nothing to reconcile. The supervisor is
+       * added separately because it is what resumes the task afterwards, so its group must be
+       * reachable too.
        *
-       * `currentWorkerSessionId` is the fallback for a record written before the split: it names
-       * the session the run started, which during acceptance is stale but is still a better answer
-       * than the supervisor's group alone.
+       * No fallback to `currentWorkerSessionId`: `normalizeTask` already fills this field on read
+       * for records written before the split, so a missing value here means a task that genuinely
+       * has no holder — not a record that needs translating.
+       *
+       * Deduplicated because the supervisor is often the holder: once the baton goes back after a
+       * hand-off they are the same session, and probing one group twice buys nothing.
        */
-      const holder = task.currentStageSessionId ?? task.currentWorkerSessionId
-      /**
-       * Deduplicated because the supervisor is often the holder.
-       *
-       * Once the baton goes back after a hand-off, `currentStageSessionId` *is* the supervisor —
-       * asking the same session twice would probe the same group twice for no information.
-       */
-      const sessionIds = [...new Set([holder, task.supervisorSessionId])].filter(
+      const sessionIds = [...new Set([task.currentStageSessionId, task.supervisorSessionId])].filter(
         (id): id is string => typeof id === 'string' && id.length > 0,
       )
       findings.push({

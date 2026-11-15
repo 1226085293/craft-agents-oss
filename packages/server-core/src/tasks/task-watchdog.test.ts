@@ -824,7 +824,7 @@ describe('a task parked on an unreachable provider', () => {
   })
 
   it('names the strategy groups its own sessions use, deduplicated', () => {
-    const findings = inspectTasks(deps([parked()], {
+    const findings = inspectTasks(deps([parked({ currentStageSessionId: 'sess-1' } as never)], {
       sessionWorking: () => false,
       strategiesOf: (_task, sessionIds) => {
         expect(sessionIds).toContain('sup')
@@ -850,6 +850,7 @@ describe('a task parked on an unreachable provider', () => {
         sessionIds: ['ancient-1', 'ancient-2'],
         roundSessionIds: ['worker-a', 'worker-b'],
         currentWorkerSessionId: 'worker-b',
+        currentStageSessionId: 'worker-b',
       } as never),
     ], {
       sessionWorking: () => false,
@@ -978,13 +979,22 @@ describe('which session the outage probe asks about', () => {
     expect(probe.asked[0]).toEqual(['sup'])
   })
 
-  it('falls back to the worker on a record written before the split', () => {
+  /**
+   * A record written before the split needs no fallback here.
+   *
+   * `normalizeTask` fills `currentStageSessionId` on read (from the old `currentSessionId`, then
+   * the worker, then the supervisor), and `inspectTasks` only ever sees normalized tasks. So the
+   * watchdog asks about the field and nothing else — a missing value means a task with no holder,
+   * which is a real state, not a record to translate.
+   */
+  it('asks only about the holder and the supervisor, even for an old record', () => {
     const probe = asker()
     probe.deps(parked2({
       currentWorkerSessionId: 'old-style-worker',
-      currentStageSessionId: undefined,
+      currentStageSessionId: 'normalized-holder',
     } as never))
-    expect(probe.asked[0]).toEqual(['old-style-worker', 'sup'])
+    expect(probe.asked[0]).toEqual(['normalized-holder', 'sup'])
+    expect(probe.asked[0]).not.toContain('old-style-worker')
   })
 })
 

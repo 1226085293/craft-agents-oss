@@ -263,6 +263,13 @@ export interface LlmStrategyShape {
   }
   /** Compact the session after the gateway switches its key/model. Default on. */
   compactAfterSwitch?: boolean
+  /**
+   * Compact before sending once the prompt cache has certainly expired.
+   *
+   * Requires the provider's preset to declare `promptCacheTtlSeconds`; without it the switch is
+   * inert, because 「the cache is gone」 is not knowable.
+   */
+  compactAfterCacheTtl?: boolean
   cooldown?: {
     /** Durations live on the preset; only the queue-position flag is strategy-level. */
     returnToOriginalPosition?: boolean

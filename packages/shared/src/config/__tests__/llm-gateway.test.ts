@@ -1247,3 +1247,101 @@ describe('parseRateLimitSignal', () => {
     expect(parseRateLimitSignal(new Headers(), 'slow down')).toEqual({});
   });
 });
+
+describe('the prompt cache expired without the route moving', () => {
+  /**
+   * The complement of `compactAfterSwitch`: same provider, same model, but enough time passed that
+   * the upstream has dropped the cache. The next request then re-uploads the whole context at
+   * cache-miss rates, which is the cost compacting first is meant to avoid.
+   *
+   * Three facts decide it, and each one has to hold: the route did not move, the strategy turned
+   * the rule on, and the provider declared a TTL. Any of them missing means 「not knowable」, and a
+   * guess would compact sessions whose cache was still warm.
+   */
+  /**
+   * The provider has to *name* the preset: `resolvePresetId` looks at `key.preset`, then
+   * `provider.defaultPreset`, then the built-in default — a preset keyed by provider id would sit
+   * there unread.
+   */
+  const withTtl = (ttlSeconds: number | undefined) =>
+    config({
+      presets: {
+        cacheTest: {
+          id: 'cacheTest',
+          ...(ttlSeconds === undefined ? {} : { promptCacheTtlSeconds: ttlSeconds }),
+        },
+      },
+      providers: [{ ...provider('p1'), defaultPreset: 'cacheTest' }],
+      strategies: [
+        {
+          id: 'auto',
+          type: 'round_robin',
+          members: [{ provider: 'p1' }],
+          compactAfterCacheTtl: true,
+          // Stickiness off so the same key serves both requests — a key switch would take the
+          // switch branch and this rule would never be consulted.
+          stickySession: { enabled: false, ttlSeconds: 0 },
+          retry: { maxAttempts: 1, backoffMs: 0 },
+        },
+      ],
+    });
+
+  const send = async (gw: LlmGateway) =>
+    fetch(`${gw.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': 'sk-client',
+        'x-craft-session-id': 'session-1',
+      },
+      body: JSON.stringify({ model: 'auto' }),
+    });
+
+  const collect = () => {
+    const events: Array<{ sessionId: string; reason: string }> = [];
+    return { events, onRouteChanged: (e: { sessionId: string; reason: string }) => events.push(e) };
+  };
+
+  it('reports cache_expired once the gap passes the declared TTL', async () => {
+    const seen = collect();
+    const stub = stubUpstream([{}, {}]);
+    const gw = new LlmGateway({
+      getConfig: () => withTtl(1),
+      fetchImpl: stub.impl,
+      log: () => {},
+      onRouteChanged: seen.onRouteChanged as never,
+    });
+    await gw.start();
+    try {
+      await send(gw);
+      // Real elapsed time would make this test sleep; the gateway reads `Date.now()` for both
+      // stamps, so waiting a little over a one-second TTL is the honest way to age the route.
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      await send(gw);
+      expect(seen.events.filter((e) => e.reason === 'cache_expired')).toHaveLength(1);
+    } finally {
+      await gw.stop();
+    }
+  }, 20_000);
+
+  it('stays silent when the provider declares no TTL', async () => {
+    const seen = collect();
+    const stub = stubUpstream([{}, {}]);
+    const gw = new LlmGateway({
+      getConfig: () => withTtl(undefined),
+      fetchImpl: stub.impl,
+      log: () => {},
+      onRouteChanged: seen.onRouteChanged as never,
+    });
+    await gw.start();
+    try {
+      await send(gw);
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      await send(gw);
+      // Unknown TTL is not zero TTL: 「the cache is gone」 cannot be claimed.
+      expect(seen.events.filter((e) => e.reason === 'cache_expired')).toHaveLength(0);
+    } finally {
+      await gw.stop();
+    }
+  }, 20_000);
+})

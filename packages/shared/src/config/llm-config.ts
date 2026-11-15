@@ -117,6 +117,21 @@ export interface LlmPreset {
   streamGapSeconds?: number;
   totalSeconds?: number;
 
+  /** --- Cache (seconds) --- */
+
+  /**
+   * How long this provider keeps its prompt cache warm after the last request.
+   *
+   * Anthropic's ephemeral cache is 5 minutes; a provider that offers an extended window is an
+   * hour. Leaving it empty means 「not known」, and the TTL rule then never fires — a guessed value
+   * would make the gateway compact a session whose cache was in fact still alive, which costs a
+   * whole summary for nothing.
+   *
+   * Measured from the last successful request, not from when the reply finished: the cache is
+   * built by the request, and a long streamed answer would otherwise eat most of the window.
+   */
+  promptCacheTtlSeconds?: number;
+
   /** --- Cooldowns (seconds) --- */
 
   /** Cooldown after a 429 / rate-limit response. */
@@ -329,6 +344,19 @@ export interface LlmStrategy {
    * finishes — never mid-stream.
    */
   compactAfterSwitch?: boolean;
+
+  /**
+   * Compact before sending when the prompt cache has certainly expired.
+   *
+   * The cache is keyed on the prefix, so a gap longer than the provider's TTL means the next
+   * request re-uploads and re-bills the whole context at cache-miss rates. Compacting first trades
+   * one summary for a much smaller upload — the same trade `compactAfterSwitch` already makes when
+   * the route changes, applied to the case where the route stayed the same and only time passed.
+   *
+   * Off by default, and inert unless the provider declares `promptCacheTtlSeconds`: 「the cache is
+   * gone」 is only knowable when the TTL is known.
+   */
+  compactAfterCacheTtl?: boolean;
 
   retry?: {
     /** Total upstream attempts for one provider/model/key target, including the first call. */

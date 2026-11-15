@@ -163,8 +163,15 @@ export interface LlmRouteChange {
     keyId: string;
     upstreamModel: string;
   };
-  /** Which part moved; a fallback can move all three at once. */
-  reason: 'key' | 'model' | 'both';
+  /**
+   * Why the context should be compacted.
+   *
+   * `key` / `model` / `both` — the route moved, so the next request has no cache at all.
+   * `cache_expired` — the route did not move, but enough time passed that the provider has
+   * dropped its cache. The caller treats all four the same way; the reason exists so the log
+   * says which fact produced it.
+   */
+  reason: 'key' | 'model' | 'both' | 'cache_expired';
 }
 
 /** Last successful route per session, used to detect a switch. */
@@ -174,6 +181,14 @@ interface SessionRoute {
   providerId: string;
   keyId: string;
   upstreamModel: string;
+  /**
+   * When the last request on this route succeeded.
+   *
+   * The prompt cache is built by the request, so this — not the end of the reply — is the clock
+   * the TTL runs from. A streamed answer that took ten minutes would otherwise consume a
+   * five-minute window before the next message even started.
+   */
+  lastRequestAt: number;
 }
 
 /** Per-key scheduling snapshot, for the provider detail key table. */
@@ -2315,16 +2330,56 @@ export class LlmGateway {
   ): void {
     if (!sessionId || truncated) return;
     const previous = this.sessionRoutes.get(sessionId);
+    const now = Date.now();
     const next: SessionRoute = {
       strategyId: plan.strategyId,
       unitId: unit.id,
       providerId: unit.provider.id,
       keyId,
       upstreamModel: unit.upstreamModel,
+      lastRequestAt: now,
     };
     // Always record the route (even when the flag is off) so re-enabling the
     // option does not compare against a stale route from hours ago.
     this.sessionRoutes.set(sessionId, next);
+
+    /**
+     * The cache expired on its own, without the route moving.
+     *
+     * The complement of `compactAfterSwitch`: that one reacts to a *different* route (which has no
+     * cache at all), this one to the *same* route after a long enough gap that the provider has
+     * dropped it. Both end in the same place — the next request would re-upload the whole context
+     * at cache-miss rates — so both are answered the same way, and the caller cannot tell them
+     * apart except by reason.
+     *
+     * Judged on `unitId`, not `providerId`: the same provider serving a different upstream model
+     * has a different cache, so 「the provider is unchanged」 does not mean 「the cache is warm」.
+     * Checked before the switch branch because a route change makes the TTL question moot — there
+     * is nothing left to expire.
+     */
+    if (previous && previous.unitId === next.unitId && plan.strategy.compactAfterCacheTtl !== false) {
+      const ttlSeconds = presetFor(this.getConfig(), unit.provider, keyId).promptCacheTtlSeconds;
+      if (
+        typeof ttlSeconds === 'number' &&
+        ttlSeconds > 0 &&
+        now - previous.lastRequestAt > ttlSeconds * 1000
+      ) {
+        try {
+          this.onRouteChanged?.({
+            sessionId,
+            ...next,
+            publicModel: unit.publicModel,
+            previous,
+            reason: 'cache_expired',
+          });
+        } catch (err) {
+          // The upstream request already succeeded; a listener failure must not become a
+          // client-visible error.
+          this.log(`route-change listener failed: ${describeError(err)}`);
+        }
+      }
+    }
+
     if (!previous || plan.strategy.compactAfterSwitch === false) return;
 
     const keyChanged = previous.keyId !== next.keyId || previous.providerId !== next.providerId;

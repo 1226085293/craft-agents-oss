@@ -106,6 +106,14 @@ export function draftsKey(drafts: readonly TypeDraft[]): string {
 export const TYPE_META: Array<[string, string, string]> = [
   ['tpr', 'TPR · Token', '单次请求的 Token 上限，超过直接拒绝（不是窗口）'],
   ['concurrency', '并发', '同时进行的请求数'],
+  /**
+   * The cache TTL is not a timeout and not a cooldown — it is a fact about the upstream.
+   *
+   * Leaving it empty means 「not known」, and the 「compact after cache expiry」 rule then stays
+   * inert rather than guessing: compacting a session whose cache was in fact still warm costs a
+   * whole summary for nothing.
+   */
+  ['promptCacheTtlSeconds', 'TTL时间 · 分', '上游缓存保持多久（Anthropic 5 分钟 / 1 小时）。留空 = 不启用缓存过期压缩；填秒数，界面按分显示'],
   ['firstByteSeconds', '首字节超时 · 秒', '等待响应首字节的最长时间'],
   ['streamGapSeconds', '流间空闲超时 · 秒', '首块之后连续无数据的最长时间；超时会按策略组重试或转移'],
   ['totalSeconds', '总超时 · 秒', '整个请求（含流式 body）的最长时间'],
@@ -342,11 +350,26 @@ export function TypeCard(props: {
                 // An unset limit shows as an empty box, not 0 and not a
                 // default: 0 would read as "zero requests allowed" and a
                 // pre-filled default imposes a limit the user never chose.
-                value={draft.limits[field] ?? ''}
-                placeholder="不限"
+                value={
+                  /**
+                   * The cache TTL is stored in seconds and shown in minutes.
+                   *
+                   * Seconds is what the gateway compares against — the same unit as every other
+                   * window in this preset — but a person thinks about a prompt cache in minutes
+                   * (5, 60), and typing 300 to mean five is the kind of unit mismatch that gets
+                   * filled in wrong. Converting here keeps both sides honest.
+                   */
+                  field === 'promptCacheTtlSeconds'
+                    ? (draft.limits[field] === undefined ? '' : draft.limits[field]! / 60)
+                    : draft.limits[field] ?? ''
+                }
+                placeholder={field === 'promptCacheTtlSeconds' ? '留空 = 不启用' : '不限'}
                 onChange={(e) => {
                   const raw = e.target.value
-                  const next = raw === '' ? undefined : Number(raw)
+                  const next =
+                    raw === ''
+                      ? undefined
+                      : Number(raw) * (field === 'promptCacheTtlSeconds' ? 60 : 1)
                   props.onChange({ ...draft, limits: { ...draft.limits, [field]: next } })
                 }}
               />

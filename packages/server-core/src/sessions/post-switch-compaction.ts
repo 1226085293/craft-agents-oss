@@ -52,7 +52,14 @@ export interface PostSwitchCompactDeps {
 export function schedulePostSwitchCompaction(
   deps: PostSwitchCompactDeps,
   sessionId: string,
-  reason: 'key' | 'model' | 'both' | 'task',
+  /**
+   * Why the context is being compacted.
+   *
+   * `cache_expired` is the one case where the route did not change: the same provider and model
+   * simply sat idle past the provider's cache TTL, so the next request would re-upload the whole
+   * context at cache-miss rates. It is worth a summary for the same reason a switch is.
+   */
+  reason: 'key' | 'model' | 'both' | 'task' | 'cache_expired',
   running: Map<string, Promise<void>>,
 ): void {
   if (running.has(sessionId)) return;
@@ -86,7 +93,9 @@ export function schedulePostSwitchCompaction(
             ? '切换模型后'
             : reason === 'task'
               ? '任务上下文接近上限'
-              : '切换 key/模型后';
+              : reason === 'cache_expired'
+                ? '缓存过期后'
+                : '切换 key/模型后';
 
       deps.sendEvent(
         {

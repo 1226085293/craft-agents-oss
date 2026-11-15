@@ -1022,6 +1022,14 @@ function StrategyEditDialog(props: {
   const [dragOver, setDragOver] = React.useState<number | null>(null)
   const [sticky, setSticky] = React.useState(existing?.stickySession?.enabled !== false)
   const [compactAfterSwitch, setCompactAfterSwitch] = React.useState(existing?.compactAfterSwitch !== false)
+  /**
+   * Off unless the user turned it on.
+   *
+   * The switch is only useful when the provider declares a cache TTL, and an unset TTL makes it
+   * inert — so defaulting it to on would put a switch in front of people whose providers cannot
+   * use it, in a state that silently does nothing.
+   */
+  const [compactAfterCacheTtl, setCompactAfterCacheTtl] = React.useState(existing?.compactAfterCacheTtl === true)
   const [retryDraft, setRetryDraft] = React.useState(() => retryDraftFromConfig(existing?.retry))
   const [waitCooldownDraft, setWaitCooldownDraft] = React.useState(() => waitForCooldownDraftFromConfig(existing?.waitForCooldown))
   const [fallbackId, setFallbackId] = React.useState(existing?.fallbackStrategyId ?? '')
@@ -1141,6 +1149,7 @@ function StrategyEditDialog(props: {
       })),
       stickySession: { ...(existing?.stickySession ?? {}), enabled: sticky },
       compactAfterSwitch,
+      compactAfterCacheTtl,
       retry: serializeRetryDraft(retryDraft),
       ...(serializeWaitForCooldownDraft(waitCooldownDraft)
         ? { waitForCooldown: serializeWaitForCooldownDraft(waitCooldownDraft) }
@@ -1457,6 +1466,17 @@ function StrategyEditDialog(props: {
             </div>
             <div className="xs muted" style={{ marginTop: 4 }}>
               默认开启：先做零 LLM 快速压缩，超过阈值才调用 LLM 总结；仅在会话空闲后执行，不打断当前回合
+            </div>
+          </div>
+          <div className="field">
+            <label>TTL超时后自动压缩会话</label>
+            <div className="row" style={{ justifyContent: 'space-between' }}>
+              <span className="small muted">同一提供商停顿超过缓存 TTL 时先压缩，再发送</span>
+              <Switch on={compactAfterCacheTtl} onClick={() => setCompactAfterCacheTtl((v) => !v)} />
+            </div>
+            <div className="xs muted" style={{ marginTop: 4 }}>
+              默认关闭。需要在该提供商类型卡片里填「TTL时间 · 分」，否则此开关不生效：
+              TTL 未知时无法判断缓存是否已失效，猜测会导致无谓的压缩
             </div>
           </div>
           <div className="field">

@@ -389,7 +389,7 @@ export interface Message {
   // Status type for special status messages (compaction / verification / …).
   /** A question for a person. See `DecisionRequest` — display-only, never model input. */
   decisionRequest?: DecisionRequest;
-  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake' | 'event_wake' | 'decision_request';
+  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake' | 'event_wake' | 'decision_request' | 'system_notice';
   /** Structured interpolation values for the row's i18n key (e.g. attempt/total, tokens). The renderer resolves display text from `statusType`; these fill its placeholders. */
   statusParams?: Record<string, string | number>;
   // Info level for info messages (determines icon/color)
@@ -473,7 +473,7 @@ export interface StoredMessage {
   // Status type for special status messages (compaction / verification / …).
   /** A question for a person. See `DecisionRequest` — display-only, never model input. */
   decisionRequest?: DecisionRequest;
-  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake' | 'event_wake' | 'decision_request';
+  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake' | 'event_wake' | 'decision_request' | 'system_notice';
   /** Structured interpolation values for the row's i18n key — see statusParams above. */
   statusParams?: Record<string, string | number>;
   /** Notice identity, persisted so a repeated fault is not written again after a reload. */

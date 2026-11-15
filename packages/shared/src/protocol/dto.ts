@@ -301,7 +301,7 @@ export type SessionEvent =
   // Carries the full ordered queue so every window converges on one order.
   | { type: 'queued_messages_changed'; sessionId: string; queuedMessages: QueuedMessageSummary[] }
   | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed'; statusParams?: Record<string, string | number>; timestamp?: number }
-  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed' | 'system_stop' | 'background_wake' | 'event_wake' | 'decision_request'; statusParams?: Record<string, string | number>; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string; /** Present when statusType === 'decision_request'. */ decisionRequest?: DecisionRequest }
+  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed' | 'system_stop' | 'background_wake' | 'event_wake' | 'decision_request' | 'system_notice'; statusParams?: Record<string, string | number>; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string; /** Present when statusType === 'decision_request'. */ decisionRequest?: DecisionRequest }
   | { type: 'system_stop_notice'; sessionId: string; reason: string; message: string; timestamp?: number }
   | { type: 'title_generated'; sessionId: string; title: string }
   | { type: 'title_regenerating'; sessionId: string; isRegenerating: boolean }

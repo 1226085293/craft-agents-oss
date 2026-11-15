@@ -2409,7 +2409,7 @@ export class SessionManager implements ISessionManager {
       (message) => message.role === 'info' && message.noticeKey === key,
     )
     if (already) return
-    this.appendReadOnlyRow(managed, { text, noticeKey: key, infoLevel: 'warning' })
+    this.appendReadOnlyRow(managed, { text, noticeKey: key, statusType: 'system_notice', infoLevel: 'warning' })
   }
 
   private setProcessing(managed: ManagedSession, processing: boolean): void {
@@ -9440,8 +9440,8 @@ ${request.prompt}`;
     managed: ManagedSession,
     row: {
       text: string
-      /** Only the card kind declares a sub-type; a plain notice is just `role: 'info'`. */
-      statusType?: 'decision_request'
+      /** Only cards and notices declare a sub-type; a plain line is just `role: 'info'`. */
+      statusType?: 'decision_request' | 'system_notice'
       /** Identifies the notice so the same fault is not written twice (see `notifyPerson`). */
       noticeKey?: string
       infoLevel?: Message['infoLevel']

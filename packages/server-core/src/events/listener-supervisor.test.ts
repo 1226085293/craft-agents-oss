@@ -307,3 +307,45 @@ describe('a listener that is up but not signed in', () => {
     await reauthSupervisor.stopAll()
   }, 20000)
 })
+
+describe('a restart and the outgoing process', () => {
+  /**
+   * The outgoing process must not be able to report itself over the incoming one.
+   *
+   * `stop()` resolves on whichever happens first: the child's own `exit` event,
+   * or `taskkill`'s exit. On Windows the kill returns first, so `start()` spawns
+   * the replacement while the old child's `exit` handler is still queued. That
+   * handler used to delete `running` and write `stopped` *by id*, which hit the
+   * new entry: `waitForHealthy` then read a healthy restart as a failure,
+   * `restartWithFallback` restored the previous config — rolling back
+   * credentials a sign-in had just written — and the new process was left
+   * running with nothing tracking it, so the fallback start produced a second
+   * process for the same plugin.
+   */
+  it('does not let the stopped process overwrite the one that replaced it', async () => {
+    const entry = listener('handover', [])
+    const script = join(entry.dir, 'idle.mjs')
+    writeFileSync(script, 'setInterval(() => undefined, 1000);', 'utf8')
+    entry.manifest.runtime = { program: [process.execPath, script], readyTimeoutMs: 60_000 }
+
+    supervisor.start(entry)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    // A restart is exactly: stop, then start the next process.
+    await supervisor.stop('handover')
+    const next = supervisor.start(entry)
+    expect(next.state).toBe('starting')
+
+    // Give the outgoing process's late exit event every chance to land.
+    await new Promise((resolve) => setTimeout(resolve, 600))
+
+    const after = supervisor.getStatus('handover')
+    // The replacement is still the one being tracked under this id…
+    expect(after.state).toBe('starting')
+    expect(after.pid).toBe(next.pid)
+    // …and there is exactly one process for it.
+    expect(supervisor.listStatuses().filter((s) => s.id === 'handover')).toHaveLength(1)
+
+    await supervisor.stopAll()
+  }, 20000)
+})

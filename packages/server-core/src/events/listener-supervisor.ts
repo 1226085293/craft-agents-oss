@@ -255,7 +255,7 @@ export class ListenerSupervisor {
     const readyTimeoutMs = manifest.runtime?.readyTimeoutMs ?? 20000;
     entry.healthTimer = setTimeout(() => {
       void (async () => {
-        if (!this.running.has(listener.id) || entry.stopping) return;
+        if (this.running.get(listener.id) !== entry || entry.stopping) return;
         // Re-read rather than reuse `entry.status.state`: the await below can
         // outlive a health report, and a narrowed local would hide that.
         if (this.getStatus(listener.id).state === 'running') return;
@@ -271,7 +271,7 @@ export class ListenerSupervisor {
           // A plugin that cannot answer is not proof of anything; fall through
           // to degraded, which is the honest reading of "did not report health".
         }
-        if (!this.running.has(listener.id) || entry.stopping) return;
+        if (this.running.get(listener.id) !== entry || entry.stopping) return;
         if (this.getStatus(listener.id).state === 'running') return;
 
         if (awaitingAuth) {
@@ -289,6 +289,11 @@ export class ListenerSupervisor {
     entry.healthTimer.unref?.();
 
     child.on('error', (error) => {
+      if (entry.healthTimer) clearTimeout(entry.healthTimer);
+      // Only if this process is still the current one for the id. A restart
+      // starts the next process while this one's close is still in flight;
+      // writing here by id would overwrite the new process's status.
+      if (this.running.get(listener.id) !== entry) return;
       entry.status = {
         ...entry.status,
         state: 'failed',
@@ -297,8 +302,21 @@ export class ListenerSupervisor {
       this.setStatus(entry.status);
     });
 
+    // Every callback below belongs to THIS process, so each one must confirm it
+    // is still the entry `running` holds before touching shared state.
+    //
+    // `stop()` resolves on either the child's exit event or `taskkill`'s — and
+    // on Windows the kill returns first, so the new process is spawned while
+    // this handler for the old one is still queued. Deleting by id alone
+    // therefore removed the *new* entry, reported `stopped` over its `starting`,
+    // made `waitForHealthy` read a successful restart as a failure, and left
+    // the new process running as an orphan the map no longer knew about. In
+    // the sign-in path that rolled back credentials that had just been
+    // written, and the fallback start then produced a second process for the
+    // same plugin.
     child.on('exit', (code, signal) => {
       if (entry.healthTimer) clearTimeout(entry.healthTimer);
+      if (this.running.get(listener.id) !== entry) return;
       this.running.delete(listener.id);
       if (entry.stopping) {
         this.setStatus({ ...entry.status, state: 'stopped', pid: null, lastExitCode: code, attempts: 0 });

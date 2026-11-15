@@ -2279,6 +2279,82 @@ export class TaskService {
     }
 
     /**
+     * A paused task does not take a report either, and does not wake anyone with it.
+     *
+     * `paused` is not terminal — it is how a task waits for a person — but it is the same promise
+     * as terminal for this path: nothing is running, so there is nothing a report could report.
+     * The guard used to cover only `completed` and `canceled`, and a paused task took every report
+     * the worker filed after the stop.
+     *
+     * Measured on T-1, paused at 07:49:42 by the failure fuse:
+     *
+     *     07:52:22  worker hand-off    → supervisor woken
+     *     07:56:49  worker hand-off    → supervisor woken (the question you saw)
+     *     08:01:46  worker hand-off    → supervisor woken again
+     *     08:03:34  the API refused the third turn
+     *
+     * Each report woke the supervisor, which found a paused task it could not dispatch into and
+     * said something about it — which is how one stop became three questions. The worker was still
+     * running because the stop itself skipped a session that was between turns (see `stopWorker`);
+     * this guard is the other half: even a session that keeps going cannot reach the supervisor
+     * through a task that has stopped.
+     *
+     * The report is still answered rather than thrown — a worker mid-turn must not get an exception
+     * for reporting correctly — and it is still recorded in the session's own history, which is
+     * where work that happened after the stop belongs.
+     */
+    /**
+     * A task that has stopped takes no report, and does not wake anyone with it.
+     *
+     * `paused` is not terminal — it is how a task waits for a person — but for the reasons below it
+     * makes the same promise: nothing is running, so there is nothing a report could report. The
+     * guard used to cover only `completed` and `canceled`, and a stopped task took every report the
+     * worker filed after the stop.
+     *
+     * Measured on T-1, paused at 07:49:42 by the failure fuse:
+     *
+     *     07:52:22  worker hand-off    → supervisor woken
+     *     07:56:49  worker hand-off    → supervisor woken (the question you saw)
+     *     08:01:46  worker hand-off    → supervisor woken again
+     *     08:03:34  the API refused the third turn
+     *
+     * Each report woke the supervisor, which found a paused task it could not dispatch into and
+     * said something about it — which is how one stop became three questions.
+     *
+     * Not every pause is a stop, and the difference is not cosmetic:
+     *
+     *   `awaiting_dispatch`  the worker delivered a slice and the next leg is not dispatched yet.
+     *                        The report is the thing being waited for; refusing its retry with
+     *                        「rejected」 tells the worker its work was refused, which is false.
+     *   `needs_decision` /   the question is open and the worker's report is how the work that
+     *   `asking`             prompted it gets recorded. The stop that matters here is the run
+     *                        release, not this path.
+     *
+     * So the guard is a list of the reasons that mean 「this task is over until a person acts」.
+     */
+    const STOPPED_PAUSE_REASONS = ['failures', 'budget', 'verify_exhausted', 'process_lost', 'awaiting_release']
+    if (task.status === 'paused' && STOPPED_PAUSE_REASONS.includes(task.pauseReason ?? '')) {
+      log.info(`[tasks] handoff for stopped task ${id} (${task.pauseReason}) from ${fromSessionId} acknowledged without waking the supervisor`)
+      appendJournal(this.root, id, {
+        type: 'handoff_after_stop',
+        at: now,
+        data: {
+          sessionId: fromSessionId,
+          outcome: handoff.outcome,
+          summary: handoff.summary,
+          pauseReason: task.pauseReason,
+        },
+      })
+      return {
+        task,
+        handoff,
+        passed: false,
+        reasons: [`${id} 已经停了（${task.pauseReason}），这次交接不再处理，也不会叫醒督导`],
+        compactionPending: false,
+      }
+    }
+
+    /**
      * The same report, again — answered without doing anything.
      *
      * `report_result` is a write with side effects: it appends a hand-off, banks the run, wakes the
@@ -2596,6 +2672,31 @@ export class TaskService {
     } else if (!accepted && shouldTripFuse(next.lifecycle)) {
       next = applyTransition(next, 'paused', { now, pauseReason: 'failures' }).task;
       this.stopWorker(next);
+      /**
+       * A fuse is a stop, and a stop needs a card.
+       *
+       * This branch paused and stopped, and recorded nothing else. So the task said 「连续失败」 with
+       * no question attached — which meant `pickOpenQuestionTask` found nothing to hang a question
+       * on (it only returns tasks that already have an open decision), `setDecisionWording` skipped
+       * the write, and every word the supervisor said about the stop stayed in the chat.
+       *
+       * Measured on T-1: three questions at 07:01, 07:52 and 08:00 that the person saw in the
+       * session and nowhere in the task. The record must hold the stop before the wording arrives —
+       * the same ordering `needs_decision` already relies on.
+       */
+      next = {
+        ...next,
+        decision: {
+          id: newDecisionId(now, allDecisions(next).length),
+          category: 'blocked',
+          label: '连续失败',
+          reason:
+            `连续 ${next.lifecycle?.consecutiveFailures ?? 0} 次交接未通过验收，系统已熔断并停止自动派活。` +
+            `最后一次错误：${next.lifecycle?.lastError ?? '(未记录)'}`,
+          askedAt: now,
+          deadlineAt: now + DECISION_TIMEOUT_MS,
+        },
+      };
     } else if (handoff.outcome === 'handoff' && isSpinningInPlace(next)) {
       //
       // "Still working on it" repeated without the plan moving is not progress.

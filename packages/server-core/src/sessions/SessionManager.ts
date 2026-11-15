@@ -8053,6 +8053,24 @@ ${request.prompt}`;
         void this.cancelProcessing(sessionId, true).catch((error) => {
           sessionLog.warn(`[tasks] could not stop ${sessionId}`, { error })
         })
+        /**
+         * A pause also takes the task away from the session.
+         *
+         * `cancelProcessing` ends the turn that is streaming, and it answers 「nothing to do」 when
+         * there is no such turn — which is exactly the case for a worker that has just filed a
+         * hand-off and is waiting to be woken. The session kept its `taskId`, went on receiving
+         * work reports through it, and could file another hand-off into a task that had stopped.
+         *
+         * Measured on T-1, paused at 07:49:42: reports kept arriving at 07:52:22, 07:56:49 and
+         * 08:01:46 from the session the pause was supposed to stop.
+         *
+         * Detaching is what makes the stop mean something for a session that is not mid-stream:
+         * the binding is what authorises `report_result` against the task, so without it the
+         * session can no longer reach the task at all. The conversation itself is untouched and
+         * still readable — only the authority that went with the pause is withdrawn.
+         */
+        const taskId = this.sessions.get(sessionId)?.taskId
+        if (taskId) this.detachTask(sessionId, taskId)
       },
       runAcceptanceCommand: async (command, cwd) => {
         const { exec } = await import('child_process')

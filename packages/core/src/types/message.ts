@@ -360,6 +360,14 @@ export interface Message {
    * the last final assistant message as its result.
    */
   isRelayed?: boolean;
+  /**
+   * Identifies a person-facing notice so the same one is not repeated.
+   *
+   * A fault noticed on every turn used to write a row per turn — the conversation filled with the
+   * same sentence about something already on screen. Reading the key back is how the writer asks
+   * 「is this already showing?」 without keeping a second registry that can drift from the rows.
+   */
+  noticeKey?: string;
   // Aborted: this assistant message belonged to a turn cut short by Stop,
   // redirect, or internal cancellation. Persisted for restart recovery,
   // defense evaluation, and messaging delivery suppression.
@@ -468,6 +476,8 @@ export interface StoredMessage {
   statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake' | 'event_wake' | 'decision_request';
   /** Structured interpolation values for the row's i18n key — see statusParams above. */
   statusParams?: Record<string, string | number>;
+  /** Notice identity, persisted so a repeated fault is not written again after a reload. */
+  noticeKey?: string;
   // Info level for info messages (persisted for reload)
   infoLevel?: 'info' | 'warning' | 'error' | 'success';
   // Error display fields

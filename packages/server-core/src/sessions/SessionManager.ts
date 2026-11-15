@@ -2309,10 +2309,10 @@ export class SessionManager implements ISessionManager {
         const lane = await this.ensureSupervisorSession(managed.workspace.id, 'user')
         if (verdict.kind === 'recovered') {
           if (lane) {
-            this.notifySupervisor(
+            this.notifyPerson(
               lane.id,
               `task-recovered:${task.id}`,
-              say('tasks.supervisorRecovered', '任务督导已恢复正常'),
+              `${say('tasks.supervisorRecovered', '任务督导已恢复正常')}（${task.id}）`,
             )
           }
           sessionLog.info('supervisor is answering again', { taskId: task.id, silentTurns: verdict.silentTurns })
@@ -2320,10 +2320,18 @@ export class SessionManager implements ISessionManager {
         }
 
         if (lane) {
-          this.notifySupervisor(
+          /**
+           * The task id is not decoration.
+           *
+           * One supervisor can hold several tasks — live, 261115-frosty-trout held both T-1 and
+           * T-2 — and each one that goes quiet writes its own notice. Without the id the person
+           * gets two identical rows 1.3 s apart and cannot tell whether that is two faults or one
+           * said twice. With it, 「which task stopped」 is the first thing the line answers.
+           */
+          this.notifyPerson(
             lane.id,
             `task-fault:${task.id}`,
-            say('tasks.supervisorInterrupted', '任务督导中断，请检查'),
+            `${say('tasks.supervisorInterrupted', '任务督导中断，请检查')}（${task.id}）`,
           )
         }
         /**
@@ -2368,6 +2376,40 @@ export class SessionManager implements ISessionManager {
       return
     }
     this.supervisorNotices.hold(sessionId, key, text)
+  }
+
+  /**
+   * Say something to the person in a lane, without addressing the model.
+   *
+   * `notifySupervisor` goes through `sendMessage`, which writes a `type: 'user'` row: the notice
+   * showed up in the conversation as if the person had typed it themselves. Live 2026-11-15
+   * 17:11 in 261115-soft-moor: two rows reading 「任务督导中断，请检查」, both `type: 'user'`,
+   * 1.3 s apart. A person reading their own conversation sees a sentence they never wrote and no
+   * way to tell whether they are supposed to reply to it.
+   *
+   * These sentences are reports about the system, not speech to the model — nothing should wake,
+   * nothing should be answered. `appendReadOnlyRow` is exactly that: an `info` row, persisted and
+   * broadcast, that starts no turn. The read-only channel is also why a repeated fault cannot
+   * pile up: `hold` dedupes on `key`, and `append` only when the key is not already showing.
+   */
+  private notifyPerson(sessionId: string, key: string, text: string): void {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) {
+      sessionLog.warn('[notify] dropped: session not loaded', { sessionId, key })
+      return
+    }
+    /**
+     * One row per key.
+     *
+     * The supervisor-lane notice dedupes through `supervisorNotices`, but that path is for
+     * messages the model must read. This one is for a person, and the same fault being noticed on
+     * every turn would otherwise write a row per turn about something already on screen.
+     */
+    const already = managed.messages.some(
+      (message) => message.role === 'info' && message.noticeKey === key,
+    )
+    if (already) return
+    this.appendReadOnlyRow(managed, { text, noticeKey: key, infoLevel: 'warning' })
   }
 
   private setProcessing(managed: ManagedSession, processing: boolean): void {
@@ -9400,6 +9442,8 @@ ${request.prompt}`;
       text: string
       /** Only the card kind declares a sub-type; a plain notice is just `role: 'info'`. */
       statusType?: 'decision_request'
+      /** Identifies the notice so the same fault is not written twice (see `notifyPerson`). */
+      noticeKey?: string
       infoLevel?: Message['infoLevel']
       decisionRequest?: DecisionRequest
       /**
@@ -9421,6 +9465,7 @@ ${request.prompt}`;
       timestamp: this.monotonic(),
       ...(row.asAssistantBubble ? { isRelayed: true } : {}),
       ...(row.statusType ? { statusType: row.statusType } : {}),
+      ...(row.noticeKey ? { noticeKey: row.noticeKey } : {}),
       ...(row.infoLevel ? { infoLevel: row.infoLevel } : {}),
       ...(row.decisionRequest ? { decisionRequest: row.decisionRequest } : {}),
     }

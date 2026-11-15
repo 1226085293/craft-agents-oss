@@ -3403,37 +3403,6 @@ function MessageBubble({
       )
     }
 
-    /**
-     * A notice from the system, drawn as a bubble rather than a status line.
-     *
-     * 「任务督导中断，请检查」 is a sentence addressed to the person, not machine chrome about a
-     * turn — a 13px grey row puts it in the same visual class as 「Conversation Compacted」 and the
-     * background-task title, which a reader skips. The bubble is what marks it as something to
-     * read; it sits centred and distinct from both the user's own messages and the assistant's,
-     * because it is neither.
-     */
-    if (message.statusType === 'system_notice') {
-      const level = message.infoLevel || 'info'
-      const config = {
-        info: { icon: Info, className: 'text-muted-foreground', border: 'border-border/60' },
-        warning: { icon: AlertTriangle, className: 'text-info', border: 'border-info/40' },
-        error: { icon: CircleAlert, className: 'text-destructive', border: 'border-destructive/40' },
-        success: { icon: CheckCircle2, className: 'text-success', border: 'border-success/40' },
-      }[level]
-      const Icon = config.icon
-      return (
-        <div className="flex justify-center my-3 px-3">
-          <div className={cn('max-w-[80%] rounded-lg border bg-foreground/[0.03] px-4 py-2.5', config.border)}>
-            <div className={cn('flex items-center gap-2 text-[13px] font-medium', config.className)}>
-              <Icon className="w-3.5 h-3.5 shrink-0" />
-              <span>系统</span>
-            </div>
-            <p className="mt-1 break-words text-sm text-foreground">{message.content}</p>
-          </div>
-        </div>
-      )
-    }
-
     // Background task completion notice — a plain, non-interactive title row
     // (the command + result live in the process block below, so this row is a
     // label only). Text is selectable/copyable.

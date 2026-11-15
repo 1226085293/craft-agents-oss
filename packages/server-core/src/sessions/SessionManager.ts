@@ -2388,9 +2388,13 @@ export class SessionManager implements ISessionManager {
    * way to tell whether they are supposed to reply to it.
    *
    * These sentences are reports about the system, not speech to the model — nothing should wake,
-   * nothing should be answered. `appendReadOnlyRow` is exactly that: an `info` row, persisted and
-   * broadcast, that starts no turn. The read-only channel is also why a repeated fault cannot
-   * pile up: `hold` dedupes on `key`, and `append` only when the key is not already showing.
+   * nothing should be answered. `appendReadOnlyRow` is exactly that: a row persisted and broadcast
+   * without starting a turn.
+   *
+   * It is written as an assistant bubble (`asAssistantBubble`), because a person reads it as a
+   * message from the system, not as status chrome about a turn. `isOwnReply` excludes relayed rows,
+   * so this bubble can never be mistaken for the session's own final reply — the supervisor-answer
+   * accounting reads `isRelayed` and skips it.
    */
   private notifyPerson(sessionId: string, key: string, text: string): void {
     const managed = this.sessions.get(sessionId)
@@ -2405,11 +2409,17 @@ export class SessionManager implements ISessionManager {
      * messages the model must read. This one is for a person, and the same fault being noticed on
      * every turn would otherwise write a row per turn about something already on screen.
      */
-    const already = managed.messages.some(
-      (message) => message.role === 'info' && message.noticeKey === key,
-    )
+    /**
+     * Matched on the key alone, not on the role.
+     *
+     * The check used to require `role === 'info'`, which was true only while this row was drawn as
+     * a status line. As an assistant bubble the role is `'assistant'`, and a role-qualified lookup
+     * would never find the row it had just written — the guard would silently stop working and the
+     * fault would repeat every turn, which is the thing it exists to prevent.
+     */
+    const already = managed.messages.some((message) => message.noticeKey === key)
     if (already) return
-    this.appendReadOnlyRow(managed, { text, noticeKey: key, statusType: 'system_notice', infoLevel: 'warning' })
+    this.appendReadOnlyRow(managed, { text, noticeKey: key, asAssistantBubble: true })
   }
 
   private setProcessing(managed: ManagedSession, processing: boolean): void {
@@ -9440,8 +9450,8 @@ ${request.prompt}`;
     managed: ManagedSession,
     row: {
       text: string
-      /** Only cards and notices declare a sub-type; a plain line is just `role: 'info'`. */
-      statusType?: 'decision_request' | 'system_notice'
+      /** Only the card kind declares a sub-type; a plain notice is just `role: 'info'`. */
+      statusType?: 'decision_request'
       /** Identifies the notice so the same fault is not written twice (see `notifyPerson`). */
       noticeKey?: string
       infoLevel?: Message['infoLevel']

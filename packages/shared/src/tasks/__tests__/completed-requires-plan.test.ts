@@ -85,7 +85,6 @@ describe('an answer nobody has acted on', () => {
         label: 'x',
         reason: 'x',
         askedAt: 1,
-        deadlineAt: 2,
         resolvedAt: 3,
         answer: { text: '停止剩下的任务，然后将docs改名为docs2', at: 100 },
       },
@@ -117,7 +116,7 @@ describe('an answer nobody has acted on', () => {
   it('does not resume a task whose question is still open', () => {
     const verdict = resumeDecisionFor(
       task({
-        decision: { category: 'direction', label: 'x', reason: 'x', askedAt: 1, deadlineAt: 2 },
+        decision: { category: 'direction', label: 'x', reason: 'x', askedAt: 1},
       } as never),
     )
     expect(verdict.allowed).toBe(false)

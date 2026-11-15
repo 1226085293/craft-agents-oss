@@ -1303,7 +1303,7 @@ export class TaskService {
    * neither of which was one of the three. Copying the words onto the record the task
    * card reads is what makes them the same question.
    *
-   * Deliberately does not touch `pauseReason`, `askedAt` or `deadlineAt`: this is wording,
+   * Deliberately does not touch `pauseReason` or `askedAt`: this is wording,
    * not a state change. Answering still goes through the same guard.
    *
    * It does end the run, though — see the park below. A question for a person means nobody

@@ -227,8 +227,8 @@ describe('an open question has no deadline', () => {
   })
 
   it('does not expire a question however long it has been open', () => {
-    // Thirteen hours, and a stale deadline left over from a record written before the change.
-    const waiting = withQuestion({ deadlineAt: NOW - 1000 })
+    // Asked thirteen hours ago — the fixture's `askedAt` is that old, and nothing closes it.
+    const waiting = withQuestion({})
     expect(inspectTasks(deps([waiting]))).toEqual([])
   })
 
@@ -244,7 +244,7 @@ describe('an open question has no deadline', () => {
   it('never denies a decision on behalf of the person', () => {
     const denied: string[] = []
     runWatchdogPass(
-      deps([withQuestion({ deadlineAt: NOW - 1000 })], {
+      deps([withQuestion({})], {
         denyDecision: (id) => denied.push(id),
         notify: () => undefined,
       }),
@@ -289,10 +289,11 @@ describe('event-driven scheduling', () => {
 
   it('schedules nothing for an open question, because nothing about it can fall due', () => {
     /**
-     * This used to wake at `deadlineAt`. With the deadline gone there is no future moment at which
-     * re-reading the task would change anything, so the honest answer is `Infinity`. Leaving a
-     * `deadlineAt` read in place would now compute `Infinity - undefined` → `NaN`, which compares
-     * false against every bound and would sleep the loop out on `NaN`.
+     * An open question used to schedule a wake-up at its `deadlineAt`. There is no deadline any
+     * more, and no future moment at which re-reading the task would change anything, so the honest
+     * answer is `Infinity`. Scheduling instead from an absent field would compute
+     * `Math.min(Infinity, undefined)` → `NaN`; `clampSleep` caps a non-finite delay at its maximum,
+     * so every pass would then run on a flat 30-second tick rather than on what is actually due.
      */
     const waiting = task({
       status: 'paused',
@@ -620,7 +621,6 @@ describe('a task with an open question', () => {
     reason: '原指令授权仅到 1.1',
     question: '是否继续做 1.2？',
     askedAt: NOW - 10 * 60_000,
-    deadlineAt: NOW + 60 * 60_000,
   }
 
   it('is never woken to continue, even when its session looks idle', () => {
@@ -642,21 +642,6 @@ describe('a task with an open question', () => {
     )
     expect(findings.filter((f) => f.kind === 'unreported')).toEqual([])
     expect(findings.filter((f) => f.kind === 'idle')).toEqual([])
-  })
-
-  it('keeps the question open past any old deadline it still carries', () => {
-    /**
-     * Records written before 2026-11-16 still hold a `deadlineAt`. It is not a deadline any more:
-     * the field is only kept so old files load, and reading it as an expiry is exactly the
-     * behaviour that was removed. This asserts the *rule* is gone, not just the constant.
-     */
-    const overdue = { ...openQuestion, deadlineAt: NOW - 1 }
-    const findings = inspectTasks(
-      deps([task({ decision: overdue as never, decisions: [overdue] })], {
-        sessionWorking: () => false,
-      }),
-    )
-    expect(findings.map((f) => f.kind)).toEqual([])
   })
 
   it('resumes being watched once every question is answered', () => {

@@ -574,13 +574,6 @@ export interface TaskDecision {
   /** Why this reached the user. */
   reason: string;
   askedAt: number;
-  /**
-   * Absent — a question waits for the person it was asked of.
-   *
-   * Kept optional only because records written before 2026-11-16 carry a timestamp here; nothing
-   * reads it as a deadline any more. See the note beside the removed `DECISION_TIMEOUT_MS`.
-   */
-  deadlineAt?: number;
   /** The answers the asker enumerated. Absent means approve-or-stop. */
   options?: string[];
   /**

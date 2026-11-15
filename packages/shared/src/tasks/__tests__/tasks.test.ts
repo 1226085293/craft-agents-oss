@@ -347,7 +347,6 @@ describe('a pending decision cannot be answered by the executor', () => {
         label: '范围内的工作已完成',
         reason: '还剩 1.2 和 2 未授权',
         askedAt: 0,
-        deadlineAt: Date.now() + 60_000,
       },
     }) as never;
 

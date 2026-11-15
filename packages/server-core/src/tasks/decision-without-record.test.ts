@@ -194,7 +194,7 @@ describe('a pause with no question is not 「等你决定」', () => {
       handoffs: [],
       lifecycle: { errorCount: 0, consecutiveFailures: 0 },
       stats: { runs: 1, activeMs: 0 },
-      decision: { category: 'direction', label: '问过了', reason: '', askedAt: 1, deadlineAt: 2 },
+      decision: { category: 'direction', label: '问过了', reason: '', askedAt: 1},
     } as never
 
     const paused = applyTransition(withDecision, 'paused', { now: 10, pauseReason: 'needs_decision' })

@@ -892,10 +892,10 @@ export function nextCheckDelayMs(deps: WatchdogDeps, now = Date.now()): number {
     /**
      * An open question schedules nothing — the task waits for the person, however long that takes.
      *
-     * This used to fall through to `deadlineAt`, then to a wording grace. Neither exists now: a
-     * question is asked once and stays open, so there is no moment in the future when looking at it
-     * again would change anything. Skipping it keeps `NaN` out of the arithmetic (a `Math.min` with
-     * `undefined` poisons `soonest`, and the caller would sleep on `NaN` forever).
+     * A question is asked once and stays open, so there is no future moment when looking at it
+     * again would change anything — it schedules nothing. Skipping it also keeps `NaN` out of the
+     * arithmetic: `Math.min(Infinity, undefined)` poisons `soonest`, and `clampSleep` would then
+     * quietly cap every pass at 30 seconds instead of sleeping to the real deadline.
      */
     const decision = task.decision;
     if (decision && !decision.resolvedAt) continue

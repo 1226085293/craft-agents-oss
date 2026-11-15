@@ -132,7 +132,6 @@ export interface TaskDetailView {
     label?: string
     reason?: string
     askedAt?: number
-    deadlineAt?: number
     resolvedAt?: number
     options?: string[]
     /** The question as the relaying session asked it; `reason` keeps the diagnosis. */
@@ -152,7 +151,6 @@ export interface TaskDetailView {
     label?: string
     reason?: string
     askedAt?: number
-    deadlineAt?: number
     resolvedAt?: number
     options?: string[]
     question?: string

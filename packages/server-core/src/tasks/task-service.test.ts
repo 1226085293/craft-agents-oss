@@ -219,7 +219,8 @@ describe('handoff gate', () => {
      * queue length asserts.
      */
     expect(after?.decisions?.length ?? 1).toBe(1);
-    expect(after?.decision?.deadlineAt).toBe(before?.deadlineAt);
+    // Wording must not restamp the question: `askedAt` is the clock the waiting time is read from.
+    expect(after?.decision?.askedAt).toBe(before?.askedAt);
     expect(after?.decision?.category).toBe(before?.category);
   })
 

@@ -37,7 +37,7 @@ function task(over: Partial<Task> = {}): Task {
 describe('may this task run', () => {
   it('refuses while the question is still open', () => {
     const verdict = resumeDecisionFor(
-      task({ decision: { category: 'direction', label: '等你拍板', reason: 'x', askedAt: 1, deadlineAt: 2 } }),
+      task({ decision: { category: 'direction', label: '等你拍板', reason: 'x', askedAt: 1} }),
     )
 
     expect(verdict.allowed).toBe(false)
@@ -52,7 +52,6 @@ describe('may this task run', () => {
           label: 'x',
           reason: 'x',
           askedAt: 1,
-          deadlineAt: 2,
           resolvedAt: 3,
           answer: { text: '到此为止，结束任务', at: 4 },
         },
@@ -77,7 +76,6 @@ describe('may this task run', () => {
           label: 'x',
           reason: 'x',
           askedAt: 1,
-          deadlineAt: 2,
           resolvedAt: 3,
           answer: { text: '完成1.2后暂停', at: 4 },
         },
@@ -101,7 +99,6 @@ describe('may this task run', () => {
           label: 'x',
           reason: 'x',
           askedAt: 1,
-          deadlineAt: 2,
           resolvedAt: 3,
           answer: { text: '完成1.2后暂停', at: 4 },
         },
@@ -120,7 +117,6 @@ describe('may this task run', () => {
           label: 'x',
           reason: 'x',
           askedAt: 1,
-          deadlineAt: 2,
           resolvedAt: 3,
           answer: { text: '继续', at: 4 },
         },
@@ -141,7 +137,6 @@ describe('a question closed without an answer unlocks nothing on its own', () =>
     label: '是否放行大纲2？',
     reason: 'x',
     askedAt: 100,
-    deadlineAt: 200,
     resolvedAt: 150,
   }
 
@@ -193,7 +188,6 @@ describe('several questions in the queue', () => {
             label: 'Q1',
             reason: 'x',
             askedAt: 1,
-            deadlineAt: 2,
             resolvedAt: 3,
             answer: { text: '只做 1.2', at: 4 },
           },
@@ -202,7 +196,6 @@ describe('several questions in the queue', () => {
             label: 'Q2',
             reason: 'x',
             askedAt: 6,
-            deadlineAt: 7,
             resolvedAt: 9,
           },
         ],
@@ -211,7 +204,6 @@ describe('several questions in the queue', () => {
           label: 'Q2',
           reason: 'x',
           askedAt: 6,
-          deadlineAt: 7,
           resolvedAt: 9,
         },
       }),
@@ -229,7 +221,6 @@ describe('several questions in the queue', () => {
             label: '等你拍板',
             reason: 'x',
             askedAt: 1,
-            deadlineAt: 2,
           },
         ],
       }),

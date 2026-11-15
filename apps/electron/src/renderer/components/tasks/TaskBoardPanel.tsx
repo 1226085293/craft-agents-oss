@@ -166,7 +166,16 @@ const STATUS_ICON: Record<TaskStatus, React.ReactNode> = {
 const STATUS_LABEL: Record<TaskStatus, string> = {
   backlog: '待开始',
   running: '进行中',
-  paused: '等我拍板',
+  /**
+   * Only the fallback. A pause says why it paused — see `statusLabel`.
+   *
+   * This used to read 「等我拍板」 for every pause, so a task fused after three failed rounds,
+   * or one that ran out of budget, or whose process died, all announced that it was waiting for
+   * the reader to decide something. The detail panel said 「连续失败」 three lines below, and the
+   * board's own group for these tasks is 「已暂停」 with the hint 「失败、超预算或进程丢失」 —
+   * three answers to one question, and the heading was the wrong one.
+   */
+  paused: '已暂停',
   completed: '已完成',
   failed: '失败',
   canceled: '已取消',
@@ -199,6 +208,29 @@ export const PAUSE_REASON_LABEL: Record<string, string> = {
 
 export function pauseReasonLabel(reason: string): string {
   return PAUSE_REASON_LABEL[reason] ?? reason
+}
+
+/**
+ * What the status badge says, given the reason behind it.
+ *
+ * A paused task is not one state. 「等我拍板」 is true only of the two reasons that actually ask a
+ * person something; the other five ask nothing of anyone — the work failed, the budget ran out,
+ * the process died, the plan was stopped on instruction, or nobody has been dispatched yet. The
+ * badge printed the asking wording for all of them, directly above a panel that named the real
+ * reason, so the screen contradicted itself.
+ *
+ * The board already draws these apart: 「等你拍板」 and 「等问句」 are their own groups, and
+ * everything else paused lands in 「已暂停」, hint 「失败、超预算或进程丢失」. This follows the
+ * same split, so a heading and the column it sits in cannot disagree.
+ *
+ * Reasons with no words of their own fall through to plain 「已暂停」 rather than printing an
+ * enum value at the reader.
+ */
+export function statusLabel(status: TaskStatus, pauseReason?: string | null): string {
+  if (status !== 'paused') return STATUS_LABEL[status]
+  if (pauseReason === 'needs_decision') return '等你拍板'
+  if (pauseReason === 'asking') return '等问句'
+  return STATUS_LABEL.paused
 }
 
 const GROUPS: Array<{
@@ -533,7 +565,7 @@ export function TaskBoardPanel({
                         <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[22px] text-[11.5px] text-muted-foreground">
                           <span className="font-mono">{task.id}</span>
                           <span aria-hidden="true">·</span>
-                          <span>{STATUS_LABEL[task.status]}</span>
+                          <span>{statusLabel(task.status, task.pauseReason)}</span>
                           <span aria-hidden="true">·</span>
                           <span>{formatAge(task.updatedAt)}</span>
                           {task.sessionCount > 0 ? (

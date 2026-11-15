@@ -114,7 +114,13 @@ describe('task board navigator presentation', () => {
 
     expect(html).toContain('进行中')
     expect(html).toContain('待开始')
-    expect(html).toContain('等我拍板')
+    /*
+     * The row used to say 「等我拍板」 — wait for *me* to call it — which is the wrong person and
+     * disagreed with the group heading drawn directly above it. A pause that asks now says what
+     * the group says.
+     */
+    expect(html).toContain('等你拍板')
+    expect(html).not.toContain('等我拍板')
     expect(html).toContain('已结束')
     expect(html).toContain('aria-label="进行中，1 项任务"')
     expect(html).toContain('aria-label="待开始，1 项任务"')
@@ -579,5 +585,52 @@ describe('acceptance verdict follows the plan (C2′)', () => {
 
     expect(html).toContain('>未通过</')
     expect(html).not.toContain('待终态判定')
+  })
+})
+
+describe('a pause is labelled by what stopped it', () => {
+  /*
+   * The badge read 「等我拍板」 for every pause, so a task fused after three failed rounds told the
+   * reader to decide something while the panel three lines down said 「连续失败」. Only two reasons
+   * actually ask a person anything.
+   */
+  const pausing = (pauseReason: string): TaskDetailView => ({ ...detail, pauseReason })
+
+  it('says the asking wording only when something is actually being asked', () => {
+    const deciding = renderDetail(pausing('needs_decision'))
+    expect(deciding).toContain('等你拍板')
+
+    const asking = renderDetail(pausing('asking'))
+    expect(asking).toContain('等问句')
+  })
+
+  it('does not claim to be waiting on the reader when nothing is being asked', () => {
+    for (const reason of ['failures', 'budget', 'process_lost', 'verify_exhausted', 'awaiting_dispatch', 'awaiting_release']) {
+      const html = renderDetail(pausing(reason))
+      expect(html).not.toContain('等我拍板')
+      expect(html).not.toContain('等你拍板')
+      expect(html).toContain('已暂停')
+    }
+  })
+
+  it('names the real reason next to the badge instead of contradicting it', () => {
+    const html = renderDetail(pausing('failures'))
+    // Both statements come from the same pause and must agree: the badge is generic, the panel is specific.
+    expect(html).toContain('已暂停')
+    expect(html).toContain('连续失败')
+    expect(html).not.toContain('等我拍板')
+  })
+
+  it('falls back to the plain word when a pause has no reason at all', () => {
+    const html = renderDetail({ ...detail, pauseReason: undefined })
+    expect(html).toContain('已暂停')
+  })
+
+  it('leaves the other statuses alone', () => {
+    const running = renderDetail({ ...detail, status: 'running', pauseReason: undefined })
+    expect(running).toContain('进行中')
+
+    const completed = renderDetail({ ...detail, status: 'completed', pauseReason: undefined })
+    expect(completed).toContain('已完成')
   })
 })

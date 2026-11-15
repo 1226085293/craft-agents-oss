@@ -34,7 +34,7 @@ import { planProgress } from '@craft-agent/shared/tasks/plan'
 import { describeCron } from '@craft-agent/shared/tasks/cron'
 import { sessionMetaMapAtom } from '@/atoms/sessions'
 import { agentLabelMap } from './agent-label'
-import { pauseReasonLabel } from './TaskBoardPanel'
+import { pauseReasonLabel, statusLabel } from './TaskBoardPanel'
 import type { TaskDetailView, TaskHandoffView, TaskStatus } from './TaskBoardPanel'
 import type { PlanJumpTarget } from '@/lib/plan-jump'
 
@@ -45,15 +45,6 @@ const STATUS_ICON: Record<TaskStatus, React.ReactNode> = {
   completed: <CheckCircle2 className="h-3.5 w-3.5" />,
   failed: <XCircle className="h-3.5 w-3.5" />,
   canceled: <XCircle className="h-3.5 w-3.5" />,
-}
-
-const STATUS_LABEL: Record<TaskStatus, string> = {
-  backlog: '待开始',
-  running: '进行中',
-  paused: '等我拍板',
-  completed: '已完成',
-  failed: '失败',
-  canceled: '已取消',
 }
 
 const STATUS_TONE: Record<TaskStatus, string> = {
@@ -635,7 +626,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
             */}
           <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="td-title text-foreground">{detail.name}</h1>
-            <StatusBadge status={detail.status} />
+            <StatusBadge status={detail.status} pauseReason={detail.pauseReason} />
             {awaitingRecovery ? (
               <span
                 className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-400"
@@ -1559,11 +1550,11 @@ function PlanSection({
   )
 }
 
-function StatusBadge({ status }: { status: TaskStatus }): React.JSX.Element {
+function StatusBadge({ status, pauseReason }: { status: TaskStatus; pauseReason?: string | null }): React.JSX.Element {
   return (
     <span className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium', STATUS_TONE[status])}>
       {STATUS_ICON[status]}
-      {STATUS_LABEL[status]}
+      {statusLabel(status, pauseReason)}
     </span>
   )
 }

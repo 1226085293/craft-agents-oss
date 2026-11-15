@@ -52,6 +52,11 @@ function classify(input: PluginStateInput): { kind: 'running' | 'waiting' | 'fai
   }
   if (state === 'running') return { kind: 'running' }
 
+  // Up and waiting for the person to sign in. Said plainly so the boot report
+  // does not file it under "has not started" — the process is running; what is
+  // missing is credentials, and the sign-in entry is the way to supply them.
+  if (state === 'needs_auth') return { kind: 'waiting', reason: '等待授权：尚未扫码登录' }
+
   const missing = input.missingConfig ?? []
   if (missing.length > 0) return { kind: 'waiting', reason: `等待配置：${missing.join('、')}` }
 

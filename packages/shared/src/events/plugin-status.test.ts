@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test'
 import {
   controlDepsUnauthorized,
+  listenerLiveForSignIn,
   pluginStatusReading,
   missingRequiredConfigValues,
   configSectionInitiallyOpen,
@@ -109,6 +110,36 @@ describe('pluginStatusReading', () => {
     expect(notReady.reason).toBe('not-ready')
     // Ready unknown (older payload shape) — trust the running state.
     expect(pluginStatusReading(input({ status: running })).tone).toBe('ok')
+  })
+
+  it('reads amber and actionable while the plugin waits for sign-in', () => {
+    // `needs_auth` is the state a plugin is in when it has no credentials yet.
+    // It must not read as broken: nothing is wrong, and this is the reading
+    // that accompanies a reachable sign-in entry.
+    const reading = pluginStatusReading(input({ status: { state: 'needs_auth', lastError: null } }))
+    expect(reading.tone).toBe('warn')
+    expect(reading.reason).toBe('needs-auth')
+    expect(reading.label).toBe('等待授权')
+  })
+
+  it('distinguishes needing sign-in from being unresponsive', () => {
+    // The two used to share one reading, which is why the sign-in entry was
+    // gated on a state a never-authorised plugin can never reach.
+    const needsAuth = pluginStatusReading(input({ status: { state: 'needs_auth', lastError: null } }))
+    const degraded = pluginStatusReading(input({ status: { state: 'degraded', lastError: null } }))
+    expect(needsAuth.reason).not.toBe(degraded.reason)
+    expect(needsAuth.label).not.toBe(degraded.label)
+  })
+
+  it('treats needs_auth as live enough to be handed a sign-in', () => {
+    expect(listenerLiveForSignIn('running')).toBe(true)
+    expect(listenerLiveForSignIn('needs_auth')).toBe(true)
+    // Nothing here has proven it can serve /auth/*.
+    expect(listenerLiveForSignIn('degraded')).toBe(false)
+    expect(listenerLiveForSignIn('starting')).toBe(false)
+    expect(listenerLiveForSignIn('stopped')).toBe(false)
+    expect(listenerLiveForSignIn('failed')).toBe(false)
+    expect(listenerLiveForSignIn(undefined)).toBe(false)
   })
 
   it('reads amber when the control service rejected the token (unauthorized)', () => {

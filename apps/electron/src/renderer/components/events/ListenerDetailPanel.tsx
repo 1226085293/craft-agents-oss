@@ -46,6 +46,7 @@ import type {
 } from '@craft-agent/shared/protocol/dto'
 import {
   configSectionInitiallyOpen,
+  listenerLiveForSignIn,
   missingRequiredConfigValues,
 } from '@craft-agent/shared/events/plugin-status'
 import { useTheme } from '@/context/ThemeContext'
@@ -639,7 +640,7 @@ export function ListenerDetailPanel({
         <ListenerAuthButton
           workspaceId={workspaceId}
           listenerId={listener.id}
-          running={listener.status.state === 'running'}
+          signInReady={listenerLiveForSignIn(listener.status.state)}
           onConnected={() => void load()}
         />
         <button

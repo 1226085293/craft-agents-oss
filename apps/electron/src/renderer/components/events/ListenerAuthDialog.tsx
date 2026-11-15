@@ -69,8 +69,13 @@ interface CallResult {
 export interface ListenerAuthControlProps {
   workspaceId: string
   listenerId: string
-  /** Plugin process is up — probing a stopped plugin only yields `not-running`. */
-  running: boolean
+  /**
+   * The plugin process is up and serving its control port, so a sign-in can be
+   * handed to it. Not the same as `state === 'running'`: a plugin with no
+   * credentials yet is up precisely so that it *can* be authorised, and that is
+   * the state this flag exists to express.
+   */
+  signInReady: boolean
   /** Called once a flow reaches `connected`, so the page can re-read the plugin. */
   onConnected?: () => void
 }
@@ -82,18 +87,18 @@ export interface ListenerAuthControlProps {
 export function ListenerAuthButton({
   workspaceId,
   listenerId,
-  running,
+  signInReady,
   onConnected,
 }: ListenerAuthControlProps): React.ReactElement | null {
   const [open, setOpen] = React.useState(false)
   const [supported, setSupported] = React.useState<boolean | null>(null)
   const [connected, setConnected] = React.useState(false)
 
-  // Probe once per (plugin, running) so a connected plugin shows「已连接」and a
+  // Probe once per (plugin, liveness) so a connected plugin shows「已连接」and a
   // plugin without a sign-in flow shows nothing at all.
   React.useEffect(() => {
     let cancelled = false
-    if (!running) {
+    if (!signInReady) {
       setConnected(false)
       return
     }
@@ -116,7 +121,7 @@ export function ListenerAuthButton({
     return () => {
       cancelled = true
     }
-  }, [workspaceId, listenerId, running])
+  }, [workspaceId, listenerId, signInReady])
 
   if (supported === false) return null
 
@@ -125,8 +130,8 @@ export function ListenerAuthButton({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        disabled={!running}
-        title={running ? '扫码授权' : '请先启用插件'}
+        disabled={!signInReady}
+        title={signInReady ? '扫码授权' : '请先启用插件'}
         className="h-7 px-2 shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent disabled:opacity-50"
       >
         {connected ? <Check className="h-3 w-3 text-primary" /> : <PlugZap className="h-3 w-3" />}
@@ -137,7 +142,7 @@ export function ListenerAuthButton({
         onOpenChange={setOpen}
         workspaceId={workspaceId}
         listenerId={listenerId}
-        running={running}
+        signInReady={signInReady}
         onConnected={() => {
           setConnected(true)
           onConnected?.()
@@ -152,7 +157,7 @@ function ListenerAuthDialog({
   onOpenChange,
   workspaceId,
   listenerId,
-  running,
+  signInReady,
   onConnected,
 }: ListenerAuthControlProps & {
   open: boolean
@@ -299,7 +304,7 @@ function ListenerAuthDialog({
         <DialogHeader>
           <DialogTitle className="text-sm">连接插件</DialogTitle>
           <DialogDescription className="text-[11px]">
-            {running ? '扫码过程由插件自己完成，Craft 只负责显示。' : '插件当前没有运行，请先启用。'}
+            {signInReady ? '扫码过程由插件自己完成，Craft 只负责显示。' : '插件当前没有运行，请先启用。'}
           </DialogDescription>
         </DialogHeader>
 

@@ -60,6 +60,7 @@ export interface PluginStatusReading {
     | 'missing-config'
     | 'missing-deps'
     | 'starting'
+    | 'needs-auth'
     | 'degraded'
     | 'not-ready'
     | 'unauthorized'
@@ -116,6 +117,12 @@ export function pluginStatusReading(input: PluginStatusInput): PluginStatusReadi
   if (state === 'starting') {
     return { tone: 'warn', label: '启动中', reason: 'starting' }
   }
+  // Up, serving, and waiting for the person to sign in. Deliberately not
+  // `degraded`: nothing is broken, and this reading is what keeps the sign-in
+  // entry reachable while there are no credentials yet.
+  if (state === 'needs_auth') {
+    return { tone: 'warn', label: '等待授权', reason: 'needs-auth' }
+  }
   if (state === 'degraded') {
     return { tone: 'warn', label: '已启动，但未上报健康', reason: 'degraded' }
   }
@@ -136,6 +143,22 @@ export function pluginStatusReading(input: PluginStatusInput): PluginStatusReadi
 
   // Green — running and ready (absent ready counts as ready).
   return { tone: 'ok', label: '运行中', reason: 'running' }
+}
+
+/**
+ * Can the person be handed a sign-in right now?
+ *
+ * The entry used to require `state === 'running'`, which deadlocked the one
+ * case it was most needed: with no credentials the plugin never reports
+ * health, so it was never `running` — the button was disabled exactly when a
+ * scan was the only way forward. "Process is up" is the real precondition,
+ * because `/auth/*` is served by the process, not by a connected adapter.
+ *
+ * `needs_auth` is included precisely because that is the not-yet-signed-in
+ * state; `degraded` is not, because nothing there has proven it can serve.
+ */
+export function listenerLiveForSignIn(state: string | undefined): boolean {
+  return state === 'running' || state === 'needs_auth'
 }
 
 /**

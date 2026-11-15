@@ -17,6 +17,7 @@ import { createLogger } from '@craft-agent/shared/utils';
 import { EventStore, type EventFilter, type EventMeta, type EventRecord } from '@craft-agent/shared/events/event-store.ts';
 import { EventIngestServer, type EventIngestAddress } from './ingest-server.ts';
 import { loadListeners, missingConfigKeys, setListenerConfig, setListenerEnabled, type LoadedListener, pluginReadiness } from './listener-registry.ts';
+import { readPluginAuth } from './plugin-auth.ts';
 import type { HostCommand } from './host-command-server.ts';
 import { buildStartupReport } from '@craft-agent/shared/events/startup-report.ts';
 import { ListenerSupervisor, type ListenerRuntimeStatus } from './listener-supervisor.ts';
@@ -124,6 +125,15 @@ export class EventService {
     this.supervisor = new ListenerSupervisor({
       envFor: (listenerId) => this.ingest.listenerEnv(listenerId),
       onStatus: (status) => this.options.onListenerStatus?.(status),
+      // Ask the plugin itself, rather than guessing from the absence of a
+      // health report. `readPluginAuth` answers `idle` for a plugin that is up
+      // but has no credentials — that is the plugin saying "I am ready to be
+      // handed a scan". `not-running` (no control.json, or a dead port) means
+      // the process is not serving, which is the ordinary degraded case.
+      awaitingAuth: async (listener) => {
+        const result = await readPluginAuth(listener.id, listener.dataDir);
+        return result.ok && typeof result.state?.phase === 'string';
+      },
     });
   }
 
@@ -424,7 +434,12 @@ export class EventService {
     );
     setListenerConfig(workspaceRoot, id, config);
 
-    const wasRunning = before ? this.supervisor.getStatus(id).state === 'running' : false;
+    // "Live" not "running": a plugin waiting for sign-in is a process that
+    // just received its credentials, and it must pick them up. Gating on
+    // `running` alone skipped exactly that restart, so the token landed on
+    // disk while the process kept the empty config it booted with.
+    const status = before ? this.supervisor.getStatus(id).state : undefined;
+    const wasRunning = status === 'running' || status === 'needs_auth';
     if (!before || !wasRunning) return null;
 
     const updated = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() }).find(

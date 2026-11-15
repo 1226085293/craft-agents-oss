@@ -1012,7 +1012,7 @@ export interface EventRecordDto extends EventMetaDto {
 /** Listener process state, mirrored to the renderer. */
 export interface ListenerStatusDto {
   id: string
-  state: 'stopped' | 'starting' | 'running' | 'degraded' | 'failed'
+  state: 'stopped' | 'starting' | 'running' | 'needs_auth' | 'degraded' | 'failed'
   pid: number | null
   startedAt: number | null
   attempts: number

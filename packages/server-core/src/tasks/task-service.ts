@@ -194,20 +194,6 @@ export function isSpinningInPlace(task: Task): boolean {
 export const ROTATE_CONTEXT_THRESHOLD = 0.7;
 
 /**
- * How long after an answer a question can still be that same question again.
- *
- * `answeredWithoutProgress` reads 「nothing has happened since the reply」 off timestamps, and that
- * is the right test for a supervisor re-asking in the same breath — the live case was 2 seconds
- * apart. It is not a statement about the rest of the task's life: a plan can sit unfinished for
- * hours behind a fuse or a spent budget, during which the answer to an older question says nothing
- * about the situation now.
- *
- * Ten minutes is generous for a confirmation loop and far shorter than any real gap between one
- * decision and the next — on T-1 the swallowed questions came 73 and 123 minutes after the reply.
- */
-export const REPEAT_QUESTION_WINDOW_MS = 10 * 60 * 1000;
-
-/**
  * How long a fired trigger holds the round before it expires.
  *
  * Longer than a supervisor turn by design (those run on a ~90 second budget), so a normal turn never
@@ -1324,32 +1310,15 @@ export class TaskService {
       .slice(0, 4);
 
     /**
-     * A question asked in the same breath as the last answer is the same question again.
+     * A question asked before the last answer was acted on is the same question again.
      *
      * Nothing in the wording separates 「是否继续？」 from a genuine follow-up, so the test is the
      * record: when the reply is the newest thing on the task and steps remain, nothing has happened
      * that a new question could be about. Reported live: answered at 06:08:59, asked again at
      * 06:09:01, and the reopen discarded the reply.
-     *
-     * That reading holds for a confirmation loop and not for the rest of a task's life. The test
-     * above has no time in it, so it also swallowed questions asked much later about situations the
-     * reply could not have covered — and the swallow is silent, which is the worst kind.
-     *
-     * Measured on T-1: answered 05:48:20 under a fuse that left the plan unfinished. The supervisor
-     * asked at 07:01:50 (budget nearly spent, one defect left) and at 07:51:53 (budget gone, work
-     * done, needs a real person). Both were treated as repeats of the 05:48 answer, both were
-     * dropped before anything was written, and the person saw two questions in the chat that the
-     * task page never showed. The answer to 05:48 was 「merge main first, then do ②③」 — it said
-     * nothing about a fuse or a spent budget, because neither had happened yet.
-     *
-     * A confirmation loop is seconds long. So the test is bounded by the same window the decision
-     * itself carries: a question is a repeat only while the previous answer is still the newest
-     * thing *and* recent enough that no work could plausibly sit between them.
      */
     if (!task.decision || task.decision.resolvedAt) {
-      const answeredAt = task.decision?.answer?.at ?? 0
-      const withinRepeatWindow = answeredAt > 0 && now - answeredAt <= REPEAT_QUESTION_WINDOW_MS
-      if (withinRepeatWindow && answeredWithoutProgress(task)) return task
+      if (answeredWithoutProgress(task)) return task
     }
 
     const all = allDecisions(task);

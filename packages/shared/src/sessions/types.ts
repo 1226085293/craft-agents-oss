@@ -58,7 +58,7 @@ export const SESSION_PERSISTENT_FIELDS = [
   // Multi-agent: role profile + its frozen snapshot, the session's role and
   // the task/lineage binding. Without these, a restart lost the persona, the
   // scope ceilings and the supervisor/worker distinction.
-  'agentId', 'agentSnapshot', 'role', 'supervisorLane', 'taskId', 'spawnDepth', 'taskScope',
+  'agentId', 'agentSnapshot', 'role', 'supervisorLane', 'taskId', 'taskPurpose', 'spawnDepth', 'taskScope',
   // Folder tree membership (workspace/project scoped folders)
   'folderId', 'archivedFolderId', 'archivedFolderPath', 'archivedProjectId', 'archivedByParent', 'sortOrder', 'pinnedAt',
 ] as const;
@@ -140,6 +140,21 @@ export interface SessionConfig {
   supervisorLane?: 'user' | 'task';
   /** Task this session works on (set when the supervisor delegated it). */
   taskId?: string;
+  /**
+   * What this session does for its task, when `taskId` is set.
+   *
+   * `role` cannot answer this: every session a task opens is a `worker`, so an acceptance session and
+   * a session that writes code look identical on the record. The board has to tell them apart — a
+   * task's session list labels each row — and the acceptance session has to be findable so the next
+   * hand-off reuses it instead of opening a thirteenth.
+   *
+   *   execute   does the work; dispatched by the supervisor
+   *   verify    judges a hand-off read-only; one per task, reused
+   *   section   picks which profile owns a section; scratch, archived when done
+   *
+   * Absent on records written before this existed; treat that as `execute`.
+   */
+  taskPurpose?: 'execute' | 'verify' | 'section';
   /**
    * Which slices of that task this session is responsible for.
    *

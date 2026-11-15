@@ -634,3 +634,41 @@ describe('a pause is labelled by what stopped it', () => {
     expect(completed).toContain('已完成')
   })
 })
+
+describe('the task page lists the conversations it opened', () => {
+  /*
+   * 「本轮会话 3 / 8」 says how many without saying which. Finding one meant leaving the page and
+   * searching a flat list where every row starts with the same task id.
+   */
+  const withSessions = (sessions: TaskDetailView['sessions']): TaskDetailView => ({ ...detail, sessions })
+
+  it('labels each row by what the conversation did', () => {
+    const html = renderDetail(withSessions([
+      { id: 's-work', name: 'T-1 摸底', purpose: 'execute', archived: false },
+      { id: 's-verify', name: 'T-1 验收', purpose: 'verify', archived: false },
+      { id: 's-pick', name: 'T-1 2 分工', purpose: 'section', archived: true },
+    ]))
+
+    expect(html).toContain('worker')
+    expect(html).toContain('验收')
+    expect(html).toContain('分工')
+    expect(html).toContain('T-1 摸底')
+    expect(html).toContain('T-1 验收')
+  })
+
+  it('shows a retired conversation as archived rather than hiding it', () => {
+    const html = renderDetail(withSessions([
+      { id: 's-old', name: 'T-1 旧会话', purpose: 'execute', archived: true },
+    ]))
+
+    // Still listed — it happened, and the transcript is still readable — but marked.
+    expect(html).toContain('T-1 旧会话')
+    expect(html).toContain('已归档')
+  })
+
+  it('has no section at all when the task never opened a session', () => {
+    const html = renderDetail({ ...detail, sessions: [] })
+
+    expect(html).not.toContain('task-sessions-heading')
+  })
+})

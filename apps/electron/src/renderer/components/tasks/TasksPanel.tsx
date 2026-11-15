@@ -16,14 +16,25 @@ import { TaskDetailPanelView } from './TaskDetailPanelView'
 import { resolvePlanJumps, type JournalLine, type PlanJumpTarget } from '@/lib/plan-jump'
 import { requestSessionJump } from '@/lib/session-jump'
 
-/** Detail payload from the RPC is `{ task, journal? }`. */
+/** Detail payload from the RPC is `{ task, journal?, sessions? }`. */
 function toDetail(raw: unknown): { detail: TaskDetailView; journal: JournalLine[] } | null {
   if (!raw || typeof raw !== 'object') return null
   const maybe = (raw as { task?: unknown }).task
   if (!maybe || typeof maybe !== 'object') return null
   const lines = (raw as { journal?: unknown }).journal
   const journal = Array.isArray(lines) ? (lines as JournalLine[]) : []
-  return { detail: maybe as TaskDetailView, journal }
+  /**
+   * The task's conversations ride on the detail, not on the task record.
+   *
+   * The record knows ids only; names and purposes live in each session's own metadata, which the
+   * handler reads for us. Attaching here keeps one shape for the page.
+   */
+  const sessions = (raw as { sessions?: unknown }).sessions
+  const detail = {
+    ...(maybe as TaskDetailView),
+    ...(Array.isArray(sessions) ? { sessions: sessions as TaskDetailView['sessions'] } : {}),
+  }
+  return { detail, journal }
 }
 
 export interface TasksPanelProps {

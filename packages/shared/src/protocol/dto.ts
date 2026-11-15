@@ -202,6 +202,13 @@ export interface CreateSessionOptions {
   /** Task this session works on, when created by the supervisor. */
   taskId?: string
   /**
+   * What this session does for its task; see `Session.taskPurpose`.
+   *
+   * `role` is `worker` for all of them, so without this the board cannot label a row 「验收」 and
+   * the next acceptance cannot find the conversation the last one used.
+   */
+  taskPurpose?: 'execute' | 'verify' | 'section'
+  /**
    * Which slices of that task this session is responsible for.
    *
    * Recorded so the dispatcher can answer 「这个会话负责到哪」 without reading prose, and so a

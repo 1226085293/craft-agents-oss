@@ -328,13 +328,20 @@ describe('terminal-only acceptance (C2′ + C4)', () => {
     expect(result.passed).toBe(true);
     const current = svc.get(task.id)!;
     /**
-     * The verdict is read off `stats.lastRound`, not off `verify`.
+     * The count survives the round; the verdict does not.
      *
-     * `verify.lastVerdict` and `verifyRounds` belong to the round that spent them: left on the record
-     * they read as 「this round already passed」, and a fourth round would start at the acceptance cap
-     * without a single judgement in it. So the round's acceptance is gone with the round.
+     * `verifyRounds` used to be cleared here too, on the reading that 「a round that spent three
+     * judgements should not start the next one at the cap」. That holds for a recurring task and
+     * fails for the case this file is about — a finished plan handed back to be judged again, where
+     * clearing meant the cap could never be reached at all (T-1: twelve acceptance sessions,
+     * `verifyRounds` never above 2).
+     *
+     * `lastVerdict` is a different question and keeps its old answer: it is what the page prints as
+     * 「验收：通过」, and a round nobody has judged yet must not inherit the previous round's opinion.
+     * The count says how many times this plan has been judged; the verdict says what the current
+     * round was judged to be.
      */
-    expect(current.verifyRounds).toBe(0);
+    expect(current.verifyRounds).toBe(1);
     expect(current.verify.lastVerdict).toBeUndefined();
     expect(current.stats?.lastRound?.round).toBe(1);
     expect(current.status).toBe('backlog');

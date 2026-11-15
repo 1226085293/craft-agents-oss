@@ -176,6 +176,7 @@ import {
   type SessionCommand,
   type SessionCommandResult,
   loadFolderConfig,
+  createFolder,
   deleteFolderConfig,
   getDescendantFolderIds,
   getFolderPath,
@@ -1435,6 +1436,13 @@ export interface ManagedSession {
   agentSnapshot?: AgentSnapshot
   /** 'supervisor' coordinates; 'worker' (default) does the work. */
   role?: 'supervisor' | 'worker'
+  /**
+   * What this session does for its task; mirrors `Session.taskPurpose`.
+   *
+   * Read when the task's acceptance session has to be found again (one per task, reused) and when
+   * the task page labels a row. Absent means `execute`.
+   */
+  taskPurpose?: 'execute' | 'verify' | 'section'
   /** Which supervisor conversation this is; see `Session.supervisorLane`. */
   supervisorLane?: 'user' | 'task'
   taskId?: string
@@ -5040,6 +5048,21 @@ export class SessionManager implements ISessionManager {
       }
     }
 
+    /**
+     * A session that belongs to a task is filed under that task.
+     *
+     * Workers and the acceptance session are opened by machinery, not by a person picking a folder,
+     * so nothing else in the flow would ever set one: the list then shows a task's eight worker
+     * conversations as eight unrelated rows next to everything else. The folder is the task id, so
+     * the group reads as the task it belongs to and opening it shows the whole run.
+     *
+     * An explicit `folderId` still wins — a caller that knows where it wants the session keeps the
+     * last word.
+     */
+    if (!resolvedFolderId && options?.taskId) {
+      resolvedFolderId = this.ensureTaskFolder(workspaceRootPath, options.taskId) ?? undefined
+    }
+
     // Use storage layer to create and persist the session
     // Freeze the agent at creation: later edits must not rewrite this
     // session's persona or re-open sources it was never granted.
@@ -5061,6 +5084,7 @@ export class SessionManager implements ISessionManager {
       role: options?.role,
       supervisorLane: options?.supervisorLane,
       taskId: options?.taskId,
+      taskPurpose: options?.taskPurpose,
       spawnDepth: options?.spawnDepth,
     })
 
@@ -7834,6 +7858,10 @@ ${request.prompt}`;
     const created = await this.createSession(workspaceId, {
       name: `${taskId} ${outlineId} 分工`,
       role: 'worker',
+      taskId,
+      // Scratch: it picks an owner and is archived. Marking it keeps it out of the task's session
+      // list, which is meant to show the conversations a person may want to open.
+      taskPurpose: 'section',
       hidden: true,
       permissionMode: 'safe',
     })
@@ -7886,17 +7914,47 @@ ${request.prompt}`;
     }
   }
 
+  /**
+   * The task's one acceptance session, opened on first use.
+   *
+   * It used to be a fresh session per hand-off, archived immediately after — twelve of them on T-1,
+   * four re-checking the same claim from scratch because each started with no context. Keeping one
+   * conversation per task gives the judge its own history: what it already verified and why it
+   * refused, instead of re-deriving it every time.
+   *
+   * Not hidden: a person watching a task run should be able to open the conversation that decided
+   * its verdicts. It is filed under the task's folder like every other session the task opens.
+   */
+  private async ensureTaskJudgeSession(
+    workspaceId: string,
+    task: import('@craft-agent/shared/tasks').Task,
+  ): Promise<{ id: string; created: boolean }> {
+    const existing = [...this.sessions.values()].find(
+      (candidate) =>
+        candidate.workspace.id === workspaceId &&
+        candidate.taskId === task.id &&
+        candidate.taskPurpose === 'verify' &&
+        !candidate.isArchived,
+    )
+    if (existing) return { id: existing.id, created: false }
+
+    const created = await this.createSession(workspaceId, {
+      name: `${task.id} 验收`,
+      role: 'worker',
+      taskId: task.id,
+      taskPurpose: 'verify',
+      permissionMode: 'safe',
+    })
+    return { id: created.id, created: true }
+  }
+
   private async judgeTaskHandoff(
     workspaceId: string,
     task: import('@craft-agent/shared/tasks').Task,
     handoff: import('@craft-agent/shared/tasks').Handoff,
   ): Promise<{ pass: boolean; reasons: string[] }> {
-    const created = await this.createSession(workspaceId, {
-      name: `${task.id} 验收`,
-      role: 'worker',
-      hidden: true,
-      permissionMode: 'safe',
-    })
+    const judge = await this.ensureTaskJudgeSession(workspaceId, task)
+    const created = { id: judge.id }
 
     await this.sendMessage(created.id, buildJudgePrompt(task, handoff))
 
@@ -7909,11 +7967,14 @@ ${request.prompt}`;
 
       return parseJudgeVerdict(typeof answer?.content === 'string' ? answer.content : '')
     } finally {
-      // The judge is scratch too, and unlike the section chooser it was never even
-      // cancelled — every acceptance pass left a 「T-N 验收」 session with a live
-      // subprocess behind it, and one per rejection on top of that.
+      /**
+       * The turn ends, the conversation stays.
+       *
+       * `cancelProcessing` is still right — a judge that ran out of tool calls mid-stream must not
+       * keep a subprocess alive behind a verdict already returned. Archiving it is not: the next
+       * hand-off needs this same conversation, and it is the record of why the task was refused.
+       */
       await this.cancelProcessing(created.id, true).catch(() => {})
-      await this.archiveSession(created.id).catch(() => {})
     }
   }
 
@@ -7990,6 +8051,26 @@ ${request.prompt}`;
           true,
         ).catch((error) => {
           sessionLog.warn('failed to archive a finished round worker', { sessionId, error })
+        })
+      },
+      /**
+       * A deleted task takes its folder with it.
+       *
+       * Every session the task opened was filed under a folder named for its id — deleting the
+       * record used to leave that folder behind holding worker conversations and the acceptance
+       * session, named after a task that no longer exists. Archiving the subtree is one motion for
+       * the whole group: out of the active list, still readable if someone goes looking.
+       *
+       * Best-effort: a folder that cannot be archived must not fail the deletion, because the
+       * record is already gone by the time this runs.
+       */
+      onTaskDeleted: (taskId) => {
+        const folder = loadFolderConfig(workspace.rootPath, { projectId: null }).folders.find(
+          (candidate) => candidate.name === taskId && !candidate.parentId && !candidate.archivedAt,
+        )
+        if (!folder) return
+        void this.archiveFolder(workspace.id, { projectId: null }, folder.id).catch((error) => {
+          sessionLog.warn(`failed to archive the folder of deleted task ${taskId}`, { error })
         })
       },
       onTaskTerminal: (task) => {
@@ -9765,6 +9846,35 @@ ${request.prompt}`;
 
   private folderScopeFor(managed: ManagedSession): FolderScope {
     return { projectId: managed.projectId ?? null }
+  }
+
+  /**
+   * The folder a task's conversations live in, created on first use.
+   *
+   * Every session a task opens — the workers it dispatches, the acceptance session that judges them
+   * — belongs to one task, and the session list is otherwise a flat stream of unrelated
+   * conversations. Filing them under the task id is what turns 「T-1」 into something a person can
+   * open: eight worker conversations and the one that graded them, together.
+   *
+   * Name is the task id, because that is what the board calls it and what a person searches for.
+   * Scoped to the workspace root (`projectId: null`): a task is not owned by a project, and its
+   * sessions must not disappear from the list when a project is collapsed.
+   *
+   * Returns null when the folder cannot be created or found — a session that lands outside its
+   * task's folder is a filing mistake, not a reason to fail the session.
+   */
+  private ensureTaskFolder(workspaceRootPath: string, taskId: string): string | null {
+    try {
+      const scope: FolderScope = { projectId: null }
+      const existing = loadFolderConfig(workspaceRootPath, scope).folders.find(
+        (folder) => folder.name === taskId && !folder.parentId && !folder.archivedAt,
+      )
+      if (existing) return existing.id
+      return createFolder(workspaceRootPath, scope, { name: taskId }).id
+    } catch (error) {
+      sessionLog.warn(`ensureTaskFolder: could not file ${taskId}'s sessions`, { taskId, error })
+      return null
+    }
   }
 
   private loadFoldersFor(managed: ManagedSession): FolderConfig[] {

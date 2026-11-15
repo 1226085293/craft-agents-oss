@@ -82,6 +82,20 @@ export interface TaskDetailView {
    * uses that one). Optional: records written before it existed fall back to `currentSessionId`.
    */
   roundSessionIds?: string[]
+  /**
+   * The conversations this task opened, newest last.
+   *
+   * Rendered under the summary cards so the page can answer 「这个任务都跑了哪些会话」 without making
+   * the reader search the session list. Names and purposes come from each session's metadata — the
+   * task record only holds ids.
+   */
+  sessions?: Array<{
+    id: string
+    name: string
+    /** `execute` does the work, `verify` grades it, `section` picks an owner (scratch). */
+    purpose: 'execute' | 'verify' | 'section'
+    archived: boolean
+  }>
   currentSessionId?: string
   handoffs: TaskHandoffView[]
   budget: { maxSessions: number; maxRuns: number; activeMinutes: number; deadline?: number | null }

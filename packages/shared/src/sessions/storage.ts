@@ -193,6 +193,8 @@ export async function createSession(
     role?: 'supervisor' | 'worker';
     supervisorLane?: 'user' | 'task';
     taskId?: string;
+    /** What this session does for its task; see `Session.taskPurpose`. */
+    taskPurpose?: 'execute' | 'verify' | 'section';
     /** Sections of that task this session is responsible for (reuse + hand-off gate read it). */
     taskScope?: { taskId: string; outlineId?: string; stepIds: string[] };
     spawnDepth?: number;
@@ -230,6 +232,7 @@ export async function createSession(
     role: options?.role,
     supervisorLane: options?.supervisorLane,
     taskId: options?.taskId,
+    taskPurpose: options?.taskPurpose,
     ...(options?.taskScope ? { taskScope: options.taskScope } : {}),
     spawnDepth: options?.spawnDepth,
     projectId: options?.projectId,

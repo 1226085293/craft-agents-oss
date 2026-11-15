@@ -126,12 +126,23 @@ export function resetRoundState(task: Task, options: RoundResetOptions): RoundRe
       lastHeartbeatAt: undefined,
     },
     /**
-     * The acceptance counter belongs to the round it was spent on.
+     * The acceptance counter is not reset here.
      *
-     * It used to survive, so a task whose round 1 was judged 3 times started round 4 already at the
-     * cap and paused for 「验收轮数耗尽」 without a single judgement in that round.
+     * It used to be, on the reading that 「round 2 was never judged, so it should not start at the
+     * cap」. That is true of a *recurring* task, where each round is a new piece of work. It is
+     * wrong for the thing `closeRound` is also used for: a one-off task that delivered, was judged
+     * and failed, and is being handed back to try again. Clearing the counter there threw away the
+     * only record of how many times the same finished plan had been judged, so `maxIterations`
+     * could never be reached.
+     *
+     * Measured on T-1: twelve verification sessions, `verifyRounds` never above 2, and the cap of 3
+     * never fired — because every `delivered` hand-off ran a reset that zeroed it. Four of those
+     * twelve re-checked the same claim.
+     *
+     * The caller that genuinely wants a fresh budget says so: `setAcceptance` resets it when the
+     * requirement itself changes, which is the one case where the previous judgements were about a
+     * different question.
      */
-    verifyRounds: 0,
     updatedAt: now,
   };
 

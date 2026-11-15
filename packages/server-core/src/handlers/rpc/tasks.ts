@@ -103,9 +103,37 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       const journal = includeJournal
         ? readJournal(requireWorkspace(workspaceId).rootPath, id)
         : undefined;
+      /**
+       * The conversations this task has had, with enough to render a row.
+       *
+       * Read from the record's `sessionIds` and then from each session's own metadata, rather than
+       * from the task: the record knows ids, not names or purposes. A session that cannot be read
+       * (deleted, or belonging to a workspace that is gone) is skipped — a broken row is worse than
+       * a missing one.
+       */
+      const manager = deps.sessionManager as unknown as {
+        getSession?: (sessionId: string) => Promise<{ id: string; name?: string; taskPurpose?: string; isArchived?: boolean } | null>
+      } | undefined
+      const sessions: Array<{ id: string; name: string; purpose: 'execute' | 'verify' | 'section'; archived: boolean }> = []
+      for (const sessionId of task.sessionIds ?? []) {
+        try {
+          const session = await manager?.getSession?.(sessionId)
+          if (!session) continue
+          sessions.push({
+            id: session.id,
+            name: session.name?.trim() || session.id,
+            // Absent on records written before the field existed; those are work sessions.
+            purpose: session.taskPurpose === 'verify' ? 'verify' : session.taskPurpose === 'section' ? 'section' : 'execute',
+            archived: session.isArchived === true,
+          })
+        } catch {
+          continue
+        }
+      }
       return {
         task: { ...task, willRetry: processLostRetryDue(task, Date.now(), 0) },
         journal,
+        sessions,
       };
     },
   );

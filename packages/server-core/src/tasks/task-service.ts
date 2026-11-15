@@ -157,6 +157,15 @@ export interface TaskServiceDeps {
    * the next dispatch opens a fresh one with only the round result to continue from.
    */
   onRoundEnd?: (taskId: string, sessionId: string) => void;
+  /**
+   * The task record is gone; the conversations it opened go with it.
+   *
+   * A task's sessions are filed under a folder named for the task id. Deleting the task used to
+   * leave that folder holding every worker conversation and the acceptance session, with nothing
+   * left to say what they were for — visible clutter that a person has to clean up by hand.
+   * Archiving the folder is the same motion as archiving the task: out of the way, still readable.
+   */
+  onTaskDeleted?: (taskId: string) => void;
   now?: () => number;
   /** Id generator (tests inject a stable one). */
   newId?: () => string;
@@ -339,6 +348,18 @@ export class TaskService {
     }
     deleteTask(this.root, id);
     log.info(`[tasks] deleted ${id}`);
+    /**
+     * The conversations outlive the record on purpose, but they no longer have a task to point at.
+     *
+     * They are filed under a folder named for this id, so archiving that folder is what keeps them
+     * out of the way while still readable — otherwise every deleted task leaves a group of
+     * conversations named after something that no longer exists.
+     */
+    try {
+      this.deps.onTaskDeleted?.(id);
+    } catch (error) {
+      log.warn(`[tasks] could not archive the sessions of ${id}`, { error: String(error) });
+    }
     return { ok: true };
   }
 

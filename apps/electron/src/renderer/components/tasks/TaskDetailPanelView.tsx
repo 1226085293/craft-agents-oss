@@ -5,6 +5,7 @@
 
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
+import { requestSessionJump } from '@/lib/session-jump'
 import {
   readDecisionAnswer,
   rememberDecisionAnswer,
@@ -1103,6 +1104,57 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         ) : null}
       </section>
 
+
+      {/*
+        * The task's conversations, under the numbers that count them.
+        *
+        * 「本轮会话 3 / 8」 says how many without saying which ones — opening them meant leaving the
+        * task page and searching a flat list for names that all look alike. Each row says what the
+        * conversation did and opens it.
+        *
+        * Faithful to the record rather than tidy: archived rows are shown as archived, and the
+        * acceptance conversation appears once because the task reuses it for every hand-off.
+        */}
+      {detail.sessions?.length ? (
+        <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-sessions-heading">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <h2 id="task-sessions-heading" className="text-sm font-semibold text-foreground">会话</h2>
+            <span className="td-meta text-muted-foreground">{detail.sessions.length} 个</span>
+          </div>
+          <ul className="flex flex-col gap-1">
+            {detail.sessions.map((session) => (
+              <li key={session.id} className="flex min-w-0 items-center gap-2">
+                <span
+                  className={cn(
+                    'shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium',
+                    session.purpose === 'verify'
+                      ? 'border-violet-500/30 bg-violet-500/10 text-violet-400'
+                      : session.purpose === 'section'
+                        ? 'border-border/60 bg-foreground/5 text-muted-foreground'
+                        : 'border-blue-500/30 bg-blue-500/10 text-blue-400',
+                  )}
+                >
+                  {session.purpose === 'verify' ? '验收' : session.purpose === 'section' ? '分工' : 'worker'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => requestSessionJump({ sessionId: session.id, at: 0 })}
+                  className={cn(
+                    'min-w-0 flex-1 truncate text-left text-[13px] hover:underline',
+                    session.archived ? 'text-muted-foreground' : 'text-foreground',
+                  )}
+                  title={session.id}
+                >
+                  {session.name}
+                </button>
+                {session.archived ? (
+                  <span className="shrink-0 text-[10px] text-muted-foreground">已归档</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {detail.lifecycle.lastError ? (
         <div className="flex items-start gap-3 rounded-lg border border-destructive/25 bg-destructive/5 p-3.5" role="alert">

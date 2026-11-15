@@ -434,7 +434,9 @@ describe('task detail presentation', () => {
       },
     })
 
-    const question = html.indexOf('task-decision-heading')
+    // The open card keeps its own heading now: the answered one moved below the plan and the two
+    // no longer share an anchor.
+    const question = html.indexOf('task-open-question-heading')
     const plan = html.indexOf('task-plan-heading')
 
     expect(question).toBeGreaterThan(-1)
@@ -743,16 +745,23 @@ describe('answered questions fold away, open ones never do', () => {
 
     expect(html).toContain('已答复')
     // The body is present but hidden — the record stays on the page, just out of the way.
-    expect(html).toContain('hidden')
+    expect(html).toMatch(/id="task-answered-body" hidden/)
     expect(html).toMatch(/aria-expanded="false"/)
   })
 
-  it('stays open while a question is still waiting for a person', () => {
+  it('shows the open question even though the answered card is folded', () => {
+    /**
+     * The two are separate sections now, so a fold in one cannot hide the other. The open card is
+     * what the reader has to act on; the answered card being closed is the normal state, not a
+     * signal that nothing is owed.
+     */
     const html = renderDetail(stillAsking)
 
     expect(html).toContain('等你拍板')
-    expect(html).not.toMatch(/aria-expanded="false"/)
     expect(html).toContain('还没答的问题？')
+    // The answered card is present and folded; the open one is not folded.
+    expect(html).toMatch(/id="task-answered-body" hidden/)
+    expect(html).toMatch(/id="task-open-question-body"(?! hidden)/)
   })
 
   it('offers the fold as a button with a chevron, not a separate control', () => {
@@ -760,6 +769,52 @@ describe('answered questions fold away, open ones never do', () => {
 
     // The heading is the control: a 「展开」 button beside a heading that already names the thing
     // would be two controls for one action.
-    expect(html).toContain('aria-controls="task-decision-body"')
+    expect(html).toContain('aria-controls="task-answered-body"')
+  })
+})
+
+describe('the two question cards read in the order a person can act', () => {
+  /*
+   * What is still being asked sits above the plan; what was decided sits below it. The page is
+   * ordered by what the reader can do: the question needs them, the plan says what is happening, the
+   * answered cards are the record of how it got here.
+   */
+  const both: TaskDetailView = {
+    ...detail,
+    pauseReason: 'needs_decision',
+    spec: { plan: [{ id: '1', title: '写文件', status: 'doing' }] },
+    decisions: [
+      { id: 'd-open', askedAt: Date.now(), question: '还没答的问题？' },
+      { id: 'd-closed', askedAt: Date.now() - 60_000, question: '已经答过的问题？', resolvedAt: Date.now() - 30_000, answer: { text: '好', at: Date.now() - 30_000 } },
+    ],
+  }
+
+  it('puts the open card above the plan and the answered card below it', () => {
+    const html = renderDetail(both)
+    const open = html.indexOf('task-open-question-heading')
+    const plan = html.indexOf('task-plan-heading')
+    const answered = html.indexOf('task-answered-heading')
+
+    expect(open).toBeGreaterThan(-1)
+    expect(plan).toBeGreaterThan(-1)
+    expect(answered).toBeGreaterThan(-1)
+    expect(open).toBeLessThan(plan)
+    expect(plan).toBeLessThan(answered)
+  })
+
+  it('never shows the same question in both cards', () => {
+    const html = renderDetail(both)
+
+    // The open one belongs to the open card alone, the closed one to the answered card alone.
+    expect(html.split('还没答的问题？').length - 1).toBe(1)
+    expect(html.split('已经答过的问题？').length - 1).toBe(1)
+  })
+
+  it('opens the question card by default and folds the answered one', () => {
+    const html = renderDetail(both)
+
+    // The card asking for a decision must be visible without a click.
+    expect(html).toMatch(/id="task-open-question-body"(?! hidden)/)
+    expect(html).toMatch(/id="task-answered-body" hidden/)
   })
 })

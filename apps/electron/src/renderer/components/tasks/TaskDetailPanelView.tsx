@@ -67,6 +67,56 @@ const HANDOFF_OUTCOME_LABEL: Record<TaskHandoffView['outcome'], string> = {
   needs_decision: '等待决定',
 }
 
+/**
+ * One question, as it appears in either card.
+ *
+ * Both cards show the same thing — the words, when they were asked, why a person is being asked,
+ * and the controls — because an answered question and an open one differ only in whether the
+ * controls still do anything. Extracted so the two cannot drift: the answered card used to be the
+ * only place a question was drawn, and duplicating this markup for the other one would have been a
+ * second copy to forget.
+ */
+function QuestionCard({
+  entry,
+  detail,
+  closed,
+  onApprove,
+  onCancel,
+  onAnswer,
+}: {
+  entry: { id?: string; question?: string; reason?: string; askedAt?: number; resolvedAt?: number; options?: string[]; answer?: { text: string; at: number } }
+  detail: TaskDetailView
+  closed: boolean
+  onApprove: () => void
+  onCancel: () => void
+  onAnswer?: (id: string, text: string, decisionId?: string) => void | Promise<void>
+}): React.JSX.Element {
+  return (
+    <div className={`rounded-lg bg-background/40 p-3${closed ? ' opacity-90' : ''}`}>
+      <div className="flex items-start gap-2">
+        <p className="td-body min-w-0 flex-1 whitespace-pre-wrap text-foreground/90">{entry.question}</p>
+        {/* When it was asked, in the corner of the question itself. */}
+        {entry.askedAt ? (
+          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground" title={formatTimestamp(entry.askedAt)}>
+            {formatAskTime(entry.askedAt)}
+          </span>
+        ) : null}
+      </div>
+      {/* The rule's diagnosis stays as a footnote: same question as the card in the conversation,
+          plus why a person is being asked at all. */}
+      {entry.reason?.trim() ? (
+        <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">{entry.reason}</p>
+      ) : null}
+      <TaskDecisionAnswer
+        detail={{ ...detail, decision: entry }}
+        onApprove={onApprove}
+        onCancel={onCancel}
+        onAnswer={onAnswer}
+      />
+    </div>
+  )
+}
+
 function formatTimestamp(ts: number): string {
   return new Intl.DateTimeFormat('zh-CN', {
     year: 'numeric',
@@ -432,7 +482,6 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
   const closedQuestions = askedQuestions
     .filter(isClosed)
     .sort((a, b) => (a.resolvedAt ?? 0) - (b.resolvedAt ?? 0))
-  const listedQuestions = [...openQuestions, ...closedQuestions]
 
   /**
    * Answered cards start folded.
@@ -445,8 +494,24 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
    * Seeded rather than synced with an effect, so the initial state is the answer for this render —
    * an effect would flash the body open for one frame before folding it.
    */
-  const [answersOpen, setAnswersOpen] = React.useState(openQuestions.length > 0)
-  const answersCollapsed = openQuestions.length === 0 && !answersOpen
+  /**
+   * The open card folds too, but starts open.
+   *
+   * Different default from the answered one on purpose: this card is asking the reader for
+   * something, so it must be visible without a click. The fold exists because a task can hold
+   * several at once and someone who has read them should be able to clear the page.
+   */
+  const [openOpen, setOpenOpen] = React.useState(true)
+  /**
+   * Always starts folded.
+   *
+   * Seeded `false`, not `openQuestions.length === 0`. While the two kinds shared one card the fold
+   * had to track whether anything was still owed; now they are separate sections and this one only
+   * ever holds answers, so there is nothing it could be waiting on. The count in the heading is what
+   * says they are there.
+   */
+  const [answersOpen, setAnswersOpen] = React.useState(false)
+  const answersCollapsed = !answersOpen
 
 
   const { t } = useTranslation()
@@ -896,156 +961,99 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
       </section>
 
       {/*
-        The question sits directly under the instruction, above the plan.
+        The open question sits directly under the instruction, above the plan.
 
         It used to come after the plan, the contract and four metric cards, so on a task that was
         waiting for an answer the reader had to scroll past everything already decided to reach the
-        one thing that needed them. This page is ordered by what a person can act on: what was
-        asked, then what is planned, then the record of what happened.
+        one thing that needed them. This page is ordered by what a person can act on: what is still
+        being asked, then the state of the task, then the record of what was decided.
 
-        The card mirrors the conversation card — same words, same options, same moment. It used to
-        build its own text from the rule that detected the situation, so it appeared at handoff time
-        with a sentence nobody had asked, then changed underneath the reader once the relay put the
-        real question in the conversation. Two renderings of one decision disagreeing about both
-        content and timing. So it draws nothing until the relay has actually asked: `question` is
-        written by `setDecisionWording` from the same payload the conversation card is built from.
-        Before that the task is paused and waiting, which is what the banner below says.
+        Only unanswered questions draw here. Answered ones are the record — they belong at the
+        bottom, with everything else that already happened, and they fold away by default. The card
+        still mirrors the conversation card (same words, options and moment); it draws nothing until
+        the relay has actually asked, because `question` is written by `setDecisionWording` from the
+        same payload the conversation card is built from.
       */}
-      {
-        listedQuestions.length ? (
-          /**
-           * Every question this task has asked: the open ones first, the answered ones after.
-           *
-           * Answered cards are not a leftover — they are the record of what the person decided,
-           * and the reason the task is where it is. Hiding them made the page look as if the
-           * questions had never existed, and left no way to check what had been agreed.
-           */
-          <section
-            className={
-              openQuestions.length
-                ? 'rounded-xl border border-amber-500/35 bg-amber-500/8 p-4 md:p-5'
-                : 'rounded-xl border border-border/60 bg-muted/20 p-4 md:p-5'
-            }
-            aria-labelledby="task-decision-heading"
-          >
-            <div className="flex items-start gap-3">
-              {openQuestions.length ? (
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
-              ) : (
-                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-              )}
-              <div className="min-w-0 flex-1">
-                <h2
-                  id="task-decision-heading"
-                  className={openQuestions.length ? 'text-xs font-semibold text-amber-300' : 'text-xs font-semibold text-foreground/70'}
+      {openQuestions.length ? (
+        <section
+          className="rounded-xl border border-amber-500/35 bg-amber-500/8 p-4 md:p-5"
+          aria-labelledby="task-open-question-heading"
+        >
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+            <div className="min-w-0 flex-1">
+              {/*
+                * Folds, but starts open.
+                *
+                * The default differs from the answered card on purpose: this one is asking the
+                * reader for something, so it has to be visible without a click. The fold is here
+                * because a task can hold several at once, and the reader who has already read them
+                * should be able to get them out of the way.
+                */}
+              <h2 id="task-open-question-heading" className="text-xs font-semibold text-amber-300">
+                <button
+                  type="button"
+                  onClick={() => setOpenOpen((open) => !open)}
+                  aria-expanded={openOpen}
+                  aria-controls="task-open-question-body"
+                  className="inline-flex items-center gap-1 text-left transition-colors hover:text-amber-100"
                 >
-                  {openQuestions.length ? (
-                    `等你拍板${openQuestions.length > 1 ? `（${openQuestions.length} 个问题）` : ''}`
-                  ) : (
-                    /**
-                     * The heading is the fold control once nothing is owed.
-                     *
-                     * A separate 「展开」 button beside a heading that already names the thing is two
-                     * controls for one action; the title is the obvious target and the chevron says
-                     * which way it goes.
-                     */
-                    <button
-                      type="button"
-                      onClick={() => setAnswersOpen((open) => !open)}
-                      aria-expanded={!answersCollapsed}
-                      aria-controls="task-decision-body"
-                      className="inline-flex items-center gap-1 text-left transition-colors hover:text-foreground"
-                    >
-                      {answersCollapsed ? (
-                        <ChevronRight className="h-3 w-3" aria-hidden="true" />
-                      ) : (
-                        <ChevronDown className="h-3 w-3" aria-hidden="true" />
-                      )}
-                      已答复
-                      {closedQuestions.length > 1 ? `（${closedQuestions.length} 个问题）` : ''}
-                    </button>
-                  )}
-                </h2>
+                  {openOpen ? <ChevronDown className="h-3 w-3" aria-hidden="true" /> : <ChevronRight className="h-3 w-3" aria-hidden="true" />}
+                  等你拍板{openQuestions.length > 1 ? `（${openQuestions.length} 个问题）` : ''}
+                </button>
+              </h2>
+              <div id="task-open-question-body" hidden={!openOpen}>
                 {openQuestions.length > 1 ? (
                   <p className="mt-1 text-[11px] leading-relaxed text-amber-300/80">
                     全部答完才会一起交给督导，中途回答不会打断它。
                   </p>
                 ) : null}
-                <div id="task-decision-body" hidden={answersCollapsed} className="mt-2 space-y-3">
-                  {listedQuestions.map((entry, index) => (
-                    <div
+                <div className="mt-2 space-y-3">
+                  {openQuestions.map((entry, index) => (
+                    <QuestionCard
                       key={entry.id ?? `${entry.askedAt}-${index}`}
-                      className={`rounded-lg bg-background/40 p-3${isClosed(entry) ? ' opacity-90' : ''}`}
-                    >
-                      <div className="flex items-start gap-2">
-                        <p className="td-body min-w-0 flex-1 whitespace-pre-wrap text-foreground/90">{entry.question}</p>
-                        {/*
-                          * When this question was asked, in the corner of the question itself.
-                          *
-                          * A task can sit here for hours behind a fuse or a spent budget, and 「这个问句
-                          * 是什么时候的」 is what tells the reader whether the situation it describes is
-                          * still the current one. Shown per question because a task can be holding
-                          * several, asked at different times.
-                          */}
-                        {entry.askedAt ? (
-                          <span
-                            className="shrink-0 text-[11px] tabular-nums text-muted-foreground"
-                            title={formatTimestamp(entry.askedAt)}
-                          >
-                            {formatAskTime(entry.askedAt)}
-                          </span>
-                        ) : null}
-                      </div>
-                      {/* The rule's diagnosis stays as a footnote: same question as the card in
-                          the conversation, plus why a person is being asked at all. */}
-                      {entry.reason?.trim() ? (
-                        <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
-                          {entry.reason}
-                        </p>
-                      ) : null}
-                      <TaskDecisionAnswer
-                        detail={{ ...detail, decision: entry }}
-                        onApprove={() => (onRun ?? onResume)?.(detail.id)}
-                        onCancel={() => onCancel?.(detail.id)}
-                        onAnswer={onAnswer}
-                      />
-                    </div>
+                      entry={entry}
+                      detail={detail}
+                      closed={false}
+                      onApprove={() => (onRun ?? onResume)?.(detail.id)}
+                      onCancel={() => onCancel?.(detail.id)}
+                      onAnswer={onAnswer}
+                    />
                   ))}
                 </div>
-                {openQuestions.length ? (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      className="rounded-md border border-amber-500/40 px-2.5 py-1 text-[11.5px] text-amber-200 hover:bg-amber-500/10"
-                      onClick={() => onCancel?.(detail.id)}
-                    >
-                      结束任务
-                    </button>
-                  </div>
-                ) : null}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="rounded-md border border-amber-500/40 px-2.5 py-1 text-[11.5px] text-amber-200 hover:bg-amber-500/10"
+                    onClick={() => onCancel?.(detail.id)}
+                  >
+                    结束任务
+                  </button>
+                </div>
               </div>
             </div>
-          </section>
-        ) : detail.pauseReason === 'needs_decision' || detail.pauseReason === 'asking' ? (
-          /**
-           * Nothing has been asked yet — so say that, and say it does not need the reader.
-           *
-           * The old line was 「等待督导把问题转达给你，稍后会上来这里」. True, but it left the person
-           * unsure whether they were supposed to sit and watch. The state is unambiguous from the
-           * record: the task is paused for a question, and no question exists yet. That is
-           * 「督导正在整理要问你的内容」 — the only thing to do is go and do something else, and this
-           * page will change by itself when the question lands.
-           */
-          <div className="flex items-start gap-3 rounded-lg border border-border/60 bg-muted/30 p-3.5" role="status">
-            <Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-            <div className="min-w-0">
-              <div className="text-xs font-semibold text-foreground/80">等问句</div>
-              <p className="td-body mt-1 text-foreground/85">
-                督导正在整理要问你的内容，暂时不用你操作。问题写好后会出现在这里，也会出现在会话里。
-              </p>
-            </div>
           </div>
-        ) : null}
+        </section>
+      ) : detail.pauseReason === 'needs_decision' || detail.pauseReason === 'asking' ? (
+        /**
+         * Nothing has been asked yet — so say that, and say it does not need the reader.
+         *
+         * The old line was 「等待督导把问题转达给你，稍后会上来这里」. True, but it left the person
+         * unsure whether they were supposed to sit and watch. The state is unambiguous from the
+         * record: the task is paused for a question, and no question exists yet. That is
+         * 「督导正在整理要问你的内容」 — the only thing to do is go and do something else, and this
+         * page will change by itself when the question lands.
+         */
+        <div className="flex items-start gap-3 rounded-lg border border-border/60 bg-muted/30 p-3.5" role="status">
+          <Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-foreground/80">等问句</div>
+            <p className="td-body mt-1 text-foreground/85">
+              督导正在整理要问你的内容，暂时不用你操作。问题写好后会出现在这里，也会出现在会话里。
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       {/*
         * Above the plan, because a stop is what the reader needs first: why nothing is moving
@@ -1088,6 +1096,54 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         currentSessionId={detail.currentSessionId}
         onOpenSession={onOpenSession}
       />
+
+      {/*
+        * Answered questions, under the plan and folded by default.
+        *
+        * They are the record of what was decided — the reason the task is where it is — but nothing
+        * here needs the reader, so they belong with the rest of what already happened rather than
+        * above the plan competing with the question that does. Folded because a task that asked six
+        * questions pushed its plan and verdicts off the screen to show answers nobody was going to
+        * act on again; the heading keeps the count so it is clear they are there.
+        */}
+      {closedQuestions.length ? (
+        <section className="rounded-xl border border-border/60 bg-muted/20 p-4 md:p-5" aria-labelledby="task-answered-heading">
+          <div className="flex items-start gap-3">
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+            <div className="min-w-0 flex-1">
+              <h2 id="task-answered-heading" className="text-xs font-semibold text-foreground/70">
+                {/*
+                  * The heading is the fold control: a 「展开」 button beside a heading that already
+                  * names the thing would be two controls for one action.
+                  */}
+                <button
+                  type="button"
+                  onClick={() => setAnswersOpen((open) => !open)}
+                  aria-expanded={!answersCollapsed}
+                  aria-controls="task-answered-body"
+                  className="inline-flex items-center gap-1 text-left transition-colors hover:text-foreground"
+                >
+                  {answersCollapsed ? <ChevronRight className="h-3 w-3" aria-hidden="true" /> : <ChevronDown className="h-3 w-3" aria-hidden="true" />}
+                  已答复{closedQuestions.length > 1 ? `（${closedQuestions.length} 个问题）` : ''}
+                </button>
+              </h2>
+              <div id="task-answered-body" hidden={answersCollapsed} className="mt-2 space-y-3">
+                {closedQuestions.map((entry, index) => (
+                  <QuestionCard
+                    key={entry.id ?? `${entry.askedAt}-${index}`}
+                    entry={entry}
+                    detail={detail}
+                    closed
+                    onApprove={() => (onRun ?? onResume)?.(detail.id)}
+                    onCancel={() => onCancel?.(detail.id)}
+                    onAnswer={onAnswer}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : null}
 
       {(detail.spec?.cwd || detail.spec?.sources?.length || detail.spec?.deliverables?.length || detail.spec?.acceptance?.length) ? (
         <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-contract-heading">

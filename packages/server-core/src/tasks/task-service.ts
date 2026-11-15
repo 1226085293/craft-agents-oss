@@ -2529,7 +2529,24 @@ export class TaskService {
       // The gate's verdict travels with the attempt: `handoffs` is the log, `passed` is
       // what makes 「filed a report」 different from 「tried and was refused」.
       handoffs: [...keptHandoffs, { ...handoff, passed: accepted, round: roundInProgress }],
-      stats: { ...(task.stats ?? { runs: 1, activeMs: 0 }), handoffsRound: roundInProgress },
+      stats: {
+        ...(task.stats ?? { runs: 1, activeMs: 0 }),
+        handoffsRound: roundInProgress,
+        /**
+         * The stamp goes on when the report arrives, not when the round closes.
+         *
+         * `resetRoundState` was the only writer, so between 「hand-off accepted」 and the round
+         * actually closing this field was still empty — and the watchdog asks exactly that
+         * question in that window. Live 2026-11-15 on T-2: 「Handoff accepted.」 at 16:40:44, and
+         * the same second the worker was told 「no hand-off record arrived」, re-woken with a fresh
+         * hand-off brief, and this repeated three times. `hasFiledThisRun` needs the stamp to
+         * line up with the run it belongs to, and `runStartedAt` is the claim — which always
+         * precedes the report.
+         */
+        ...(accepted
+          ? { lastHandoffAt: now, lastHandoffSessionId: handoff.fromSessionId }
+          : {}),
+      },
       updatedAt: now,
       lifecycle: recordRunResult(task.lifecycle, accepted, now, accepted ? undefined : reasons.join('; ')),
       // Intermediate hand-offs do not touch the verdict: 「验收：通过」 may not

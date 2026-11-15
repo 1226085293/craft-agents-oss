@@ -269,6 +269,23 @@ function hasFiledThisRun(task: Task): boolean {
   ) {
     return true;
   }
+  /**
+   * A stamp from this run is a report, whoever is `currentSessionId` now.
+   *
+   * The check above is about 「the session I am looking at reported」, which is the right question
+   * for a nudge addressed to that session. This one is about "is there anything to nudge at all" —
+   * and when the stamp is newer than the run's own claim, the answer is no regardless of what
+   * `currentSessionId` has been rewritten to. Live 2026-11-15 on T-2: the worker handed off at
+   * 16:40:44 and `currentSessionId` had already moved to another session, so both checks above
+   * missed and the same worker was re-woken with the same brief three times.
+   */
+  if (
+    typeof task.stats?.lastHandoffAt === 'number' &&
+    typeof runStartedAt === 'number' &&
+    task.stats.lastHandoffAt >= runStartedAt
+  ) {
+    return true;
+  }
   return task.handoffs.some(
     (handoff) =>
       handoff.outcome !== 'needs_decision' &&

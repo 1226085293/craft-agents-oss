@@ -728,3 +728,71 @@ describe('a task with an open question', () => {
     expect(findings.length).toBeGreaterThan(0)
   })
 })
+
+describe('a hand-off that was accepted is not re-asked for', () => {
+  /**
+   * Live 2026-11-15 on T-2: `Handoff accepted.` at 16:40:44, and the same second the worker was
+   * told 「no hand-off record arrived」 — three times in a row, each wake handing it the identical
+   * 「## Hand-off context」 brief. The stamp only existed if the round had closed, and the round
+   * had not: the worker had reported, `currentSessionId` had already moved, and both guards in
+   * `hasFiledThisRun` compared against a session that was no longer the reporter.
+   */
+  const handoffAt = NOW - 5_000
+  const quiet = { sessionWorking: () => false }
+
+  it('does not ask again when the stamp belongs to this run, even if currentSessionId moved on', () => {
+    const findings = inspectTasks(deps([
+      task({
+        // Long enough ago that the stopped-grace window is not what keeps it quiet.
+        updatedAt: NOW - 20 * 60_000,
+        stats: {
+          runs: 1,
+          activeMs: 0,
+          lastHeartbeatAt: handoffAt,
+          runStartedAt: NOW - 60_000,
+          lastHandoffAt: handoffAt,
+          lastHandoffSessionId: 'sess-reporter',
+        },
+        currentSessionId: 'sess-somebody-else',
+        handoffs: [
+          {
+            at: handoffAt,
+            fromSessionId: 'sess-reporter',
+            summary: 'did the work',
+            outcome: 'handoff',
+            passed: true,
+          },
+        ],
+      }),
+    ], quiet))
+
+    expect(findings.filter((finding) => finding.kind === 'unreported')).toHaveLength(0)
+  })
+
+  it('still asks when the stamp predates this run', () => {
+    const findings = inspectTasks(deps([
+      task({
+        updatedAt: NOW - 20 * 60_000,
+        // An unfinished plan: the nudge fires on 「this run owes a report」, not 「the plan is done」.
+        spec: { plan: [{ id: '1', title: 'a', status: 'done' }, { id: '2', title: 'b', status: 'todo' }] },
+        stats: {
+          runs: 2,
+          activeMs: 0,
+          /**
+           * Worked, stopped, and stopped a while ago.
+           *
+           * Heartbeat is after the claim (so the short 5 s 「worked then stopped」 grace applies)
+           * and far enough before `now` to clear it. The report it owes is the point of the test;
+           * the timings only have to let the rule look at it.
+           */
+          lastHeartbeatAt: NOW - 60_000,
+          runStartedAt: NOW - 600_000,
+          lastHandoffAt: NOW - 900_000,
+          lastHandoffSessionId: 'sess-1',
+        },
+      }),
+    ], quiet))
+
+    expect(findings.filter((finding) => finding.kind === 'unreported')).toHaveLength(1)
+  })
+})

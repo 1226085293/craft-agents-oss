@@ -112,10 +112,11 @@ const UPSTREAM_PROBE_TIMEOUT_MS = 20_000;
 /**
  * Token budget for the recovery probe.
  *
- * Sized for a reasoning model: enough to think and still emit a visible answer. Smaller budgets
- * produce an empty `content` on such models, which reads as 「the upstream is still broken」.
+ * One visible token is the whole ask. Kept at a small but non-zero value rather than 1 so that a
+ * provider which ignores `reasoning_effort: 'off'` still has room to think *and* answer — the
+ * measurement above is one provider's behaviour, not a guarantee from all of them.
  */
-const PROBE_MAX_TOKENS = 64;
+const PROBE_MAX_TOKENS = 16;
 
 function visibleOutputTimeoutMs(): number {
   const raw = Number(process.env.CRAFT_GATEWAY_VISIBLE_OUTPUT_TIMEOUT_MS);
@@ -847,12 +848,20 @@ export class LlmGateway {
           model: publicModel,
           messages: [{ role: 'user', content: 'ok' }],
           /**
-           * Enough for a reasoning model to think *and* answer.
+           * Reasoning off, one token.
            *
-           * A probe is the cheapest request that still proves the route works, and one token does
-           * not prove it: the visible answer is what the gateway judges, and a reasoning model
-           * would spend the single token before producing any.
+           * A probe asks one question — 「does this route answer」 — and a reasoning model answers it
+           * twice over unless told not to: it thinks first, and with a small budget the thought
+           * consumes the whole budget, so `content` comes back empty and a working provider looks
+           * down. Measured 2026-11-15 on commandcode: `reasoning_effort: 'off'` with
+           * `max_tokens: 1` returned `content: 'OK'`; without it, the same request returned an
+           * empty `content` after spending its one token on reasoning.
+           *
+           * `off` is the value that provider accepts (it rejects `none`); a provider that does not
+           * know the field ignores it, which is harmless here — the budget below still leaves room
+           * for a short chain of thought.
            */
+          reasoning_effort: 'off',
           max_tokens: PROBE_MAX_TOKENS,
           stream: false,
         }),

@@ -2922,6 +2922,42 @@ interface MessageBubbleProps {
  * State is per card, keyed by nothing shared: two cards can be outstanding at once (two
  * tasks asking, or two questions from one turn) and answering one must not answer another.
  */
+/**
+ * When a question was sent, short enough for a header.
+ *
+ * Today shows the clock alone — the date is noise when the reader is looking at something from this
+ * afternoon — and anything older carries its date, because 「14:20」 on its own would be read as
+ * today by anyone scrolling a long transcript.
+ */
+function formatAskTime(ts: number | undefined): string {
+  if (!ts) return ''
+  const at = new Date(ts)
+  if (Number.isNaN(at.getTime())) return ''
+  const time = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(at)
+  const now = new Date()
+  const sameDay =
+    at.getFullYear() === now.getFullYear() && at.getMonth() === now.getMonth() && at.getDate() === now.getDate()
+  if (sameDay) return time
+  const date = new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit' }).format(at)
+  return `${date} ${time}`
+}
+
+/** The same moment with nothing abbreviated, for the row's tooltip. */
+function formatAbsoluteTime(ts: number | undefined): string {
+  if (!ts) return ''
+  const at = new Date(ts)
+  if (Number.isNaN(at.getTime())) return ''
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(at)
+}
+
 function DecisionRequestCard({
   request,
   workspaceId,
@@ -3018,6 +3054,17 @@ function DecisionRequestCard({
         <CircleAlert className="h-3 w-3 text-info" />
         <span>{request.askedByLabel} 发来的问句</span>
         {request.taskIdentifier ? <span className="normal-case tracking-normal">· {request.taskIdentifier}</span> : null}
+        {/*
+          When it was sent, in the corner of the row that says who sent it.
+
+          A question can sit unanswered for hours, and 「这个问句是什么时候的」 is what decides whether
+          the answer is still current — the reasoning it was asked about may have moved on. The time
+          belongs with the sender for the same reason the sender is there: both are facts about the
+          message, not about the question it asks.
+        */}
+        <span className="ml-auto normal-case tracking-normal tabular-nums" title={formatAbsoluteTime(askedAt)}>
+          {formatAskTime(askedAt)}
+        </span>
       </div>
 
       <div className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{request.question}</div>

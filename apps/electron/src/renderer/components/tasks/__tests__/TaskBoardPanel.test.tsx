@@ -672,3 +672,45 @@ describe('the task page lists the conversations it opened', () => {
     expect(html).not.toContain('task-sessions-heading')
   })
 })
+
+describe('a question carries the moment it was asked', () => {
+  /*
+   * A task can sit paused for hours behind a fuse or a spent budget, and 「这个问句是什么时候的」 is
+   * what tells the reader whether the situation it describes is still the current one.
+   */
+  const asked = (askedAt: number): TaskDetailView => ({
+    ...detail,
+    pauseReason: 'needs_decision',
+    decisions: [{ id: 'd-1', askedAt, question: '这件事还要继续吗？', label: '需要你决定', category: 'direction' }],
+  })
+
+  it('shows the clock for a question asked today', () => {
+    const today = new Date()
+    today.setHours(14, 20, 0, 0)
+    const html = renderDetail(asked(today.getTime()))
+
+    // Same-day questions show the time alone — the date is noise for this afternoon.
+    expect(html).toContain('14:20')
+  })
+
+  it('shows the date too once the question is older than today', () => {
+    const older = new Date()
+    older.setDate(older.getDate() - 2)
+    older.setHours(9, 5, 0, 0)
+    const html = renderDetail(asked(older.getTime()))
+
+    // 「09:05」 on its own would read as today to someone looking at a task paused since Tuesday.
+    const month = String(older.getMonth() + 1).padStart(2, '0')
+    const day = String(older.getDate()).padStart(2, '0')
+    expect(html).toContain(`${month}/${day}`)
+    expect(html).toContain('09:05')
+  })
+
+  it('puts the full moment in the tooltip', () => {
+    const at = new Date()
+    at.setHours(11, 30, 0, 0)
+    const html = renderDetail(asked(at.getTime()))
+
+    expect(html).toContain(String(at.getFullYear()))
+  })
+})

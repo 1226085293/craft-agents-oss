@@ -76,6 +76,25 @@ function formatTimestamp(ts: number): string {
   }).format(ts)
 }
 
+/**
+ * When a question was asked, short enough for a card corner.
+ *
+ * Today shows the clock alone — the date is noise for something from this afternoon — and anything
+ * older carries its date, because 「14:20」 by itself would be read as today by anyone looking at a
+ * task that has been paused since yesterday. `formatTimestamp` is the unabbreviated form, used as the
+ * tooltip so the full moment is always one hover away.
+ */
+function formatAskTime(ts: number): string {
+  const at = new Date(ts)
+  if (Number.isNaN(at.getTime())) return ''
+  const time = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(at)
+  const now = new Date()
+  const sameDay =
+    at.getFullYear() === now.getFullYear() && at.getMonth() === now.getMonth() && at.getDate() === now.getDate()
+  if (sameDay) return time
+  return `${new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit' }).format(at)} ${time}`
+}
+
 export interface TaskDetailPanelViewProps {
   detail: TaskDetailView
   onClose?: () => void
@@ -920,7 +939,25 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
                       key={entry.id ?? `${entry.askedAt}-${index}`}
                       className={`rounded-lg bg-background/40 p-3${isClosed(entry) ? ' opacity-90' : ''}`}
                     >
-                      <p className="td-body whitespace-pre-wrap text-foreground/90">{entry.question}</p>
+                      <div className="flex items-start gap-2">
+                        <p className="td-body min-w-0 flex-1 whitespace-pre-wrap text-foreground/90">{entry.question}</p>
+                        {/*
+                          * When this question was asked, in the corner of the question itself.
+                          *
+                          * A task can sit here for hours behind a fuse or a spent budget, and 「这个问句
+                          * 是什么时候的」 is what tells the reader whether the situation it describes is
+                          * still the current one. Shown per question because a task can be holding
+                          * several, asked at different times.
+                          */}
+                        {entry.askedAt ? (
+                          <span
+                            className="shrink-0 text-[11px] tabular-nums text-muted-foreground"
+                            title={formatTimestamp(entry.askedAt)}
+                          >
+                            {formatAskTime(entry.askedAt)}
+                          </span>
+                        ) : null}
+                      </div>
                       {/* The rule's diagnosis stays as a footnote: same question as the card in
                           the conversation, plus why a person is being asked at all. */}
                       {entry.reason?.trim() ? (

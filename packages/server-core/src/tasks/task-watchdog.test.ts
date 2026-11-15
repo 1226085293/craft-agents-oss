@@ -824,7 +824,7 @@ describe('a task parked on an unreachable provider', () => {
   })
 
   it('names the strategy groups its own sessions use, deduplicated', () => {
-    const findings = inspectTasks(deps([parked({ roundSessionIds: ['sess-1'] } as never)], {
+    const findings = inspectTasks(deps([parked()], {
       sessionWorking: () => false,
       strategiesOf: (_task, sessionIds) => {
         expect(sessionIds).toContain('sup')
@@ -837,15 +837,13 @@ describe('a task parked on an unreachable provider', () => {
   })
 
   /**
-   * The round's sessions, its supervisor, and its acceptance session — not the lifetime list.
+   * The flow is serial, so there is one holder and one answer.
    *
-   * `sessionIds` is 「every conversation this task ever used, never pruned」: a task that ran twenty
-   * rounds carries twenty dead ids there, none of which has a strategy to probe and any of which
-   * would block a resume forever. `roundSessionIds` is what the round is actually running on, and it
-   * can be several workers in turn. The acceptance session is in neither: it is created outside
-   * `startRun`, so the host is asked for it.
+   * `currentSessionId` follows the work: the worker while it runs, the supervisor once the slice is
+   * handed back, the acceptance session when it judges. Nothing to reconcile, and nothing stale —
+   * the lifetime list (`sessionIds`) would carry dead sessions that never have a strategy to probe.
    */
-  it('asks about the round, the supervisor and the acceptance session — not every session ever', () => {
+  it('asks about the current holder and the supervisor, and nothing else', () => {
     let asked: string[] = []
     inspectTasks(deps([
       parked({
@@ -855,14 +853,14 @@ describe('a task parked on an unreachable provider', () => {
       } as never),
     ], {
       sessionWorking: () => false,
-      verifierSessionIdOf: () => 'judge',
       strategiesOf: (_task, sessionIds) => {
         asked = sessionIds
         return ['commandcode']
       },
     }))
-    expect(asked).toEqual(['sup', 'worker-a', 'worker-b', 'judge'])
+    expect(asked).toEqual(['worker-b', 'sup'])
     expect(asked).not.toContain('ancient-1')
+    expect(asked).not.toContain('worker-a')
   })
 
   it('resumes only when every group the task needs answers', async () => {

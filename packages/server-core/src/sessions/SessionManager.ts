@@ -2381,17 +2381,14 @@ export class SessionManager implements ISessionManager {
   /**
    * Park every task this session works for, because the provider — not the task — is down.
    *
-   * The detail names the sessions and their groups, because recovery is decided per group and the
-   * reader needs to know what is being waited on: 「upstream策略组故障」 alone does not answer
-   * 「which group」 or 「why does my other task keep running」.
+   * No detail line: the reason is the whole message. 「上游策略组故障」 says what happened and what
+   * is being waited for, and the groups themselves are the probe's business — a list of session ids
+   * and group names on the card told the reader nothing they could act on.
    *
    * Best-effort by design: this runs while handling an error, and throwing here would replace a
    * provider outage with a bookkeeping crash.
    */
-  private parkTaskOnUpstreamOutage(
-    managed: ManagedSession,
-    error: { code?: string; title?: string },
-  ): void {
+  private parkTaskOnUpstreamOutage(managed: ManagedSession, error: { code?: string }): void {
     try {
       const taskId = managed.taskId
       if (!taskId) return
@@ -2401,18 +2398,7 @@ export class SessionManager implements ISessionManager {
       if (!task || task.status === 'completed' || task.status === 'canceled') return
       if (task.status === 'paused' && task.pauseReason === 'upstream') return
 
-      const parts: string[] = []
-      for (const sessionId of [task.supervisorSessionId, task.currentSessionId, ...(task.sessionIds ?? [])]) {
-        if (typeof sessionId !== 'string' || sessionId.length === 0) continue
-        const strategy = this.sessions.get(sessionId)?.strategy
-        const role = sessionId === task.supervisorSessionId ? '任务督导' : '任务会话'
-        parts.push(`${sessionId}（${role}，${strategy ?? '默认策略组'}）`)
-      }
-      const detail = [...new Set(parts)].join('、')
-      service.setStatus(taskId, 'paused', {
-        pauseReason: 'upstream',
-        error: `${error.code ?? 'service_error'}：${detail}`,
-      })
+      service.setStatus(taskId, 'paused', { pauseReason: 'upstream' })
       sessionLog.info('[tasks] parked on upstream outage', { taskId, code: error.code })
     } catch (parkError) {
       sessionLog.warn('[tasks] could not park on upstream outage', { error: parkError })
@@ -8379,27 +8365,6 @@ ${request.prompt}`;
          * A session that is gone contributes nothing: its group cannot be probed, and blocking on
          * it would park the task forever.
          */
-        /**
-         * The task's acceptance session, found the same way `ensureTaskJudgeSession` finds it.
-         *
-         * It matters for the probe because it is a real session with its own strategy group — it
-         * is created outside `startRun`, so it appears in neither `sessionIds` nor
-         * `roundSessionIds`, and a resume that ignored it would trip over a down group the moment
-         * the task reached acceptance.
-         */
-        verifierSessionIdOf: (task) => {
-          for (const candidate of this.sessions.values()) {
-            if (
-              candidate.workspace.id === workspaceId &&
-              candidate.taskId === task.id &&
-              candidate.taskPurpose === 'verify' &&
-              !candidate.isArchived
-            ) {
-              return candidate.id
-            }
-          }
-          return undefined
-        },
         strategiesOf: (_task, sessionIds) => {
           const ids: string[] = []
           for (const sessionId of sessionIds) {

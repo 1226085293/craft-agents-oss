@@ -20,6 +20,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'fs';
 import { join } from 'path';
@@ -58,12 +59,41 @@ function ensureDir(workspaceRoot: string): void {
   mkdirSync(getTasksDir(workspaceRoot), { recursive: true });
 }
 
-/** Write via a temp file + rename so a crash never leaves a half-written task. */
+/**
+ * Write via a temp file + rename so a crash never leaves a half-written task.
+ *
+ * The temp name is unique per write. With one shared name (`${path}.tmp`) two writers on the same
+ * task can interleave:
+ *
+ *     A: writeFileSync(T-1.json.tmp, A)         → holds A
+ *     B: writeFileSync(T-1.json.tmp, B)         → holds B, A's content is gone
+ *     A: renameSync(T-1.json.tmp → T-1.json)    → the task now holds B under A's rename
+ *     B: renameSync(T-1.json.tmp → T-1.json)    → the name is gone; this throws
+ *
+ * That interleaving needs two writers in flight at once — a single process cannot produce it,
+ * because JS runs each write to completion. A per-writer name removes the possibility outright and
+ * keeps the property the rename was for: the newest write still wins, but one writer's content can
+ * no longer land under another writer's rename.
+ *
+ * This is hardening, not a diagnosed fix. It was written while chasing a question that was written
+ * to a task and then found missing from it; that disappearance was never reproduced, and this
+ * change does not claim to explain it.
+ */
 function writeAtomic(path: string, content: string): void {
-  const tmp = `${path}.tmp`;
+  writeSeq += 1;
+  const tmp = `${path}.${process.pid}.${writeSeq}.tmp`;
   writeFileSync(tmp, content, 'utf-8');
-  renameSync(tmp, path);
+  try {
+    renameSync(tmp, path);
+  } catch (error) {
+    // Do not leave the scratch file behind when the rename loses a race.
+    try { unlinkSync(tmp); } catch { /* nothing left to clean */ }
+    throw error;
+  }
 }
+
+/** Distinguishes writes within one process; `process.pid` distinguishes processes. */
+let writeSeq = 0;
 
 export function loadTask(workspaceRoot: string, id: string): Task | null {
   const path = getTaskPath(workspaceRoot, id);

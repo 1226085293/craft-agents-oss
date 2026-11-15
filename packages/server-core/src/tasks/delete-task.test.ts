@@ -36,7 +36,7 @@ function seed(h: Harness): Task {
   const running: Task = {
     ...task,
     status: 'running',
-    currentSessionId: 'sess-1',
+    currentWorkerSessionId: 'sess-1',
     sessionIds: ['sess-1'],
   }
   saveTask(h.root, running)

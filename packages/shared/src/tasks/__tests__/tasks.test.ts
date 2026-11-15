@@ -262,7 +262,7 @@ describe('store', () => {
     const t = attachSession(task(), 'sess_a', 1);
     const again = attachSession(t, 'sess_a', 2);
     expect(again.sessionIds).toEqual(['sess_a']);
-    expect(again.currentSessionId).toBe('sess_a');
+    expect(again.currentWorkerSessionId).toBe('sess_a');
   });
 
   it('returns null for a missing or corrupt task file', () => {

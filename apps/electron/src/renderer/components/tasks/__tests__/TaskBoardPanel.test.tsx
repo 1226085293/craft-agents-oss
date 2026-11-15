@@ -11,7 +11,7 @@ const runningTask: TaskListItem = {
   status: 'running',
   priority: 2,
   updatedAt: Date.now() - 4 * 60_000,
-  currentSessionId: 'session-coral',
+  currentWorkerSessionId: 'session-coral',
   sessionCount: 2,
   lastHandoff: '列表布局已完成，正在补充交接时间线。',
 }
@@ -42,7 +42,7 @@ const detail: TaskDetailView = {
   status: 'paused',
   pauseReason: 'needs_decision',
   sessionIds: ['session-coral', 'session-indigo'],
-  currentSessionId: 'session-indigo',
+  currentWorkerSessionId: 'session-indigo',
   handoffs: [
     {
       at: Date.now() - 20 * 60_000,

@@ -1669,11 +1669,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   // This complements submit-time scrolling and covers cases where attachments delay
   // optimistic message insertion (e.g., thumbnail generation/resizing).
   React.useEffect(() => {
-    const currentSessionId = session?.id ?? null
+    const currentWorkerSessionId = session?.id ?? null
 
     // Reset baseline on session switch; defer to ScrollOnMount/session-switch logic.
-    if (prevSessionIdForCommitScrollRef.current !== currentSessionId) {
-      prevSessionIdForCommitScrollRef.current = currentSessionId
+    if (prevSessionIdForCommitScrollRef.current !== currentWorkerSessionId) {
+      prevSessionIdForCommitScrollRef.current = currentWorkerSessionId
       prevLastMessageIdRef.current = lastMessageId ?? null
       prevMessageCountRef.current = messageCount
       return

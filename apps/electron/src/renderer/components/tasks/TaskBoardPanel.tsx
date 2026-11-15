@@ -37,7 +37,7 @@ export interface TaskListItem {
   status: TaskStatus
   priority: number
   updatedAt: number
-  currentSessionId?: string
+  currentWorkerSessionId?: string
   sessionCount: number
   lastHandoff?: string
   pauseReason?: string | null
@@ -79,7 +79,7 @@ export interface TaskDetailView {
    * The sessions this round used — the list the budget counts and the round archives.
    *
    * Separate from `sessionIds`, which is every conversation the task has ever had (deleting a task
-   * uses that one). Optional: records written before it existed fall back to `currentSessionId`.
+   * uses that one). Optional: records written before it existed fall back to `currentWorkerSessionId`.
    */
   roundSessionIds?: string[]
   /**
@@ -96,7 +96,7 @@ export interface TaskDetailView {
     purpose: 'execute' | 'verify' | 'section'
     archived: boolean
   }>
-  currentSessionId?: string
+  currentWorkerSessionId?: string
   handoffs: TaskHandoffView[]
   budget: { maxSessions: number; maxRuns: number; activeMinutes: number; deadline?: number | null }
   verify: { enabled: boolean; requirement?: string; maxIterations: number; lastVerdict?: 'pass' | 'fail' }
@@ -565,10 +565,10 @@ export function TaskBoardPanel({
                             the difference between "this task is running" and
                             "let me see what it is doing right now".
                           */}
-                          {task.currentSessionId && onOpenSession ? (
+                          {task.currentWorkerSessionId && onOpenSession ? (
                             <button
                               type="button"
-                              onClick={() => onOpenSession(task.currentSessionId!)}
+                              onClick={() => onOpenSession(task.currentWorkerSessionId!)}
                               title="打开正在执行这个任务的会话"
                               className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                             >

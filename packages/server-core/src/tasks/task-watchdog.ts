@@ -292,19 +292,19 @@ function hasFiledThisRun(task: Task): boolean {
    */
   if (
     typeof task.stats?.lastHandoffAt === 'number' &&
-    task.stats.lastHandoffSessionId === task.currentSessionId &&
+    task.stats.lastHandoffSessionId === task.currentWorkerSessionId &&
     (!runStartedAt || task.stats.lastHandoffAt >= runStartedAt)
   ) {
     return true;
   }
   /**
-   * A stamp from this run is a report, whoever is `currentSessionId` now.
+   * A stamp from this run is a report, whoever is `currentWorkerSessionId` now.
    *
    * The check above is about 「the session I am looking at reported」, which is the right question
    * for a nudge addressed to that session. This one is about "is there anything to nudge at all" —
    * and when the stamp is newer than the run's own claim, the answer is no regardless of what
-   * `currentSessionId` has been rewritten to. Live 2026-11-15 on T-2: the worker handed off at
-   * 16:40:44 and `currentSessionId` had already moved to another session, so both checks above
+   * `currentWorkerSessionId` has been rewritten to. Live 2026-11-15 on T-2: the worker handed off at
+   * 16:40:44 and `currentWorkerSessionId` had already moved to another session, so both checks above
    * missed and the same worker was re-woken with the same brief three times.
    */
   if (
@@ -320,7 +320,7 @@ function hasFiledThisRun(task: Task): boolean {
       // An attempt the gate refused is not a report: the worker still owes one, and
       // treating it as filed is how a worker that gave up after a rejection went silent.
       handoff.passed !== false &&
-      handoff.fromSessionId === task.currentSessionId &&
+      handoff.fromSessionId === task.currentWorkerSessionId &&
       (!runStartedAt || handoff.at >= runStartedAt),
   );
 }
@@ -459,14 +459,22 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
       /**
        * One session: whoever is holding the task right now.
        *
-       * The flow is serial, and `currentSessionId` follows it — the worker while it works, the
-       * supervisor once the slice is handed back, the acceptance session when it judges. So the
-       * question 「is the provider back」 has one answer per task, and no list to reconcile.
+       * `currentStageSessionId` is the field that means that — the supervisor while it decides, a
+       * worker while it works, the acceptance session while it judges. The flow is serial, so the
+       * question 「is the provider back」 has one answer per task and nothing to reconcile.
        *
-       * When neither field is set there is nothing to probe, and the finding carries no strategy:
-       * `upstreamRecoveredFor` refuses an empty set rather than resuming on a guess.
+       * `currentWorkerSessionId` is the fallback for a record written before the split: it names
+       * the session the run started, which during acceptance is stale but is still a better answer
+       * than the supervisor's group alone.
        */
-      const sessionIds = [task.currentSessionId, task.supervisorSessionId].filter(
+      const holder = task.currentStageSessionId ?? task.currentWorkerSessionId
+      /**
+       * Deduplicated because the supervisor is often the holder.
+       *
+       * Once the baton goes back after a hand-off, `currentStageSessionId` *is* the supervisor —
+       * asking the same session twice would probe the same group twice for no information.
+       */
+      const sessionIds = [...new Set([holder, task.supervisorSessionId])].filter(
         (id): id is string => typeof id === 'string' && id.length > 0,
       )
       findings.push({
@@ -572,8 +580,8 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
     const awaitingAnswer = (task.decisions ?? []).some((entry) => !entry.resolvedAt)
     if (awaitingAnswer) continue;
 
-    const sessionAlive = task.currentSessionId
-      ? deps.sessionExists(task.currentSessionId)
+    const sessionAlive = task.currentWorkerSessionId
+      ? deps.sessionExists(task.currentWorkerSessionId)
       : false;
 
     if (!sessionAlive) {
@@ -597,10 +605,10 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
      * not filed a hand-off. Checking "any hand-off ever" would silence every later leg of a
      * task, because the earlier sessions' reports are still in the record.
      */
-    const waiting = task.currentSessionId ? deps.sessionWaiting?.(task.currentSessionId) === true : false
+    const waiting = task.currentWorkerSessionId ? deps.sessionWaiting?.(task.currentWorkerSessionId) === true : false
     const filedThisRun = hasFiledThisRun(task)
-    if (deps.sessionWorking && task.currentSessionId && !waiting && !filedThisRun) {
-      const working = deps.sessionWorking(task.currentSessionId)
+    if (deps.sessionWorking && task.currentWorkerSessionId && !waiting && !filedThisRun) {
+      const working = deps.sessionWorking(task.currentWorkerSessionId)
       if (working === false && now - lastActivityOf(task) >= stoppedGrace(task)) {
         findings.push({ kind: 'unreported', task })
         continue
@@ -620,8 +628,8 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
      * supervisor that then asked the person whether to continue on the strength of a
      * nudge to a session with nothing left to do.
      */
-    if (deps.sessionWorking && task.currentSessionId && !waiting && !filedThisRun) {
-      const working = deps.sessionWorking(task.currentSessionId);
+    if (deps.sessionWorking && task.currentWorkerSessionId && !waiting && !filedThisRun) {
+      const working = deps.sessionWorking(task.currentWorkerSessionId);
       if (working === false && now - lastActivityOf(task) >= IDLE_SESSION_MS) {
         findings.push({ kind: 'idle', task });
         continue;
@@ -859,7 +867,7 @@ export function applyFindings(
         acted += 1;
         break;
       case 'unreported': {
-        const sessionId = finding.task.currentSessionId
+        const sessionId = finding.task.currentWorkerSessionId
         /**
          * The same budget as 「idle」, because it is the same loop.
          *
@@ -899,7 +907,7 @@ export function applyFindings(
       }
       case 'idle': {
         const attempts = finding.task.stats?.wakeAttempts ?? 0;
-        const sessionId = finding.task.currentSessionId;
+        const sessionId = finding.task.currentWorkerSessionId;
         if (attempts >= MAX_IDLE_WAKES || !sessionId || !deps.wakeSession) {
           // Out of attempts (or nobody to wake with): stop pretending the task is
           // running. A task that says 进行中 while nothing is working on it is
@@ -1047,10 +1055,10 @@ export function nextCheckDelayMs(deps: WatchdogDeps, now = Date.now()): number {
     // A running task whose session is idle is due once the idle window elapses —
     // that is the whole point of noticing it, so waiting for the heartbeat or
     // stale windows would delay the only check that can recover it.
-    if (deps.sessionWorking && task.currentSessionId) {
+    if (deps.sessionWorking && task.currentWorkerSessionId) {
       // A session that is waiting on a background shell is not late for anything.
-      const waiting = deps.sessionWaiting?.(task.currentSessionId) === true;
-      const working = deps.sessionWorking(task.currentSessionId);
+      const waiting = deps.sessionWaiting?.(task.currentWorkerSessionId) === true;
+      const working = deps.sessionWorking(task.currentWorkerSessionId);
       if (working === false && !waiting) {
         // The deadline the matching rule uses, not the coarser one: scheduling the
         // earlier of the two would wake for a task that is not due yet.

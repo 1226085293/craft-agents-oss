@@ -37,7 +37,7 @@ function lostTask(over: Partial<Task> = {}): Task {
     updatedAt: now - 100_000,
     lastHeartbeatAt: now - 100_000,
     version: 1,
-    currentSessionId: 'ghost',
+    currentWorkerSessionId: 'ghost',
     stats: { runs: 1, activeMs: 0, lastHeartbeatAt: now - 100_000 },
     ...over,
   } as Task

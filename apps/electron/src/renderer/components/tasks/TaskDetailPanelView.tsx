@@ -696,9 +696,9 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
    * user as "会话中止了，一直没恢复" — it had not recovered *yet*, and nothing on screen
    * said it was waiting. A silent wait reads as a hang.
    */
-  const sessionMeta = detail.currentSessionId ? sessionMetas.get(detail.currentSessionId) : undefined
+  const sessionMeta = detail.currentWorkerSessionId ? sessionMetas.get(detail.currentWorkerSessionId) : undefined
   const awaitingRecovery =
-    detail.status === 'running' && Boolean(detail.currentSessionId) && sessionMeta?.isProcessing === false
+    detail.status === 'running' && Boolean(detail.currentWorkerSessionId) && sessionMeta?.isProcessing === false
   // Terminal-only acceptance (C2′): while the plan has open steps the verdict is
   // not decided yet — the judge runs only once the plan is complete. A task without
   // a plan has no intermediate states, so it keeps the plain labels.
@@ -1092,7 +1092,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         jumps={planJumps}
         onJump={onJumpToStep}
         agents={agents}
-        currentSessionId={detail.currentSessionId}
+        currentWorkerSessionId={detail.currentWorkerSessionId}
         onOpenSession={onOpenSession}
       />
 
@@ -1471,7 +1471,7 @@ function PlanSection({
   jumps,
   onJump,
   agents,
-  currentSessionId,
+  currentWorkerSessionId,
   onOpenSession,
 }: {
   plan?: { id: string; title: string; status: 'todo' | 'doing' | 'done' | 'blocked'; agent?: string; note?: string }[]
@@ -1480,7 +1480,7 @@ function PlanSection({
   /** Roster for owner names; see `agentLabelMap`. */
   agents?: ReadonlyArray<{ id: string; name: string }>
   /** The session currently carrying this task, shown in the heading's right corner. */
-  currentSessionId?: string
+  currentWorkerSessionId?: string
   onOpenSession?: (sessionId: string) => void
 }): React.JSX.Element {
   // Which outlines the user has folded. Seeded from the plan itself, then left
@@ -1580,14 +1580,14 @@ function PlanSection({
         <h2 id="task-plan-heading" className="td-heading text-foreground">
           执行计划<span className="ml-1 tabular-nums text-muted-foreground">（{done}/{leaves.length}）</span>
         </h2>
-        {currentSessionId ? (
+        {currentWorkerSessionId ? (
           <button
             type="button"
-            onClick={() => onOpenSession?.(currentSessionId)}
+            onClick={() => onOpenSession?.(currentWorkerSessionId)}
             title="打开这个会话"
             className="truncate text-xs text-muted-foreground underline decoration-border underline-offset-2 transition-colors hover:text-foreground"
           >
-            当前会话 · {currentSessionId}
+            当前会话 · {currentWorkerSessionId}
           </button>
         ) : null}
       </div>

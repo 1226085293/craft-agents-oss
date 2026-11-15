@@ -51,7 +51,7 @@ function harness(
         id: string;
         /** Read again at drain time: a task can be cancelled between queueing and starting. */
         status?: string;
-        currentSessionId?: string;
+        currentWorkerSessionId?: string;
         /** Sessions the task has run in; the reuse pool. */
         sessionIds?: string[];
         assigneeAgentId?: string;
@@ -292,7 +292,7 @@ describe('dispatch honours the task assignee', () => {
   });
 
   it('sends a follow-up to the existing session instead of re-spawning', async () => {
-    const tasks = new Map([['T-3', { id: 'T-3', currentSessionId: 'sess_worker_1', assigneeAgentId: 'agent-ui' }]]);
+    const tasks = new Map([['T-3', { id: 'T-3', currentWorkerSessionId: 'sess_worker_1', assigneeAgentId: 'agent-ui' }]]);
     const h = harness(workspace(), { tasks });
     h.sessions.set('sess_worker_1', { id: 'sess_worker_1', role: 'worker', spawnDepth: 1, isProcessing: false, taskId: 'T-3' });
     await h.runtime.dispatch({
@@ -365,7 +365,7 @@ describe('serial mode: one live run per task', () => {
         'T-6',
         {
           id: 'T-6',
-          currentSessionId: 'sess_worker_1',
+          currentWorkerSessionId: 'sess_worker_1',
           // A run in flight is the lock; the session object alone means nothing (see the
           // hand-off case below, where existence wrongly refused the next step).
           stats: { lockSessionId: 'sess_worker_1' },
@@ -404,7 +404,7 @@ describe('serial mode: one live run per task', () => {
         'T-7',
         {
           id: 'T-7',
-          currentSessionId: 'sess_worker_1',
+          currentWorkerSessionId: 'sess_worker_1',
           spec: { plan: [{ id: '2.1', status: 'todo', agent: 'agent-ui' }] },
         },
       ],
@@ -463,7 +463,7 @@ describe('serial mode: one live run per task', () => {
 
   it('refuses a dispatch while the run lock is held, instead of queueing a doomed spawn', async () => {
     const tasks = new Map([
-      ['T-10', { id: 'T-10', currentSessionId: 'sess-gone', stats: { lockSessionId: 'sess_live' } }],
+      ['T-10', { id: 'T-10', currentWorkerSessionId: 'sess-gone', stats: { lockSessionId: 'sess_live' } }],
     ]);
     const h = harness(workspace(), { tasks });
     await expect(
@@ -691,7 +691,7 @@ describe('the backlog is handed over on every wake path', () => {
 describe('dispatching into a task respects the session already running it', () => {
   it('sends into the live session instead of spawning a second worker', async () => {
     const tasks = new Map([
-      ['T-1', { id: 'T-1', currentSessionId: 'sess_live' }],
+      ['T-1', { id: 'T-1', currentWorkerSessionId: 'sess_live' }],
     ]);
     const h = harness(workspace(), { tasks });
     h.sessions.set('sess_live', {
@@ -719,7 +719,7 @@ describe('dispatching into a task respects the session already running it', () =
 
   it('starts a fresh run when the recorded session is gone', async () => {
     const tasks = new Map([
-      ['T-2', { id: 'T-2', currentSessionId: 'sess_dead' }],
+      ['T-2', { id: 'T-2', currentWorkerSessionId: 'sess_dead' }],
     ]);
     const h = harness(workspace(), { tasks });
     // sess_dead is deliberately absent from the live table.
@@ -744,7 +744,7 @@ describe('scope is a boundary', () => {
   const liveTask = (overrides: Record<string, unknown> = {}) => {
     const task = {
       id: 'T-1',
-      currentSessionId: 'sess_worker_1',
+      currentWorkerSessionId: 'sess_worker_1',
       assigneeAgentId: 'builtin-default',
       spec: {
         scope: '执行 1.1 步骤，做完即停',
@@ -840,7 +840,7 @@ describe('a paused task does not take new work', () => {
         {
           id: 'T-1',
           status: 'paused',
-          currentSessionId: 'sess_worker_1',
+          currentWorkerSessionId: 'sess_worker_1',
           assigneeAgentId: 'builtin-default',
           spec: { scope: '只做 1.1', plan: [{ id: '1', status: 'todo' }] },
           handoffs: [],
@@ -904,7 +904,7 @@ describe('a paused task does not take new work', () => {
     const h = harness(workspace(), {
       tasks: tasks({
         status: 'paused',
-        currentSessionId: 'sess_old',
+        currentWorkerSessionId: 'sess_old',
         stats: { lockSessionId: undefined },
         spec: {
           scope: '三条大纲',
@@ -949,7 +949,7 @@ describe('a paused task does not take new work', () => {
       tasks: tasks({
         status: 'paused',
         sessionIds: ['sess_default', 'sess_ui'],
-        currentSessionId: 'sess_ui',
+        currentWorkerSessionId: 'sess_ui',
         stats: { lockSessionId: undefined },
         spec: {
           plan: [
@@ -981,7 +981,7 @@ describe('a paused task does not take new work', () => {
       tasks: tasks({
         status: 'paused',
         sessionIds: ['sess_default', 'sess_ui'],
-        currentSessionId: 'sess_ui',
+        currentWorkerSessionId: 'sess_ui',
         stats: { lockSessionId: undefined },
         spec: {
           plan: [
@@ -1023,7 +1023,7 @@ describe('a paused task does not take new work', () => {
       tasks: tasks({
         status: 'paused',
         sessionIds: ['sess_default'],
-        currentSessionId: 'sess_default',
+        currentWorkerSessionId: 'sess_default',
         stats: { lockSessionId: undefined },
         spec: {
           plan: [
@@ -1063,7 +1063,7 @@ describe('a paused task does not take new work', () => {
       tasks: tasks({
         status: 'paused',
         sessionIds: ['sess_default', 'sess_ui'],
-        currentSessionId: 'sess_ui',
+        currentWorkerSessionId: 'sess_ui',
         stats: { lockSessionId: undefined },
         spec: {
           plan: [
@@ -1092,13 +1092,13 @@ describe('a paused task does not take new work', () => {
 
   it('reuses an idle session of the same agent for a later section', async () => {
     // T-1 (live, 05:36): 1.1 and 3.1 both belonged to the default agent and still ran in two
-    // sessions, because reuse only ever looked at `currentSessionId` — a pointer that had moved
+    // sessions, because reuse only ever looked at `currentWorkerSessionId` — a pointer that had moved
     // to the agent-ui session in between. The pool is every session the task ran in.
     const h = harness(workspace(), {
       tasks: tasks({
         status: 'paused',
         sessionIds: ['sess_default', 'sess_ui'],
-        currentSessionId: 'sess_ui',
+        currentWorkerSessionId: 'sess_ui',
         stats: { lockSessionId: undefined },
         spec: {
           plan: [
@@ -1143,7 +1143,7 @@ describe('a paused task does not take new work', () => {
       tasks: tasks({
         status: 'paused',
         sessionIds: ['sess_old_default'],
-        currentSessionId: 'sess_old_default',
+        currentWorkerSessionId: 'sess_old_default',
         stats: { lockSessionId: undefined },
         spec: {
           plan: [{ id: '1.2', status: 'todo', agent: 'builtin-default', executedBy: 'sess_gone' }],
@@ -1551,7 +1551,7 @@ describe('each supervisor lane owns its own turn', () => {
 describe('a dispatch into an existing session claims the run', () => {
   const sessionTask = () =>
     new Map([
-      ['T-1', { id: 'T-1', currentSessionId: 'sess_worker_live', assigneeAgentId: 'builtin-default' } as never],
+      ['T-1', { id: 'T-1', currentWorkerSessionId: 'sess_worker_live', assigneeAgentId: 'builtin-default' } as never],
     ]);
 
   function withLiveSession(h: Harness, taskId = 'T-1') {
@@ -1736,7 +1736,7 @@ describe('a finished task accepts no dispatch', () => {
             handoffs: [{ outcome: 'handoff', at: 1000 }],
             // A live session makes this a send-to-existing-session dispatch, which is the shape
             // that carries `claimRun` — the one this file's first suite is about.
-            currentSessionId: 'sess_live5',
+            currentWorkerSessionId: 'sess_live5',
           } as never,
         ],
       ]),

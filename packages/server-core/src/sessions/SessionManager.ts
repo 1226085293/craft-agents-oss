@@ -8239,6 +8239,22 @@ ${request.prompt}`;
        * than queueing, so a burst of writes costs one pass.
        */
       pokeWatchdog: () => this.watchdogLoops.get(workspace.id)?.wake(),
+      /**
+       * Every session bound to a task, including the acceptance one.
+       *
+       * The judge is created outside `startRun`, so the record has no field for it; this is the
+       * only place that can answer.
+       */
+      sessionsOfTask: (taskId) => {
+        const ids: string[] = []
+        for (const candidate of this.sessions.values()) {
+          if (candidate.workspace.id !== workspace.id) continue
+          if (candidate.taskId !== taskId) continue
+          if (candidate.isArchived) continue
+          ids.push(candidate.id)
+        }
+        return ids
+      },
       stopSession: (sessionId) => {
         // Fire and forget: pausing must not wait on an abort handshake, and the
         // session may already be gone.
@@ -9053,8 +9069,8 @@ ${request.prompt}`;
     // a fresh worker for a resume throws that away and makes "continue" mean
     // "start over from the brief". Only a session that is actually gone is
     // replaced.
-    const resumeInto = existing?.currentSessionId && this.sessions.has(existing.currentSessionId)
-      ? existing.currentSessionId
+    const resumeInto = existing?.currentWorkerSessionId && this.sessions.has(existing.currentWorkerSessionId)
+      ? existing.currentWorkerSessionId
       : undefined
 
     if (resumeInto) {
@@ -9268,12 +9284,12 @@ ${request.prompt}`;
         if (!task) return null
         return {
           id: task.id,
-          currentSessionId: task.currentSessionId,
+          currentWorkerSessionId: task.currentWorkerSessionId,
           /**
            * Every session this task has run in.
            *
            * The dispatcher needs the pool, not only the last executor: reuse across a section
-           * boundary looks for 「这个 agent 在本任务里已有会话」, and `currentSessionId` alone
+           * boundary looks for 「这个 agent 在本任务里已有会话」, and `currentWorkerSessionId` alone
            * forgets every session except the most recent one.
            */
           sessionIds: task.sessionIds ?? [],

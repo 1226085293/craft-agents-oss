@@ -197,8 +197,8 @@ describe('a round does not hand its session to the next one', () => {
     );
 
     const after = svc.get(task.id)!;
-    // `dispatch` reuses a session only when `currentSessionId` is set, present and unarchived.
-    expect(after.currentSessionId).toBeUndefined();
+    // `dispatch` reuses a session only when `currentWorkerSessionId` is set, present and unarchived.
+    expect(after.currentWorkerSessionId).toBeUndefined();
     expect(after.stats?.lockSessionId).toBeUndefined();
     expect(archived).toEqual([{ taskId: task.id, sessionId: 'sess_round_1' }]);
   })

@@ -543,7 +543,7 @@ export interface ElectronAPI {
     status: string
     priority: number
     updatedAt: number
-    currentSessionId?: string
+    currentWorkerSessionId?: string
     sessionCount: number
     lastHandoff?: string
     pauseReason?: string | null

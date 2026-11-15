@@ -147,7 +147,7 @@ export function TaskDetailPanel({
     <div className="h-full min-h-0">
       <TaskDetailPanelView
         detail={detail}
-        planJumps={resolvePlanJumps(detail.spec?.plan, parsed?.journal, detail.currentSessionId)}
+        planJumps={resolvePlanJumps(detail.spec?.plan, parsed?.journal, detail.currentWorkerSessionId)}
         onJumpToStep={(target) => {
           if (!target.sessionId) return
           requestSessionJump({ sessionId: target.sessionId, at: target.at })

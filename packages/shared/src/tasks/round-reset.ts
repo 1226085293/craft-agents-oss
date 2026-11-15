@@ -89,15 +89,18 @@ export function resetRoundState(task: Task, options: RoundResetOptions): RoundRe
   const roundList = options.roundSessionIds ?? task.roundSessionIds ?? [];
   const archivedSessionIds = roundList.length
     ? roundList
-    : task.currentSessionId
-      ? [task.currentSessionId]
+    : task.currentWorkerSessionId
+      ? [task.currentWorkerSessionId]
       : [];
 
   const next: Task = {
     ...task,
     // The round's executor is gone: archiving it and clearing this is what makes the next dispatch
     // open a fresh conversation instead of continuing this one.
-    currentSessionId: undefined,
+    currentWorkerSessionId: undefined,
+    // The round's holder goes with the round: the next one starts by claiming a run, which writes
+    // both fields again. Leaving it would name a session that no longer holds anything.
+    currentStageSessionId: undefined,
     roundSessionIds: [],
     // The hand-off timeline is the round's, and `stats.lastRound.summary` already carries the one
     // sentence the next round reads. The full history is in the journal, which is append-only.

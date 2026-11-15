@@ -52,16 +52,16 @@ describe('a spawn counts one run, not two', () => {
     if (!claimed.ok) return;
     expect(claimed.task.stats?.runs).toBe(1);
     // A placeholder is not a session: it must not enter `sessionIds` (the board
-    // reads that as "2 / 8" for one worker) nor `currentSessionId`.
+    // reads that as "2 / 8" for one worker) nor `currentWorkerSessionId`.
     expect(claimed.task.sessionIds).toEqual([]);
-    expect(claimed.task.currentSessionId).toBeUndefined();
+    expect(claimed.task.currentWorkerSessionId).toBeUndefined();
 
     const bound = svc.startRun(task.id, 'sess_worker');
     expect(bound.ok).toBe(true);
     if (!bound.ok) return;
     expect(bound.task.stats?.runs).toBe(1);
     expect(bound.task.sessionIds).toEqual(['sess_worker']);
-    expect(bound.task.currentSessionId).toBe('sess_worker');
+    expect(bound.task.currentWorkerSessionId).toBe('sess_worker');
     expect(locked(bound.task)).toBe('sess_worker');
   });
 
@@ -287,7 +287,7 @@ describe('the heartbeat belongs to the run, not to history', () => {
   it('credits a heartbeat only from the session the run is locked to', () => {
     const { svc, task } = harness();
     svc.startRun(task.id, 'sess_worker');
-    // `currentSessionId` is history the moment a new run starts; a heartbeat from
+    // `currentWorkerSessionId` is history the moment a new run starts; a heartbeat from
     // an older session must not make a task look alive that nobody is driving.
     svc.attachSession(task.id, 'sess_older');
 

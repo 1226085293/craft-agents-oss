@@ -688,10 +688,29 @@ export interface Task {
    * because the lifetime list would pause a task for once having been a loop.
    *
    * Optional so records written before it existed still load; absent means the round has not started
-   * a session yet, and a close falls back to `currentSessionId`/`lockSessionId`.
+   * a session yet, and a close falls back to `currentWorkerSessionId`/`lockSessionId`.
    */
   roundSessionIds?: string[];
-  currentSessionId?: string;
+  /**
+   * The worker session the current run started — what `startRun` last bound.
+   *
+   * Was called `currentWorkerSessionId`; renamed because that name claimed more than it delivered: it
+   * only ever named the session a run *started*, so during acceptance it still pointed at the
+   * worker that had already handed off, and while the supervisor was deciding it named nobody at
+   * all. The name is why `stopWorker` stopped the wrong session during acceptance.
+   */
+  currentWorkerSessionId?: string;
+  /**
+   * Whoever is holding the task right now — the supervisor while it decides, a worker while it
+   * works, the acceptance session while it judges.
+   *
+   * This is the one that answers 「which session's provider must be reachable for this task to
+   * move」. The flow is serial, so there is exactly one answer at any moment; that is what lets an
+   * outage check be one probe per task instead of a list to reconcile.
+   *
+   * Written at every hand-off of the baton, cleared with the round.
+   */
+  currentStageSessionId?: string;
   assigneeAgentId?: string;
 
   parentTaskId?: string;
@@ -758,7 +777,7 @@ export interface TaskIndexEntry {
   name: string;
   status: TaskStatus;
   updatedAt: number;
-  currentSessionId?: string;
+  currentWorkerSessionId?: string;
   priority: TaskPriority;
 }
 

@@ -95,6 +95,14 @@ export interface TaskServiceDeps {
    * to "is this running".
    */
   stopSession?: (sessionId: string) => void;
+  /**
+   * Every session bound to this task, including ones the record does not list.
+   *
+   * The acceptance session is created outside `startRun`, so it is in neither `sessionIds` nor
+   * `roundSessionIds`; only the host can find it (`taskId === id && taskPurpose === 'verify'`).
+   * Asked rather than stored so a system-created judge never consumes the dispatch budget.
+   */
+  sessionsOfTask?: (taskId: string) => string[];
   /** Run one acceptance command; resolves to exit code + output tail. */
   runAcceptanceCommand?: (command: string, cwd?: string) => Promise<{ exitCode: number | null; output?: string }>;
   /**
@@ -515,7 +523,7 @@ export class TaskService {
     // the run lock while the session is being created, before there is an id. They
     // are not sessions, and treating them as one made the board report "2 / 8" for
     // a task that had started a single worker — the placeholder sat in `sessionIds`
-    // (and in `currentSessionId`) for good, because the real id is attached afterwards.
+    // (and in `currentWorkerSessionId`) for good, because the real id is attached afterwards.
     const isPlaceholder = sessionId.startsWith('pending:');
 
     /**
@@ -557,7 +565,13 @@ export class TaskService {
       ...task,
       status: 'running',
       pauseReason: null,
-      ...(isPlaceholder ? {} : { currentSessionId: sessionId }),
+      ...(isPlaceholder
+        ? {}
+        : {
+          currentWorkerSessionId: sessionId,
+          // Starting a run hands the baton to that session — it is what is executing now.
+          currentStageSessionId: sessionId,
+        }),
       // Lifetime history: never pruned, because deleting the task uses it to take the conversations
       // with it. Placeholders are not sessions, so they never enter either list.
       sessionIds: isPlaceholder || task.sessionIds.includes(sessionId)
@@ -896,7 +910,7 @@ export class TaskService {
      * Every session the round used goes with it, not just the last one.
      *
      * A round can dispatch several agents in turn — one per section — and each may open its own
-     * conversation. The round is over for all of them at once, so archiving only `currentSessionId`
+     * conversation. The round is over for all of them at once, so archiving only `currentWorkerSessionId`
      * left the earlier ones alive and unreachable: nobody reuses them, nobody cleans them up.
      */
     for (const sessionId of archivedSessionIds) {
@@ -1795,7 +1809,7 @@ export class TaskService {
   /** Heartbeat by session — the worker knows its session id, not its task id. */
   heartbeatForSession(sessionId: string): Task | null {
     /**
-     * The run's session is the lock holder — `currentSessionId` is history, and a
+     * The run's session is the lock holder — `currentWorkerSessionId` is history, and a
      * task that is `running` while locked by nobody is exactly the anomaly the
      * watchdog exists to catch, so a heartbeat from an unlocked session must not
      * make it look alive.
@@ -2483,6 +2497,14 @@ export class TaskService {
         });
       } else {
         try {
+          /**
+           * The judge is holding the task while it runs.
+           *
+           * Recorded before the call so an outage *inside* the judge lands on the judge's strategy
+           * group rather than the worker's — the worker has already finished and its provider being
+           * reachable says nothing about whether the verdict can be delivered.
+           */
+          this.markStageSession(id, this.deps.sessionsOfTask?.(id)?.find((sessionId) => sessionId !== handoff.fromSessionId));
           const judged = await this.deps.judgeHandoff(task, handoff);
           if (!judged.pass) {
             accepted = false;
@@ -2526,6 +2548,16 @@ export class TaskService {
 
     let next: Task = {
       ...task,
+      /**
+       * An accepted report hands the baton back to the supervisor.
+       *
+       * It is the supervisor who decides what happens next — dispatch, ask, or close — so it is the
+       * session holding the task from this moment, and the one whose provider must be reachable for
+       * the task to move. A refused report stays with the worker, which still owes the slice.
+       */
+      ...(accepted && task.supervisorSessionId
+        ? { currentStageSessionId: task.supervisorSessionId }
+        : {}),
       // The gate's verdict travels with the attempt: `handoffs` is the log, `passed` is
       // what makes 「filed a report」 different from 「tried and was refused」.
       handoffs: [...keptHandoffs, { ...handoff, passed: accepted, round: roundInProgress }],
@@ -3027,14 +3059,56 @@ export class TaskService {
    * an outline's stored status lags its sub-steps, so the flat scan counted a finished section as
    * outstanding and asked the person about work that was already done.
    */
-  /** Silence the session that was working, after the task stops expecting it. */
-  private stopWorker(task: Task): void {
-    const sessionId = task.currentSessionId;
-    if (!sessionId || !this.deps.stopSession) return;
+  /**
+   * Point the task at whoever is holding it now.
+   *
+   * A separate write because the holder changes at moments that are not otherwise a task
+   * transition: an accepted report moves it to the supervisor, a judge starting moves it to the
+   * judge. Nothing else about the record changes, and a missing id is not an error — the field is
+   * 「who is holding it」, and 「nobody right now」 is a legitimate answer.
+   */
+  private markStageSession(id: string, sessionId: string | undefined): void {
+    if (!sessionId) return;
     try {
-      this.deps.stopSession(sessionId);
+      const current = this.get(id);
+      if (!current || current.currentStageSessionId === sessionId) return;
+      this.save({ ...current, currentStageSessionId: sessionId, updatedAt: this.now() });
     } catch (error) {
-      log.warn(`[tasks] could not stop the worker of ${task.id}`, { error: String(error) });
+      // Bookkeeping about the holder must not break the work it is describing.
+      log.warn(`[tasks] could not record the stage session of ${id}`, { error: String(error) });
+    }
+  }
+
+  /**
+   * Silence everything that was working, after the task stops expecting it.
+   *
+   * Not just `currentWorkerSessionId`: that field names the session the last run *started*, and the
+   * acceptance session is created outside `startRun`, so during acceptance it still points at the
+   * worker that handed off. Stopping only that one left the judge running — the task paused and its
+   * judge kept spending tokens on a verdict nobody would read.
+   *
+   * Nor the supervisor: it outlives the round, and stopping it would leave the task with nobody to
+   * resume it.
+   *
+   * The acceptance session is asked for rather than stored, because `roundSessionIds` is also the
+   * budget's counter (`maxSessions`) and a system-created judge must not consume a dispatched
+   * session's allowance.
+   */
+  private stopWorker(task: Task): void {
+    if (!this.deps.stopSession) return;
+    const sessionIds = new Set<string>();
+    if (task.currentWorkerSessionId) sessionIds.add(task.currentWorkerSessionId);
+    for (const id of task.roundSessionIds ?? []) sessionIds.add(id);
+    for (const id of this.deps.sessionsOfTask?.(task.id) ?? []) sessionIds.add(id);
+    // The supervisor is not a worker: it is what resumes the task afterwards.
+    if (task.supervisorSessionId) sessionIds.delete(task.supervisorSessionId);
+    if (sessionIds.size === 0) return;
+    for (const sessionId of sessionIds) {
+      try {
+        this.deps.stopSession(sessionId);
+      } catch (error) {
+        log.warn(`[tasks] could not stop session ${sessionId} of ${task.id}`, { error: String(error) });
+      }
     }
   }
 
@@ -3190,7 +3264,7 @@ export class TaskService {
     const recovered: Task[] = [];
     for (const task of listTasks(this.root)) {
       if (task.status !== 'running') continue;
-      const lockId = task.stats?.lockSessionId ?? task.currentSessionId;
+      const lockId = task.stats?.lockSessionId ?? task.currentWorkerSessionId;
       /**
        * A trigger claim is not a run that died.
        *

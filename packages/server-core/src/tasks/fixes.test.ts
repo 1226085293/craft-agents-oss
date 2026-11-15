@@ -47,7 +47,7 @@ describe('run placeholders', () => {
     expect(claimed.ok).toBe(true)
     const task = claimed.ok ? claimed.task : null
     expect(task?.sessionIds).toEqual([])
-    expect(task?.currentSessionId).toBeUndefined()
+    expect(task?.currentWorkerSessionId).toBeUndefined()
     rmSync(h.root, { recursive: true, force: true })
   })
 
@@ -58,7 +58,7 @@ describe('run placeholders', () => {
     const real = h.service.startRun('T-1', 'sess-1')
     const task = real.ok ? real.task : null
     expect(task?.sessionIds).toEqual(['sess-1'])
-    expect(task?.currentSessionId).toBe('sess-1')
+    expect(task?.currentWorkerSessionId).toBe('sess-1')
     rmSync(h.root, { recursive: true, force: true })
   })
 })

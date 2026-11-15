@@ -77,7 +77,7 @@ const task = (overrides: Partial<Task> = {}): Task => ({
   pauseReason: null,
   supervisorSessionId: 'sup',
   sessionIds: ['s1'],
-  currentSessionId: 's1',
+  currentWorkerSessionId: 's1',
   dependsOn: [],
   priority: 1,
   budget: { maxSessions: 8, maxRuns: 12, activeMinutes: 120, deadline: null },

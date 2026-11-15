@@ -24,7 +24,7 @@ function finishedRound(overrides: Partial<Task> = {}): Task {
     supervisorSessionId: 'sess_sup',
     sessionIds: ['sess_r1', 'sess_r2a', 'sess_r2b', 'sess_r3'],
     roundSessionIds: ['sess_r2a', 'sess_r2b'],
-    currentSessionId: 'sess_r2b',
+    currentWorkerSessionId: 'sess_r2b',
     handoffs: [
       { at: NOW - 1000, fromSessionId: 'sess_r2a', outcome: 'handoff', summary: '第2轮 1.1', round: 3 },
       { at: NOW, fromSessionId: 'sess_r2b', outcome: 'delivered', summary: '第2轮完成', round: 3 },
@@ -120,7 +120,7 @@ describe('what a round takes with it (cleared)', () => {
 
   it('clears the executor, so the next dispatch opens a fresh conversation', () => {
     const { task } = reset();
-    expect(task.currentSessionId).toBeUndefined();
+    expect(task.currentWorkerSessionId).toBeUndefined();
     expect(task.stats?.lockSessionId).toBeUndefined();
     expect(task.stats?.lockDeadlineAt).toBeUndefined();
   });
@@ -188,7 +188,7 @@ describe('what the reset must not touch', () => {
     expect(twice.task.stats?.lastRound?.summary).toBe('你好+2');
   });
 
-  it('falls back to currentSessionId for records written before roundSessionIds existed', () => {
+  it('falls back to currentWorkerSessionId for records written before roundSessionIds existed', () => {
     const legacy = finishedRound({ roundSessionIds: undefined });
     const { archivedSessionIds } = resetRoundState(legacy, { now: NOW });
     expect(archivedSessionIds).toEqual(['sess_r2b']);

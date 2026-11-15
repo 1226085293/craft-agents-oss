@@ -520,7 +520,7 @@ export function resumeRefusal(
        * `roundSessionIds` is cleared with the round, so this asks the question the budget means:
        * 「may this round use another conversation」.
        */
-      sessions: (task.roundSessionIds ?? (task.currentSessionId ? [task.currentSessionId] : [])).length,
+      sessions: (task.roundSessionIds ?? (task.currentWorkerSessionId ? [task.currentWorkerSessionId] : [])).length,
       runs: task.stats?.runs ?? 0,
       activeMinutes: Math.floor((task.stats?.activeMs ?? 0) / 60_000),
     },

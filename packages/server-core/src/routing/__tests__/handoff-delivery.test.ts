@@ -19,7 +19,7 @@ function harness(handoff?: string) {
     sendToSession: async (sessionId, text) => { sent.push({ sessionId, text }) },
     writeToSupervisor: async () => {},
     askUser: async () => {},
-    getTask: (taskId) => ({ id: taskId, currentSessionId: 'w1' }),
+    getTask: (taskId) => ({ id: taskId, currentWorkerSessionId: 'w1' }),
     ...(handoff ? { handoffContext: () => handoff } : {}),
   })
   return { runtime, sent, dir }

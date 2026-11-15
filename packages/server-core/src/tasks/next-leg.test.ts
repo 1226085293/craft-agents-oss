@@ -49,7 +49,7 @@ function seed(
     } as Task['spec'],
   }) as Task
   // A run has to be under way for a hand-off to be a legal transition.
-  const running = { ...task, status: 'running' as const, currentSessionId: 'sess-1', sessionIds: ['sess-1'] }
+  const running = { ...task, status: 'running' as const, currentWorkerSessionId: 'sess-1', sessionIds: ['sess-1'] }
   saveTask(h.root, running)
   return running
 }

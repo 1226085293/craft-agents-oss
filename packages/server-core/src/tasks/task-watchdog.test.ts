@@ -26,7 +26,7 @@ function task(overrides: Partial<Task> = {}): Task {
     pauseReason: null,
     supervisorSessionId: 'sup',
     sessionIds: ['sess-1'],
-    currentSessionId: 'sess-1',
+    currentWorkerSessionId: 'sess-1',
     dependsOn: [],
     priority: 1,
     budget: { maxSessions: 8, maxRuns: 12, activeMinutes: 120, deadline: null },
@@ -170,7 +170,7 @@ describe('watchdog findings', () => {
     // a live run 23 ms after its claim (T-1, 2026-11-13) and released the lock the spawn was
     // about to bind, which then counted as a second run.
     const spawning = task({
-      currentSessionId: 'sess-gone',
+      currentWorkerSessionId: 'sess-gone',
       stats: {
         runs: 2,
         activeMs: 0,
@@ -489,7 +489,7 @@ describe('finished plan, nothing filed', () => {
 
   it('does not silence a later leg because an earlier session reported', () => {
     const second = finished({
-      currentSessionId: 'sess-2',
+      currentWorkerSessionId: 'sess-2',
       handoffs: [{ outcome: 'handoff', fromSessionId: 'sess-1', at: NOW - 600_000, summary: 'x' }] as never,
     });
     const findings = inspectTasks(deps([second], { sessionWorking: () => false }));
@@ -735,13 +735,13 @@ describe('a hand-off that was accepted is not re-asked for', () => {
    * Live 2026-11-15 on T-2: `Handoff accepted.` at 16:40:44, and the same second the worker was
    * told 「no hand-off record arrived」 — three times in a row, each wake handing it the identical
    * 「## Hand-off context」 brief. The stamp only existed if the round had closed, and the round
-   * had not: the worker had reported, `currentSessionId` had already moved, and both guards in
+   * had not: the worker had reported, `currentWorkerSessionId` had already moved, and both guards in
    * `hasFiledThisRun` compared against a session that was no longer the reporter.
    */
   const handoffAt = NOW - 5_000
   const quiet = { sessionWorking: () => false }
 
-  it('does not ask again when the stamp belongs to this run, even if currentSessionId moved on', () => {
+  it('does not ask again when the stamp belongs to this run, even if currentWorkerSessionId moved on', () => {
     const findings = inspectTasks(deps([
       task({
         // Long enough ago that the stopped-grace window is not what keeps it quiet.
@@ -754,7 +754,7 @@ describe('a hand-off that was accepted is not re-asked for', () => {
           lastHandoffAt: handoffAt,
           lastHandoffSessionId: 'sess-reporter',
         },
-        currentSessionId: 'sess-somebody-else',
+        currentWorkerSessionId: 'sess-somebody-else',
         handoffs: [
           {
             at: handoffAt,
@@ -839,7 +839,7 @@ describe('a task parked on an unreachable provider', () => {
   /**
    * The flow is serial, so there is one holder and one answer.
    *
-   * `currentSessionId` follows the work: the worker while it runs, the supervisor once the slice is
+   * `currentWorkerSessionId` follows the work: the worker while it runs, the supervisor once the slice is
    * handed back, the acceptance session when it judges. Nothing to reconcile, and nothing stale —
    * the lifetime list (`sessionIds`) would carry dead sessions that never have a strategy to probe.
    */
@@ -849,7 +849,7 @@ describe('a task parked on an unreachable provider', () => {
       parked({
         sessionIds: ['ancient-1', 'ancient-2'],
         roundSessionIds: ['worker-a', 'worker-b'],
-        currentSessionId: 'worker-b',
+        currentWorkerSessionId: 'worker-b',
       } as never),
     ], {
       sessionWorking: () => false,
@@ -932,5 +932,58 @@ describe('upstreamRecoveredFor', () => {
 
   it('treats a group the probe never answered as not recovered', () => {
     expect(upstreamRecoveredFor(['a'], new Map())).toBe(false)
+  })
+})
+
+describe('which session the outage probe asks about', () => {
+  /**
+   * The record now separates 「the worker that ran」 from 「whoever is holding the task」.
+   * Confusing them is what made `stopWorker` stop the wrong session during acceptance, and what
+   * made the probe ask about a worker that had already handed off.
+   */
+  const parked2 = (overrides: Partial<Task> = {}) =>
+    task({ status: 'paused', pauseReason: 'upstream' as never, updatedAt: NOW - 5 * 60_000, ...overrides })
+
+  const asker = () => {
+    const asked: string[][] = []
+    return {
+      asked,
+      deps: (task: Task) => inspectTasks(deps([task], {
+        sessionWorking: () => false,
+        strategiesOf: (_task, sessionIds) => {
+          asked.push([...sessionIds])
+          return ['commandcode']
+        },
+      })),
+    }
+  }
+
+  it('asks about the current stage holder, not the worker that already handed off', () => {
+    const probe = asker()
+    probe.deps(parked2({
+      currentWorkerSessionId: 'worker-that-finished',
+      currentStageSessionId: 'the-judge',
+    } as never))
+    expect(probe.asked[0]).toEqual(['the-judge', 'sup'])
+    expect(probe.asked[0]).not.toContain('worker-that-finished')
+  })
+
+  it('follows the baton back to the supervisor once it holds the task', () => {
+    const probe = asker()
+    probe.deps(parked2({
+      currentWorkerSessionId: 'worker-that-finished',
+      currentStageSessionId: 'sup',
+    } as never))
+    // Deduplicated to one group rather than asking the same session twice.
+    expect(probe.asked[0]).toEqual(['sup'])
+  })
+
+  it('falls back to the worker on a record written before the split', () => {
+    const probe = asker()
+    probe.deps(parked2({
+      currentWorkerSessionId: 'old-style-worker',
+      currentStageSessionId: undefined,
+    } as never))
+    expect(probe.asked[0]).toEqual(['old-style-worker', 'sup'])
   })
 })

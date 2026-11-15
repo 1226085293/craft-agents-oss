@@ -131,8 +131,22 @@ export function normalizeTask(task: Task): Task {
     ? (applyDerivedStatuses(normalizePlan(task.spec.plan) ?? []) as typeof task.spec.plan)
     : undefined;
   const triggers = normalizeTriggers(task.triggers ?? (task.trigger ? [task.trigger] : []));
+  /**
+   * The field was called `currentSessionId` before it was split in two.
+   *
+   * Reading it forward keeps every record written by an older build usable: the value meant 「the
+   * worker this run started」, which is exactly what `currentWorkerSessionId` means now. It is also
+   * the honest bootstrap for `currentStageSessionId` — on an old record the only thing known about
+   * who is holding the task is that worker.
+   */
+  const legacy = (task as { currentSessionId?: string }).currentSessionId;
+  const currentWorkerSessionId = task.currentWorkerSessionId ?? legacy;
+  const currentStageSessionId =
+    task.currentStageSessionId ?? currentWorkerSessionId ?? task.supervisorSessionId;
   return {
     ...task,
+    ...(currentWorkerSessionId ? { currentWorkerSessionId } : {}),
+    ...(currentStageSessionId ? { currentStageSessionId } : {}),
     ...(task.spec && plan ? { spec: { ...task.spec, plan } } : {}),
     dependsOn: task.dependsOn ?? [],
     handoffs: task.handoffs ?? [],
@@ -246,7 +260,7 @@ function toEntry(task: Task): TaskIndexEntry {
     name: task.name,
     status: task.status,
     updatedAt: task.updatedAt,
-    currentSessionId: task.currentSessionId,
+    currentWorkerSessionId: task.currentWorkerSessionId,
     priority: task.priority,
   };
 }
@@ -302,7 +316,7 @@ export function createTask(input: CreateTaskInput): Task {
     pauseReason: null,
     supervisorSessionId: input.supervisorSessionId,
     sessionIds: [],
-    currentSessionId: undefined,
+    currentWorkerSessionId: undefined,
     assigneeAgentId: input.assigneeAgentId,
     parentTaskId: input.parentTaskId,
     dependsOn: input.dependsOn ?? [],
@@ -332,12 +346,12 @@ export function createTask(input: CreateTaskInput): Task {
 /** Attach a session to a task (idempotent; keeps ordering stable). */
 export function attachSession(task: Task, sessionId: string, now: number): Task {
   if (task.sessionIds.includes(sessionId)) {
-    return { ...task, currentSessionId: sessionId, updatedAt: now };
+    return { ...task, currentWorkerSessionId: sessionId, updatedAt: now };
   }
   return {
     ...task,
     sessionIds: [...task.sessionIds, sessionId],
-    currentSessionId: sessionId,
+    currentWorkerSessionId: sessionId,
     updatedAt: now,
   };
 }

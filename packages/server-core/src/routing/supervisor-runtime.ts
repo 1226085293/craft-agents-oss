@@ -128,7 +128,7 @@ export interface SupervisorRuntimeDeps {
   /** Resolve a task by id (for task targets). */
   getTask?: (taskId: string) => {
     id: string;
-    currentSessionId?: string;
+    currentWorkerSessionId?: string;
     /** Every session that ever ran this task — the pool a later section can reuse from. */
     sessionIds?: string[];
     /**
@@ -707,7 +707,7 @@ export class SupervisorRuntime {
        * Reuse only a session this task created, and only while it is still live.
        *
        * Two holes in 「the session exists」:
-       *  - it did not have to be this task's session. A stale `currentSessionId` that pointed at
+       *  - it did not have to be this task's session. A stale `currentWorkerSessionId` that pointed at
        *    anything — another task's worker, or the supervisor itself — was reused, and the work was
        *    handed to a session with no binding to the record that dispatched it.
        *  - it did not have to be live. Archiving a session keeps it on disk, so an archived worker
@@ -716,11 +716,11 @@ export class SupervisorRuntime {
        * Recurring tasks lean on this: they reuse one worker across rounds, so the identity check is
        * what keeps 「同一轮」 from meaning 「任意一个叫这个名字的会话」.
        */
-      const candidate = task.currentSessionId ? this.deps.getSession(task.currentSessionId) : null;
+      const candidate = task.currentWorkerSessionId ? this.deps.getSession(task.currentWorkerSessionId) : null;
       const live = candidate && candidate.taskId === task.id && !candidate.archived ? candidate : null;
-      existingSessionId = live ? task.currentSessionId : undefined;
-      if (task.currentSessionId && !live) {
-        this.deps.logDispatch?.(`${task.id}: previous session ${task.currentSessionId} is gone; starting a new run`);
+      existingSessionId = live ? task.currentWorkerSessionId : undefined;
+      if (task.currentWorkerSessionId && !live) {
+        this.deps.logDispatch?.(`${task.id}: previous session ${task.currentWorkerSessionId} is gone; starting a new run`);
       }
       /**
        * A run is in flight only while the task's lock is held.
@@ -757,7 +757,7 @@ export class SupervisorRuntime {
          */
         if (runInFlight && live && live.agentId !== namedStep.agent) {
           throw new DispatchRefused(
-            `${task.id} 正在由 ${live.agentId ?? '默认智能体'}（会话 ${task.currentSessionId}）执行，` +
+            `${task.id} 正在由 ${live.agentId ?? '默认智能体'}（会话 ${task.currentWorkerSessionId}）执行，` +
               `而 ${namedStep.id} 指定了 ${namedStep.agent}。串行模式：等当前会话交接后再派这一步。`,
           );
         }
@@ -772,7 +772,7 @@ export class SupervisorRuntime {
         /**
          * With no run in flight, look for a session of this task already run by this agent.
          *
-         * The pointer `currentSessionId` only remembers the *last* executor, so a task that
+         * The pointer `currentWorkerSessionId` only remembers the *last* executor, so a task that
          * alternates owners grew one session per step: on T-1, 1.1 and 3.1 both belonged to
          * the default agent and still ran in two different sessions. The scope on the session
          * is what makes the question answerable — 「谁是这个 agent 且空闲」 — without guessing

@@ -1151,3 +1151,47 @@ describe('an open question stops the task', () => {
     expect(svc.get(task.id)?.status).toBe('running')
   })
 })
+
+describe('an outage pause survives the next write', () => {
+  /**
+   * Live 2026-11-15 21:10: `parked on upstream outage` was logged for T-2, and the record read
+   * `awaiting_dispatch` a moment later.
+   *
+   * `deriveGateReason` re-derives the label from the record on every save, and an outage-shaped
+   * task — plan unfinished, no lock, last hand-off accepted — looks identical to `awaiting_dispatch`
+   * by that reading. The outage was overwritten, and the probe never looked at the task again
+   * because it only watches `upstream`.
+   *
+   * Nothing on the record can prove an outage happened, so it joins `process_lost` and
+   * `awaiting_release` on the exempt list: an event, not a condition. The probe retires it by
+   * resuming the task.
+   */
+  it('keeps `upstream` instead of re-deriving `awaiting_dispatch`', () => {
+    const { svc } = service(workspace());
+    // A plan with work left and nothing running — the exact shape `awaitingDispatch()` claims.
+    const task = svc.create({
+      name: '上游故障',
+      instruction: '做点事',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_upstream',
+      spec: {
+        plan: [
+          { id: '1', title: 'a', status: 'done', agent: 'a' },
+          { id: '2', title: 'b', status: 'todo', agent: 'a' },
+        ],
+      },
+    } as never);
+
+    // What `parkTaskOnUpstreamOutage` does when a terminal `typed_error` says `canRetry`.
+    svc.setStatus(task.id, 'paused', { pauseReason: 'upstream' });
+    expect(svc.get(task.id)?.pauseReason).toBe('upstream');
+
+    /**
+     * Any later write goes through `save` → `deriveGateReason`, and that derivation is what used to
+     * overwrite the reason. Writing the same status again is the cheapest such write and stands in
+     * for all of them.
+     */
+    svc.setStatus(task.id, 'paused', { pauseReason: 'upstream' });
+    expect(svc.get(task.id)?.pauseReason).toBe('upstream');
+  });
+})

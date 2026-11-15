@@ -2040,6 +2040,19 @@ export class TaskService {
     if (task.pauseReason === 'verify_exhausted') return task;
     // A person declared this one; the record cannot prove or disprove it.
     if (task.pauseReason === 'awaiting_release') return task;
+    /**
+     * 「The provider is down」 is not re-derivable, and re-deriving it destroys it.
+     *
+     * `awaitingDispatch()` describes the same shape this state usually has — plan unfinished, no
+     * lock, last hand-off accepted — so the derivation below overwrote `upstream` with
+     * `awaiting_dispatch` on the very next write. Live 2026-11-15 21:10: `parked on upstream
+     * outage` was logged, and the record read `awaiting_dispatch` a moment later; the outage probe
+     * then never looked at it, because it only watches tasks whose reason is `upstream`.
+     *
+     * Nothing on the record can prove an outage happened, exactly like `process_lost` — it is an
+     * event, not a condition. The probe is what retires it, by resuming the task.
+     */
+    if (task.pauseReason === 'upstream') return task;
     const refusal = resumeRefusal(task, {
       sessionExists: this.deps.sessionExists,
       getTask: (id) => this.get(id),

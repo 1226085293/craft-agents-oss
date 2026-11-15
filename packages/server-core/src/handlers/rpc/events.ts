@@ -28,8 +28,8 @@ import {
   readPluginAuth,
   submitPluginAuthCode,
   cancelPluginAuth,
-  type PluginAuthResult,
 } from '../../events/plugin-auth';
+import { createAuthFinisher } from '../../events/plugin-auth-finish';
 import {
   loadSubscriptions,
   saveSubscriptions,
@@ -382,32 +382,20 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
     pushListenerChanged(workspaceId, listenerId, 'config');
   };
 
-  /** Common tail of the four handlers: broadcast, and save credentials once. */
-  const finishAuth = async (
-    workspaceId: string,
-    listenerId: string,
-    workspaceRoot: string,
-    result: PluginAuthResult,
-  ) => {
-    if (result.state) pushAuthEvent(workspaceId, result.state);
-    if (result.ok && result.state?.phase === 'connected' && result.credentials) {
-      try {
-        await applyAuthCredentials(workspaceId, listenerId, workspaceRoot, result.credentials);
-      } catch (error) {
-        // The sign-in itself succeeded; only the hand-over failed. Say so
-        // instead of reporting a failed scan the person just completed.
-        return {
-          ...result,
-          ok: false,
-          code: 'rejected' as const,
-          error: `授权成功，但写入插件配置失败：${error instanceof Error ? error.message : String(error)}`,
-        };
-      }
-    }
-    // `credentials` never leaves the host: the renderer gets the snapshot only.
-    const { credentials: _credentials, ...safe } = result;
-    return safe;
-  };
+  /**
+   * The shared tail of the four handlers.
+   *
+   * It must be `createAuthFinisher` and not a local copy: the ledger that keeps
+   * a repeated `connected` from writing the same credentials twice (and from
+   * broadcasting it twice) lives inside that factory. An inline tail here would
+   * leave the idempotence in the tests only — the poll and the action that
+   * started the flow both report `connected`, so the live path would merge the
+   * credentials twice and fire two `listenerChanged` pushes.
+   */
+  const finishAuth = createAuthFinisher({
+    pushAuthEvent: (workspaceId, _listenerId, state) => pushAuthEvent(workspaceId, state),
+    applyCredentials: applyAuthCredentials,
+  });
 
   server.handle(
     RPC_CHANNELS.events.PLUGIN_AUTH_START,

@@ -7929,6 +7929,24 @@ ${request.prompt}`;
   }
 
   /**
+   * `worker-1`, `worker-2`, … within one task.
+   *
+   * A task's workers are told apart by which one this is; the scope of each is in its instruction
+   * and its taskScope, so the name does not need to carry it. Counted from the sessions already
+   * filed under the task, so a removed worker does not reuse its number and two live workers never
+   * share one.
+   */
+  private nextWorkerName(workspaceId: string, taskId: string | undefined): string {
+    const siblings = [...this.sessions.values()].filter(
+      (candidate) => candidate.workspace.id === workspaceId && candidate.taskId === taskId,
+    )
+    let n = siblings.length + 1
+    const taken = new Set(siblings.map((candidate) => candidate.name ?? ''))
+    while (taken.has(`worker-${n}`)) n += 1
+    return `worker-${n}`
+  }
+
+  /**
    * The task's one acceptance session, opened on first use.
    *
    * It used to be a fresh session per hand-off, archived immediately after — twelve of them on T-1,
@@ -9051,7 +9069,17 @@ ${request.prompt}`;
         let created: Awaited<ReturnType<typeof this.createSession>>
         try {
           created = await this.createSession(workspaceId, {
-            name: params.name ?? params.scope.slice(0, 24),
+            /**
+             * A worker without a name gets one a person can read.
+             *
+             * The fallback was `scope.slice(0, 24)`, and `scope` is prose written by the supervisor
+             * that starts with the thing being worked on — almost always a path. Live result:
+             * 「E:\craft-agents-oss\.wor」 as the name of a session, truncated mid-word, telling the
+             * reader nothing. A worker's identity in the list is 「which task, and which of them」,
+             * so that is what the name says; the supervisor can still pass its own name and that
+             * wins.
+             */
+            name: params.name ?? this.nextWorkerName(workspaceId, params.taskId),
             agentId: params.agentId,
             role: 'worker',
             taskId: params.taskId,

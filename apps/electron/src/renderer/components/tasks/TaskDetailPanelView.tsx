@@ -5,7 +5,6 @@
 
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
-import { requestSessionJump } from '@/lib/session-jump'
 import {
   readDecisionAnswer,
   rememberDecisionAnswer,
@@ -1279,7 +1278,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
                 </span>
                 <button
                   type="button"
-                  onClick={() => requestSessionJump({ sessionId: session.id, at: 0 })}
+                  onClick={() => onOpenSession?.(session.id)}
                   className={cn(
                     'min-w-0 flex-1 truncate text-left text-[13px] hover:underline',
                     session.archived ? 'text-muted-foreground' : 'text-foreground',

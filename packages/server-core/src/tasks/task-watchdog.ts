@@ -821,16 +821,34 @@ export function applyFindings(
       case 'upstream_wait': {
         const recovered = upstreamRecoveredFor(finding.strategies, probeAnswers)
         if (!recovered) break
-        if (!deps.wakeSession || !finding.task.supervisorSessionId) break
-        const result = deps.wakeSession(finding.task, finding.task.supervisorSessionId, 'pause')
-        announceWake(
-          deps,
-          finding.task,
-          'pause',
-          result,
-          `${finding.task.id} 的上游已恢复（${finding.strategies.join('、')}），已让督导继续。`,
-          `${finding.task.id} 的上游已恢复，但唤醒督导失败——任务仍停在暂停，需要你确认。`,
-        )
+        /**
+         * Starting the run is what lifts the pause; a nudge is not.
+         *
+         * The first version of this branch called `wakeSession(..., 'pause')`, which sends the
+         * supervisor a sentence and leaves the task exactly as paused as it was — so the next pass
+         * found the same finding and sent it again, every couple of seconds, forever. Live
+         * 2026-11-15 21:30: 「Task T-2 … is paused and waiting for you」 re-steered into the same
+         * turn dozens of times and the task never moved.
+         *
+         * `resume` claims a run through the task service, which is the transition that both clears
+         * `upstream` and puts the work back in motion.
+         */
+        if (!deps.resume) break
+        const outcome = deps.resume(finding.task)
+        Promise.resolve(outcome)
+          .then((started) => {
+            notify(
+              started === false
+                ? `${finding.task.id} 的上游已恢复，但没能重新启动，需要你看一下。`
+                : `${finding.task.id} 的上游已恢复，已继续。`,
+            )
+          })
+          .catch((error) => {
+            log.warn('[watchdog] resume after upstream outage failed', {
+              id: finding.task.id,
+              error: String(error),
+            })
+          })
         acted += 1
         break
       }

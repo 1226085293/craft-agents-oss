@@ -864,15 +864,23 @@ describe('a task parked on an unreachable provider', () => {
     expect(asked).not.toContain('worker-a')
   })
 
+  /**
+   * Recovery is `resume`, not a nudge.
+   *
+   * The first version called `wakeSession(..., 'pause')`, which sends a sentence and leaves the
+   * task exactly as paused — so the next pass found the same finding and sent it again, every
+   * couple of seconds, forever. Live 2026-11-15 21:30: 「Task T-2 … is paused and waiting for you」
+   * was re-steered into the same turn dozens of times and the task never moved.
+   */
   it('resumes only when every group the task needs answers', async () => {
-    const woken: string[] = []
+    const resumed: string[] = []
     const depsWithProbe = (answers: Record<string, boolean>) =>
       deps([parked()], {
         sessionWorking: () => false,
         strategiesOf: () => ['commandcode', 'provider'],
         probeStrategy: async (id) => answers[id] === true,
-        wakeSession: (_task, sessionId) => {
-          woken.push(sessionId)
+        resume: (task) => {
+          resumed.push(task.id)
           return true
         },
         notify: () => undefined,
@@ -880,10 +888,10 @@ describe('a task parked on an unreachable provider', () => {
 
     // One of the two groups is still down: the task must stay parked.
     await runWatchdogPass(depsWithProbe({ commandcode: true, provider: false }))
-    expect(woken).toEqual([])
+    expect(resumed).toEqual([])
 
     await runWatchdogPass(depsWithProbe({ commandcode: true, provider: true }))
-    expect(woken).toEqual(['sup'])
+    expect(resumed).toEqual(['T-1'])
   })
 
   it('probes each distinct group once, however many tasks wait on it', async () => {

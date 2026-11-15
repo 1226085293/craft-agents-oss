@@ -8494,8 +8494,17 @@ ${request.prompt}`;
          * then ask a person" a fact the next pass can read.
          */
         resume: async (task) => {
-          const retries = (task.stats?.lostRetries ?? 0) + 1
-          service.recordLostRetry(task.id, retries)
+          /**
+           * The `process_lost` retry budget is not the outage one.
+           *
+           * `lostRetries` counts 「the executor disappeared」 and is what stops a task from being
+           * restarted forever on a crash loop. A provider outage is not that: the work was healthy
+           * and nothing was lost, so charging it against that budget would pause a task for a
+           * fault it never had.
+           */
+          if (task.pauseReason === 'process_lost') {
+            service.recordLostRetry(task.id, (task.stats?.lostRetries ?? 0) + 1)
+          }
           try {
             const result = await this.runTask(workspace.id, task.id, 'watchdog')
             return result.started

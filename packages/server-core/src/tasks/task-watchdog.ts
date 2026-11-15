@@ -357,6 +357,22 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
 
   for (const task of deps.listTasks()) {
     /**
+     * A task holding an unanswered question is not inspected at all.
+     *
+     * This used to sit in the middle of the running-state rules, which left two gaps. A task that
+     * was `running` with an open question still ran the rules above it (`process_lost`,
+     * `awaiting_release`), and a *paused* task never reached the check at all — it had already
+     * `continue`d on `status !== 'running'`. Both gaps let the loop act on a task whose next move
+     * belongs to a person: live 2026-11-15 T-2 accumulated eleven questions while the watchdog kept
+     * reading the task as 「nobody working」.
+     *
+     * The rule is now the first thing the loop asks. A question that is open means the task is
+     * waiting for an answer, and no rule in here can produce one — not a nudge, not a retry, not a
+     * pause, and not a resume. Answering it is what puts the task back under inspection.
+     */
+    if ((task.decisions ?? []).some((entry) => !entry.resolvedAt)) continue
+
+    /**
      * A task paused because its executor died is the one paused task with an obvious recovery.
      *
      * Everything below this line inspects `running` tasks, so a `process_lost` pause was never
@@ -458,28 +474,6 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
      * `pending:` lock as a dead run and pauses it resumably.
      */
     if (task.stats?.lockSessionId?.startsWith('pending:')) continue;
-
-    /**
-     * A task holding an unanswered question is not "running", whatever the field says.
-     *
-     * A supervisor can legitimately ask while the task is `running` — the slice is done and the
-     * next move needs a person. But asking does not set `status`, and `classifyPauseReason`
-     * returns early on anything that is not `paused`, so the task stayed `running` with an open
-     * question on it. Every rule below then read that as 「in progress, nobody working」 and woke
-     * the executor with 「继续任务 …」:
-     *
-     *   11:30:47  decision_asked   是否继续？
-     *   11:36:10  idle_wake
-     *   11:41:16  idle_wake
-     *   11:41:57  plan_updated     1.2 doing   ← unanswered
-     *   11:42:43  plan_updated     2.1 todo    ← and it invented a step
-     *
-     * The person was mid-decision and the work moved on without them. 「继续」 is never the right
-     * instruction while the question is whether to continue, so no wake of any kind is produced
-     * for a task with an open question until one is answered.
-     */
-    const awaitingAnswer = (task.decisions ?? []).some((entry) => !entry.resolvedAt)
-    if (awaitingAnswer) continue;
 
     const sessionAlive = task.currentWorkerSessionId
       ? deps.sessionExists(task.currentWorkerSessionId)
@@ -897,8 +891,10 @@ export function nextCheckDelayMs(deps: WatchdogDeps, now = Date.now()): number {
      * arithmetic: `Math.min(Infinity, undefined)` poisons `soonest`, and `clampSleep` would then
      * quietly cap every pass at 30 seconds instead of sleeping to the real deadline.
      */
-    const decision = task.decision;
-    if (decision && !decision.resolvedAt) continue
+    // The queue, not the `decision` mirror: a task can hold several open questions at once, and
+    // `decision` is only the newest one. Both sides of the loop must read the same set, or the
+    // scheduler would keep waking for a task the inspection pass then refuses to look at.
+    if ((task.decisions ?? []).some((entry) => !entry.resolvedAt)) continue
     if (task.status !== 'running') continue;
 
     // Stall deadline: two heartbeat windows without a beat.

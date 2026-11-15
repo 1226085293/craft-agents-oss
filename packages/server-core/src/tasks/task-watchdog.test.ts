@@ -644,6 +644,61 @@ describe('a task with an open question', () => {
     expect(findings.filter((f) => f.kind === 'idle')).toEqual([])
   })
 
+  /**
+   * The pause case is the one the rule did not used to reach.
+   *
+   * The check sat below `if (task.status !== 'running') continue`, but three paused-state rules ran
+   * *above* that line — `upstream`, `process_lost`, and the unannounced-pause wake. So a paused task
+   * with an open question could still be retried or announced while the person was deciding.
+   * `awaiting_release` is the sharpest of the three: it produces a finding for any paused task that
+   * was never announced, which is exactly the shape of a task waiting on a question.
+   */
+  const parkedOnQuestion = (over: Partial<Task> = {}) => task({
+    status: 'paused',
+    pauseReason: 'awaiting_release',
+    decision: openQuestion as never,
+    decisions: [openQuestion],
+    // Never announced, and long past the grace — the unannounced-pause rule would fire.
+    stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 4 * 60 * 60_000, runStartedAt: NOW - 5 * 60 * 60_000 },
+    lifecycle: { errorCount: 0, consecutiveFailures: 0, lastPausedAt: NOW - 60 * 60_000 },
+    ...over,
+  })
+
+  it('is not announced as an unannounced pause while it waits on the question', () => {
+    const findings = inspectTasks(
+      deps([parkedOnQuestion()], { sessionExists: () => false, sessionWorking: () => false }),
+    )
+    expect(findings).toEqual([])
+  })
+
+  it('is not woken by the lost-process retry while it waits on the question', () => {
+    // `process_lost` retries on its own — but not past a question the person has not answered.
+    const findings = inspectTasks(
+      deps([parkedOnQuestion({ pauseReason: 'process_lost' })], { sessionExists: () => false }),
+    )
+    expect(findings).toEqual([])
+  })
+
+  it('catches a question sitting second in the queue, not only the newest', () => {
+    /**
+     * `decision` is a mirror of the newest open question and `decisions` is the queue. A record can
+     * hold an answered entry followed by an open one; reading only the mirror would let the open one
+     * through, and the task would be inspected as if nobody were waiting.
+     */
+    const answered = {
+      ...openQuestion,
+      id: 'd-0',
+      resolvedAt: NOW - 60_000,
+      answer: { text: '继续', at: NOW - 60_000 },
+    }
+    const findings = inspectTasks(
+      deps([parkedOnQuestion({ decision: answered as never, decisions: [answered, openQuestion] })], {
+        sessionExists: () => false,
+      }),
+    )
+    expect(findings).toEqual([])
+  })
+
   it('resumes being watched once every question is answered', () => {
     const answered = { ...openQuestion, resolvedAt: NOW - 60_000, answer: { text: '继续', at: NOW - 60_000 } }
     // Long enough that any grace window has elapsed: the point is that answering re-arms the rules.

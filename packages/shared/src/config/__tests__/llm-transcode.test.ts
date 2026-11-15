@@ -519,6 +519,46 @@ describe('transcodeResponseToAnthropic — non-streaming', () => {
     expect(out.usage.input_tokens).toBe(5)
   })
 
+  /**
+   * The same fact under the other spelling, and it is not cosmetic.
+   *
+   * commandcode (and relays of that family) emit `reasoning` where DeepSeek emits
+   * `reasoning_content`. Reading only the second meant the chain of thought vanished — and on a
+   * reasoning model with a small `max_tokens` the budget goes to reasoning first, so `content`
+   * came back empty. The gateway then reported 「upstream returned a non-streaming response without
+   * visible text or a tool call」 about a response that had, in fact, answered.
+   */
+  it('keeps `reasoning` as a thinking block, the other spelling providers use', () => {
+    const out = transcodeResponseToAnthropic(
+      {
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: 'OK',
+              reasoning: 'The user asks to reply with the word OK. Simple.',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+      },
+      ctx,
+    ) as { content: Array<{ type: string; text?: string; thinking?: string }> }
+
+    expect(out.content).toEqual([
+      { type: 'thinking', thinking: 'The user asks to reply with the word OK. Simple.' },
+      { type: 'text', text: 'OK' },
+    ])
+  })
+
+  it('still keeps reasoning_content working, which is what DeepSeek emits', () => {
+    const out = transcodeResponseToAnthropic(
+      { choices: [{ message: { role: 'assistant', content: 'OK', reasoning_content: 'thinking' }, finish_reason: 'stop' }] },
+      ctx,
+    ) as { content: Array<{ type: string; thinking?: string }> }
+    expect(out.content[0]).toEqual({ type: 'thinking', thinking: 'thinking' })
+  })
+
   it('excludes cached prompt tokens from input_tokens', () => {
     const out = transcodeResponseToAnthropic(
       {

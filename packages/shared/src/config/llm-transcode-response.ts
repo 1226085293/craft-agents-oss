@@ -371,7 +371,22 @@ export function transcodeResponseToAnthropic(
   body: {
     id?: string
     model?: string
-    choices?: Array<{ message?: OpenAIMessage & { reasoning_content?: string }; finish_reason?: string | null }>
+    choices?: Array<{
+      message?: OpenAIMessage & {
+        /**
+         * Two spellings for the same thing, and providers pick one.
+         *
+         * OpenAI-compatible relays that pass a reasoning model through use `reasoning_content`
+         * (DeepSeek's convention); some gateways emit `reasoning` instead. Reading only the first
+         * dropped the chain of thought from every response of the second kind — and with a small
+         * `max_tokens` the whole budget goes to reasoning, so `content` arrived empty and the
+         * gateway reported 「no visible text」 about a response that had answered.
+         */
+        reasoning_content?: string
+        reasoning?: string
+      }
+      finish_reason?: string | null
+    }>
     usage?: {
       prompt_tokens?: number
       completion_tokens?: number
@@ -384,8 +399,9 @@ export function transcodeResponseToAnthropic(
   const message = choice?.message
   const content: Array<Record<string, unknown>> = []
 
-  if (typeof message?.reasoning_content === 'string' && message.reasoning_content.length > 0) {
-    content.push({ type: 'thinking', thinking: message.reasoning_content })
+  const reasoning = message?.reasoning_content ?? message?.reasoning
+  if (typeof reasoning === 'string' && reasoning.length > 0) {
+    content.push({ type: 'thinking', thinking: reasoning })
   }
   if (typeof message?.content === 'string' && message.content.length > 0) {
     content.push({ type: 'text', text: message.content })

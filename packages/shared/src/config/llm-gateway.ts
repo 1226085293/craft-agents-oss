@@ -109,6 +109,14 @@ const DEFAULT_VISIBLE_OUTPUT_TIMEOUT_MS = 180_000;
  */
 const UPSTREAM_PROBE_TIMEOUT_MS = 20_000;
 
+/**
+ * Token budget for the recovery probe.
+ *
+ * Sized for a reasoning model: enough to think and still emit a visible answer. Smaller budgets
+ * produce an empty `content` on such models, which reads as 「the upstream is still broken」.
+ */
+const PROBE_MAX_TOKENS = 64;
+
 function visibleOutputTimeoutMs(): number {
   const raw = Number(process.env.CRAFT_GATEWAY_VISIBLE_OUTPUT_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_VISIBLE_OUTPUT_TIMEOUT_MS;
@@ -813,8 +821,12 @@ export class LlmGateway {
    * cooling, the upstream itself. A probe that bypassed any of those could answer 「fine」 about a
    * route that is still broken for real requests.
    *
-   * `max_tokens: 1` and a one-word prompt: the cheapest completion the provider will serve. Any
-   * 2xx counts as recovered; a refusal, a timeout, or a transport error counts as not.
+   * Any 2xx counts as recovered; a refusal, a timeout, or a transport error counts as not.
+   *
+   * Not `max_tokens: 1`: a reasoning model spends its whole budget on the chain of thought and
+   * returns empty `content`, which the gateway reads as 「no visible text」 — the probe would report
+   * 「still down」 about a provider that answers perfectly. The budget has to be large enough that
+   * the answer survives even when reasoning comes first.
    */
   async probe(publicModel: string, strategyId: string): Promise<boolean> {
     /**
@@ -834,7 +846,14 @@ export class LlmGateway {
         body: JSON.stringify({
           model: publicModel,
           messages: [{ role: 'user', content: 'ok' }],
-          max_tokens: 1,
+          /**
+           * Enough for a reasoning model to think *and* answer.
+           *
+           * A probe is the cheapest request that still proves the route works, and one token does
+           * not prove it: the visible answer is what the gateway judges, and a reasoning model
+           * would spend the single token before producing any.
+           */
+          max_tokens: PROBE_MAX_TOKENS,
           stream: false,
         }),
         signal: controller.signal,

@@ -193,13 +193,6 @@ export interface TaskStats {
    */
   lostRetries?: number;
   /**
-   * How many times the watchdog has asked for a decision that has no words yet.
-   *
-   * On the task for the same reason `lostRetries` is: the watchdog is rebuilt with the app, so a
-   * counter held in memory would let one interrupted turn be nudged forever, once per boot.
-   */
-  unwordedRetries?: number;
-  /**
    * Last time a trigger actually started a run.
    *
    * The scheduler compares this against the cron expression on startup: every
@@ -581,8 +574,13 @@ export interface TaskDecision {
   /** Why this reached the user. */
   reason: string;
   askedAt: number;
-  /** Past this moment silence is treated as refusal. */
-  deadlineAt: number;
+  /**
+   * Absent — a question waits for the person it was asked of.
+   *
+   * Kept optional only because records written before 2026-11-16 carry a timestamp here; nothing
+   * reads it as a deadline any more. See the note beside the removed `DECISION_TIMEOUT_MS`.
+   */
+  deadlineAt?: number;
   /** The answers the asker enumerated. Absent means approve-or-stop. */
   options?: string[];
   /**
@@ -807,9 +805,11 @@ export const FAILURE_FUSE = 3;
 export const CONTEXT_ROTATE_THRESHOLD = 0.7;
 
 /**
- * How long a decision request waits for the user before defaulting to refusal.
+ * Decision requests have no deadline.
  *
- * Silence is not consent: a task that would delete data must not proceed because
- * nobody looked at the inbox overnight.
+ * They used to expire after twelve hours and be recorded as a refusal, on the reasoning that
+ * 「silence is not consent」. The reasoning was right and the mechanism was wrong: the task is
+ * already paused while a question is open, so silence cannot let it proceed — the only thing the
+ * timer added was turning an unanswered question into an answered 「no」, hours later, without the
+ * person ever having seen it. A question waits for the person it was asked of.
  */
-export const DECISION_TIMEOUT_MS = 12 * 60 * 60 * 1000;

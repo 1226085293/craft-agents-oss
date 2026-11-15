@@ -17,9 +17,7 @@ import { createLogger } from '@craft-agent/shared/utils';
 import {
   isHeartbeatStalled,
   lastActivityOf,
-  lastPlanChangeAt,
   planProgress,
-  planStalled,
   processLostRetryDue,
   shouldTripFuse,
   type Task,
@@ -34,9 +32,6 @@ export type WatchdogFinding =
   | { kind: 'orphaned'; task: Task }
   | { kind: 'idle'; task: Task }
   | { kind: 'unreported'; task: Task }
-  | { kind: 'decision_timeout'; task: Task }
-  | { kind: 'looping'; task: Task }
-  | { kind: 'off_track'; task: Task }
   | { kind: 'resume_lost'; task: Task }
   /**
    * The provider is unreachable, so the task is parked until it comes back.
@@ -56,7 +51,6 @@ export type WatchdogFinding =
      */
     strategies: string[]
   }
-  | { kind: 'unworded_question'; task: Task }
   /** Paused with nobody told — the relay that owed the person a sentence died. */
   | { kind: 'unannounced_pause'; task: Task };
 
@@ -161,8 +155,6 @@ export interface WatchdogDeps {
    * that the decision is now resolved as a refusal.
    */
   denyDecision?: (id: string, note: string) => void;
-  /** Count a nudge about an unwritten question, so the next pass can tell it has been tried. */
-  recordUnwordedRetry?: (id: string, attempts: number) => void;
   /**
    * Whether a session is between turns.
    *
@@ -182,24 +174,8 @@ export interface WatchdogDeps {
  * Three is deliberate: one repeat is a retry, two is bad luck, three means the
  * task will not finish on its own and a human should look.
  */
-export const MAX_REPEATED_HANDOFFS = 3;
 
-/** Nudges before the message changes from 「补上问题」 to 「任务停在这里，需要你处理」. */
-export const MAX_UNWORDED_QUESTION_NUDGES = 3;
 
-/**
- * How long a plan may sit unchanged before the worker is considered off track.
- *
- * Longer than the stall window on purpose: a step can legitimately take twenty
- * minutes (a build, a test run), and pausing a worker that is mid-task is worse
- * than letting a stuck one run a little longer.
- */
-export const OFF_TRACK_MS = 40 * 60_000;
-
-/** Strip whitespace so a reformatted repeat still counts as a repeat. */
-function normalizeSummary(text: string): string {
-  return text.replace(/\s+/g, '').trim();
-}
 
 /**
  * How long a session that has already filed may sit idle before the task counts as stuck.
@@ -226,19 +202,6 @@ export const IDLE_SESSION_MS = 5 * 60_000;
  */
 export const UNREPORTED_GRACE_MS = 90_000;
 
-/**
- * How long a task may sit waiting for a question that has not been written down.
- *
- * The pause and its question are produced by different turns: a run hands back and the task
- * pauses on a decision, then the supervisor spends a turn putting that decision into words. When
- * that turn is cut off — as it was on T-2 — the pause survives and the words never arrive, and the
- * task waits for an answer nobody was asked for. Nothing else looks at a paused task, so without
- * this it waits forever.
- *
- * Two minutes is longer than a wording turn takes and shorter than a person's patience: the point
- * is to notice, not to interrupt.
- */
-export const UNWORDED_QUESTION_GRACE_MS = 2 * 60_000;
 
 /**
  * How long a pause may sit unannounced before the relay is woken again.
@@ -344,21 +307,6 @@ function stoppedGrace(task: Task): number {
   return hasWorkedThisRun(task) ? STOPPED_AFTER_WORK_GRACE_MS : UNREPORTED_GRACE_MS;
 }
 
-/**
- * Detect a worker that keeps reporting the same thing.
- *
- * Only the tail matters: an early repeated summary followed by real progress is
- * normal, and a task that changed direction legitimately starts a new run of
- * distinct summaries.
- */
-export function isLooping(task: Task): boolean {
-  const handoffs = task.handoffs;
-  if (handoffs.length < MAX_REPEATED_HANDOFFS) return false;
-  const tail = handoffs.slice(-MAX_REPEATED_HANDOFFS).map((handoff) => normalizeSummary(handoff.summary));
-  const first = tail[0];
-  if (!first) return false;
-  return tail.every((summary) => summary === first);
-}
 
 /** Re-exported so the loop and the board cannot drift on how many retries 「一次」 is. */
 /**
@@ -408,14 +356,6 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
   const findings: WatchdogFinding[] = [];
 
   for (const task of deps.listTasks()) {
-    // A decision request that nobody answered expires on its own. Checked before
-    // the running-state filters because a waiting task is paused, not running.
-    const decision = task.decision;
-    if (decision && !decision.resolvedAt && decision.deadlineAt <= now) {
-      findings.push({ kind: 'decision_timeout', task });
-      continue;
-    }
-
     /**
      * A task paused because its executor died is the one paused task with an obvious recovery.
      *
@@ -426,25 +366,6 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
      * The counter lives on the task, so "once" survives a restart — a watchdog that retried on
      * every boot would turn one lost process into an endless loop of fresh runs.
      */
-    /**
-     * A pause waiting for words that never came.
-     *
-     * Checked after the deadline, because an expired request is the more urgent claim — but before
-     * everything else, because nothing else will ever look at this task: it is paused, so every
-     * running-state rule below skips it, and its decision is unresolved, so the deadline rule waits
-     * for a person who was never asked anything.
-     */
-    if (
-      task.status === 'paused' &&
-      (task.pauseReason === 'needs_decision' || task.pauseReason === 'asking') &&
-      // Already answered: the person has spoken, so there is nothing left to word.
-      !task.decision?.resolvedAt &&
-      !task.decision?.question?.trim() &&
-      now - (task.decision?.askedAt ?? lastActivityOf(task)) >= UNWORDED_QUESTION_GRACE_MS
-    ) {
-      findings.push({ kind: 'unworded_question', task });
-      continue;
-    }
 
     /**
      * A task parked on an unreachable provider is waiting for something no rule below can supply.
@@ -488,24 +409,6 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
         findings.push({ kind: 'resume_lost', task })
       }
       continue
-    }
-
-    /**
-     * A task waiting for someone to take it still needs the plan-stall rule.
-     *
-     * `awaiting_dispatch` is derived, so this task is `paused` and every rule below skips it —
-     * which would leave 「等待派活」 invisible: nothing runs, nothing is owed, and nobody is told
-     * if no one ever picks it up. The rule that applies is the one about the plan not moving.
-     */
-    if (task.status === 'paused' && task.pauseReason === 'awaiting_dispatch') {
-      const plan = task.spec?.plan;
-      if (plan?.length && !planProgress(plan).complete) {
-        const lastChange = Math.max(lastPlanChangeAt(plan), task.updatedAt);
-        if (planStalled(plan, lastChange, now, OFF_TRACK_MS)) {
-          findings.push({ kind: 'off_track', task });
-        }
-      }
-      continue;
     }
 
     /**
@@ -642,24 +545,23 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
       findings.push({ kind: 'failing', task });
       continue;
     }
-    // Checked after liveness: a looping worker is alive and heartbeating, which
-    // is exactly why the cheap checks never caught it.
-    if (isLooping(task)) {
-      findings.push({ kind: 'looping', task });
-      continue;
-    }
-    // Structural drift: the plan exists, is unfinished, and nothing has moved in
-    // it. This replaces guessing whether the worker "went off target" — a
-    // checklist that stopped moving is the same claim, and it is a timestamp
-    // comparison rather than a model call.
+    /**
+     * A running task is never paused for 「the plan has not moved」.
+     *
+     * This rule used to pause any task whose plan sat unchanged for forty minutes, on the theory
+     * that a checklist which stops moving is evidence of drift. It is not: the expensive, valuable
+     * steps are exactly the ones that leave the plan untouched for an hour — an end-to-end run, a
+     * real-device verification sweep, a full test suite. Live 2026-11-15/16 on T-1: the worker was
+     * mid-delivery, its plan frozen since the last sub-step, and the rule paused the task and told
+     * the person it had 「偏离目标」 while it was in fact still working.
+     *
+     * Liveness is what the rules above already measure, and they measure it properly: `stalled`
+     * on a dead heartbeat, `orphaned` when the session is gone, `unreported` when a session ends a
+     * turn owing a hand-off. A worker that is alive and working is not off track, however long its
+     * current step takes.
+     */
     const plan = task.spec?.plan;
-    if (plan?.length && !planProgress(plan).complete) {
-      const lastChange = Math.max(lastPlanChangeAt(plan), task.updatedAt);
-      if (planStalled(plan, lastChange, now, OFF_TRACK_MS)) {
-        findings.push({ kind: 'off_track', task });
-        continue;
-      }
-    }
+    void plan;
     if (task.budget.deadline && now > task.budget.deadline) {
       findings.push({ kind: 'overdue', task });
     }
@@ -753,71 +655,6 @@ export function applyFindings(
         acted += 1
         break;
       }
-      case 'unworded_question': {
-        /**
-         * Ask the supervisor to finish the sentence it started.
-         *
-         * The task stopped because a decision is owed, and the only thing missing is the words —
-         * the supervisor is the party that owes them, and its turn is what got cut off. Telling the
-         * user 「等你拍板」 instead would be asking them to answer a question nobody asked.
-         *
-         * Two limits, both learned from T-2 being nudged 32 times:
-         *
-         * 1. Only while the supervisor is idle. Sending into a running turn arrives as a steering
-         *    interruption, so the nudge that was supposed to prompt an answer kept cutting off the
-         *    attempt to write it — the supervisor could never finish, and the pass saw it busy
-         *    again thirty seconds later. The counter is only advanced when a nudge is really sent,
-         *    so waiting for an idle supervisor does not burn attempts.
-         * 2. A hard stop after the limit. Past it the task is not going to be worded by this
-         *    supervisor at all; repeating the sentence forever is noise that also keeps interrupting.
-         */
-        const attempts = finding.task.stats?.unwordedRetries ?? 0
-        if (attempts >= MAX_UNWORDED_QUESTION_NUDGES) break
-        if (deps.sessionIdle && !deps.sessionIdle(finding.task.supervisorSessionId)) break
-
-        const next = attempts + 1
-        deps.recordUnwordedRetry?.(finding.task.id, next)
-        const label = finding.task.decision?.label || '一个决定'
-        notify(next >= MAX_UNWORDED_QUESTION_NUDGES
-            ? `${finding.task.id} 停在了「${label}」，问题还是没有写出来。` +
-                `这是最后一次提醒：要么用 report_to_user(kind='decision', taskId='${finding.task.id}', question=…) 写清问什么，要么直接结束这个任务。`
-            : `${finding.task.id} 停在了「${label}」，但问题还没写出来（用户那边没有可回答的内容）。` +
-                `用 report_to_user(kind='decision', taskId='${finding.task.id}', question=…) 把要问的一句话补上。`,
-        )
-        acted += 1
-        break
-      }
-      case 'decision_timeout':
-        // Silence is refusal, never consent.
-        deps.denyDecision?.(
-          finding.task.id,
-          `「${finding.task.decision?.label ?? '决策请求'}」超时未响应，已按拒绝处理。`,
-        );
-        notify(`${finding.task.id} 的决策请求已超时，默认按拒绝处理，任务未继续。`,
-        );
-        acted += 1;
-        break;
-      case 'off_track': {
-        const progress = planProgress(finding.task.spec?.plan);
-        deps.pause(finding.task.id, null, '计划长时间没有推进');
-        notify(`${finding.task.id} 的计划已 ${Math.round(OFF_TRACK_MS / 60_000)} 分钟没有推进（完成 ${progress.done}/${progress.total}），任务已暂停，需要确认它是否偏离目标。`,
-        );
-        acted += 1;
-        break;
-      }
-      case 'looping':
-        deps.pause(finding.task.id, null, '连续多次交接内容相同');
-        notify(`${finding.task.id} 连续 ${MAX_REPEATED_HANDOFFS} 次交接内容相同，Worker 在原地打转，任务已暂停。`,
-        );
-        acted += 1;
-        break;
-      /**
-       * The provider came back — for every group this task's own sessions use.
-       *
-       * Nothing to retry and nothing to ask: the task was healthy when the outage hit, so the only
-       * thing it needs is the supervisor's turn re-run. `upstreamRecoveredFor` is what decides, so
-       * a task waiting on a group that is still down stays parked while its neighbour resumes.
-       */
       case 'upstream_wait': {
         const recovered = upstreamRecoveredFor(finding.strategies, probeAnswers)
         if (!recovered) break
@@ -1042,7 +879,7 @@ export interface WatchdogLoopOptions {
  * the task state instead of from the clock:
  *
  *  - a running task is due at `lastHeartbeatAt + 2 × interval` (the stall rule);
- *  - a paused task with a decision is due at its `deadlineAt`;
+ *  - a paused task with an open question has nothing scheduled: it waits for the person;
  *  - a task that has not changed for 30 minutes is due now (no progress);
  *  - a session that went silent 5 minutes ago is due now.
  *
@@ -1052,11 +889,16 @@ export function nextCheckDelayMs(deps: WatchdogDeps, now = Date.now()): number {
   let soonest = Number.POSITIVE_INFINITY;
 
   for (const task of deps.listTasks()) {
+    /**
+     * An open question schedules nothing — the task waits for the person, however long that takes.
+     *
+     * This used to fall through to `deadlineAt`, then to a wording grace. Neither exists now: a
+     * question is asked once and stays open, so there is no moment in the future when looking at it
+     * again would change anything. Skipping it keeps `NaN` out of the arithmetic (a `Math.min` with
+     * `undefined` poisons `soonest`, and the caller would sleep on `NaN` forever).
+     */
     const decision = task.decision;
-    if (decision && !decision.resolvedAt) {
-      soonest = Math.min(soonest, decision.deadlineAt - now);
-      continue;
-    }
+    if (decision && !decision.resolvedAt) continue
     if (task.status !== 'running') continue;
 
     // Stall deadline: two heartbeat windows without a beat.

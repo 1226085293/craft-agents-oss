@@ -54,7 +54,6 @@ function finishedRound(overrides: Partial<Task> = {}): Task {
       wakeAttempts: 2,
       lastWakeAt: NOW - 2000,
       lostRetries: 1,
-      unwordedRetries: 1,
       handoffsRound: 3,
       lastTriggeredAt: NOW - 60_000,
       pendingTriggers: [{ kind: 'cron', at: NOW - 30_000, detail: 'cron:* * * * *' }],
@@ -135,11 +134,22 @@ describe('what a round takes with it (cleared)', () => {
     expect(resetRoundState(finishedRound(), { now: NOW, clearPlan: true }).task.spec?.plan).toEqual([]);
   });
 
-  it('resets the acceptance counter with the round it was spent on', () => {
-    // Live: round 1 judged three times, round 4 started at the cap and paused for 「验收轮数耗尽」
-    // with no judgement in that round at all.
+  it('carries the acceptance counter across the round, so the cap can be reached', () => {
+    /**
+     * The assertion here used to be `toBe(0)`, and `closeRound` no longer clears the counter.
+     *
+     * Both readings are defensible and only one is right for the code that exists. Resetting suits
+     * a recurring task, where the next round is new work. But `closeRound` is also what runs when a
+     * one-off task delivers, is judged, fails, and is handed back — and clearing the counter there
+     * erased the only record of how many times the same finished plan had been judged, so
+     * `maxIterations` could never fire. Measured on T-1: twelve verification sessions,
+     * `verifyRounds` never above 2, cap of 3 never reached, four of them re-checking one claim.
+     *
+     * `setAcceptance` is the caller that genuinely wants a fresh budget: the requirement changed,
+     * so the earlier judgements were answers to a different question.
+     */
     const { task } = reset();
-    expect(task.verifyRounds).toBe(0);
+    expect(task.verifyRounds).toBe(2);
   });
 
   it('clears the last verdict, which was about the previous round\'s work', () => {
@@ -162,7 +172,6 @@ describe('what a round takes with it (cleared)', () => {
     expect(task.stats?.wakeAttempts).toBeUndefined();
     expect(task.stats?.lastWakeAt).toBeUndefined();
     expect(task.stats?.lostRetries).toBeUndefined();
-    expect(task.stats?.unwordedRetries).toBeUndefined();
     expect(task.stats?.runStartedAt).toBeUndefined();
     expect(task.stats?.lastHeartbeatAt).toBeUndefined();
   });

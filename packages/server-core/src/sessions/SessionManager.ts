@@ -8522,9 +8522,7 @@ ${request.prompt}`;
           // session stop that used to live here had two owners for one resource.
           service.setStatus(id, 'paused', { pauseReason: reason, error: note })
         },
-        denyDecision: (id, note) => service.denyDecision(id, note),
         markPauseAnnounced: (id) => service.markPauseAnnounced(id),
-        recordUnwordedRetry: (id, attempts) => service.recordUnwordedRetry(id, attempts),
         /**
          * Between turns, or not there at all.
          *

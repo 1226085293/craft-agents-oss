@@ -44,7 +44,6 @@ import {
   planProgress,
   sameAgent,
   childrenOf,
-  DECISION_TIMEOUT_MS,
   TERMINAL_STATUSES,
   allDecisions,
   answeredWithoutProgress,
@@ -656,33 +655,6 @@ export class TaskService {
       data: { sessionId },
     });
     return { ok: true, task: next };
-  }
-
-  /**
-   * Resolve an unanswered decision request with the safe answer.
-   *
-   * The task stays paused (it must not resume on silence); what this records is
-   * *why* it will not resume, so the inbox does not show a request forever.
-   */
-  denyDecision(id: string, note: string): Task {
-    const task = this.require(id);
-    const now = this.now();
-    const decision = task.decision;
-    if (!decision) return task;
-    const next: Task = {
-      ...task,
-      decision: {
-        ...decision,
-        resolvedAt: now,
-        resolution: 'timeout',
-        reason: note,
-      },
-      lifecycle: { ...task.lifecycle, lastError: note },
-      updatedAt: now,
-    };
-    this.save(next);
-    appendJournal(this.root, id, { type: 'decision_timeout', at: now, data: { note } });
-    return next;
   }
 
   /**
@@ -1387,7 +1359,6 @@ export class TaskService {
       label: wording.label?.trim() || previous?.label || '需要你决定',
       reason: previous && !previous.resolvedAt ? previous.reason : '',
       askedAt: now,
-      deadlineAt: now + DECISION_TIMEOUT_MS,
       ...(wording.question?.trim() ? { question: wording.question.trim() } : {}),
       ...(options.length ? { options } : {}),
     }
@@ -1740,19 +1711,6 @@ export class TaskService {
     });
     appendJournal(this.root, id, { type: 'silent_turns_cleared', at: now, data: { was: previous } });
     return previous;
-  }
-
-  recordUnwordedRetry(id: string, count: number): Task {
-    const task = this.require(id);
-    const stats = task.stats ?? { runs: 0, activeMs: 0 };
-    const next: Task = {
-      ...task,
-      stats: { ...stats, unwordedRetries: count },
-      updatedAt: this.now(),
-    };
-    this.save(next);
-    appendJournal(this.root, id, { type: 'unworded_nudge', at: this.now(), data: { count } });
-    return next;
   }
 
   recordLostRetry(id: string, count: number): Task {
@@ -2682,7 +2640,6 @@ export class TaskService {
             reason: assessment.reason,
             askedAt: now,
             // Default-deny deadline: silence must not read as consent.
-            deadlineAt: now + DECISION_TIMEOUT_MS,
             // The worker's own candidates, so the card offers the answers that were
             // actually considered instead of a yes/no that may match none of them.
             ...(handoff.options?.length ? { options: [...handoff.options] } : {}),
@@ -2785,7 +2742,6 @@ export class TaskService {
             `连续 ${next.lifecycle?.consecutiveFailures ?? 0} 次交接未通过验收，系统已熔断并停止自动派活。` +
             `最后一次错误：${next.lifecycle?.lastError ?? '(未记录)'}`,
           askedAt: now,
-          deadlineAt: now + DECISION_TIMEOUT_MS,
         },
       };
     } else if (handoff.outcome === 'handoff' && isSpinningInPlace(next)) {
@@ -2815,7 +2771,6 @@ export class TaskService {
             `连续 ${SPIN_LIMIT} 次交接但计划没有推进（当前步骤：${currentStep(next.spec?.plan)?.id ?? '未规划'}）。` +
             '这通常意味着环境不允许或方向不对，需要人拍板。',
           askedAt: now,
-          deadlineAt: now + DECISION_TIMEOUT_MS,
         },
       };
     } else if (accepted && handoff.outcome === 'handoff' && openSteps(next.spec?.plan ?? []).length > 0) {

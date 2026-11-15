@@ -205,125 +205,53 @@ describe('watchdog findings', () => {
   });
 });
 
-describe('decision timeout', () => {
-  it('finds a decision whose deadline passed', () => {
-    const waiting = task({
-      status: 'paused',
-      pauseReason: 'needs_decision',
-      decision: {
-        category: 'destroy-data',
-        label: '删数据',
-        reason: '命中高风险类别',
-        askedAt: NOW - 13 * 60 * 60_000,
-        deadlineAt: NOW - 1000,
-      },
-    });
-    expect(inspectTasks(deps([waiting])).map((f) => f.kind)).toEqual(['decision_timeout']);
-  });
+describe('an open question has no deadline', () => {
+  /**
+   * The twelve-hour expiry was removed on 2026-11-16.
+   *
+   * 「Silence is not consent」 was the reason for it, and the reason was already satisfied: a task
+   * with an open question is paused, so silence cannot let it proceed. All the timer added was
+   * turning an unanswered question into an answered 「no」 overnight — the task never resumed, it
+   * just stopped being askable. A question now waits for the person it was asked of.
+   */
+  const withQuestion = (over: Record<string, unknown>) => task({
+    status: 'paused',
+    pauseReason: 'needs_decision',
+    decision: {
+      category: 'destroy-data',
+      label: '删数据',
+      reason: '命中高风险类别',
+      askedAt: NOW - 13 * 60 * 60_000,
+      ...over,
+    },
+  })
 
-  it('leaves an answered decision alone', () => {
-    const answered = task({
-      status: 'paused',
-      pauseReason: 'needs_decision',
-      decision: {
-        category: 'destroy-data',
-        label: '删数据',
-        reason: '命中高风险类别',
-        askedAt: NOW - 13 * 60 * 60_000,
-        deadlineAt: NOW - 1000,
-        resolvedAt: NOW - 500,
-        resolution: 'approved',
-      },
-    });
-    expect(inspectTasks(deps([answered]))).toEqual([]);
-  });
+  it('does not expire a question however long it has been open', () => {
+    // Thirteen hours, and a stale deadline left over from a record written before the change.
+    const waiting = withQuestion({ deadlineAt: NOW - 1000 })
+    expect(inspectTasks(deps([waiting]))).toEqual([])
+  })
 
-  it('does not fire before the deadline', () => {
-    const pending = task({
-      status: 'paused',
-      pauseReason: 'needs_decision',
-      decision: {
-        category: 'spend-money',
-        label: '花钱',
-        reason: '命中高风险类别',
-        askedAt: NOW,
-        deadlineAt: NOW + 60_000,
-      },
-    });
-    expect(inspectTasks(deps([pending]))).toEqual([]);
-  });
+  it('still leaves an answered decision alone', () => {
+    const answered = withQuestion({
+      resolvedAt: NOW - 500,
+      resolution: 'approved',
+      answer: { text: '继续', at: NOW - 500 },
+    })
+    expect(inspectTasks(deps([answered]))).toEqual([])
+  })
 
-  it('defaults to refusal: denies instead of pausing again', async () => {
-    const denied: string[] = [];
-    const notified: string[] = [];
-    const waiting = task({
-      status: 'paused',
-      pauseReason: 'needs_decision',
-      decision: {
-        category: 'destroy-data',
-        label: '删数据',
-        reason: '命中高风险类别',
-        askedAt: NOW - 13 * 60 * 60_000,
-        deadlineAt: NOW - 1000,
-      },
-    });
-
-    const acted = await runWatchdogPass(
-      deps([waiting], {
-        denyDecision: (id) => denied.push(id),
-        pause: () => {
-          throw new Error('a timeout must not re-pause the task');
-        },
-        notify: (_sup, text) => notified.push(text),
-      }),
-    );
-
-    expect(acted).toBe(1);
-    expect(denied).toEqual(['T-1']);
-    expect(notified[0]).toContain('超时');
-    expect(notified[0]).toContain('拒绝');
-  });
-});
-
-describe('loop detection', () => {
-  function withHandoffs(summaries: string[]): Task {
-    return task({
-      handoffs: summaries.map((summary, index) => ({
-        at: NOW - (summaries.length - index) * 1000,
-        fromSessionId: 'sess-1',
-        outcome: 'handoff' as const,
-        summary,
-      })),
-    });
-  }
-
-  it('flags three identical handoffs in a row', () => {
-    const looping = withHandoffs(['还在改', '还在改', '还在改']);
-    expect(inspectTasks(deps([looping])).map((f) => f.kind)).toEqual(['looping']);
-  });
-
-  it('ignores a repeat that is followed by progress', () => {
-    const progressing = withHandoffs(['还在改', '还在改', '改完了，开始测试']);
-    expect(inspectTasks(deps([progressing]))).toEqual([]);
-  });
-
-  it('treats whitespace-only differences as the same report', () => {
-    const looping = withHandoffs(['还在 改', '还在改', '还在  改']);
-    expect(inspectTasks(deps([looping])).map((f) => f.kind)).toEqual(['looping']);
-  });
-
-  it('pauses a looping worker instead of killing its session', () => {
-    const paused: string[] = [];
-    const looping = withHandoffs(['还在改', '还在改', '还在改']);
+  it('never denies a decision on behalf of the person', () => {
+    const denied: string[] = []
     runWatchdogPass(
-      deps([looping], {
-        pause: (id) => paused.push(id),
+      deps([withQuestion({ deadlineAt: NOW - 1000 })], {
+        denyDecision: (id) => denied.push(id),
         notify: () => undefined,
       }),
-    );
-    expect(paused).toEqual(['T-1']);
-  });
-});
+    )
+    expect(denied).toEqual([])
+  })
+})
 
 describe('watchdog self monitoring', () => {
   it('reports once when its own passes keep failing', async () => {
@@ -359,7 +287,13 @@ describe('event-driven scheduling', () => {
     expect(delay).toBe(19 * 60_000);
   });
 
-  it('wakes at the decision deadline rather than on a fixed tick', () => {
+  it('schedules nothing for an open question, because nothing about it can fall due', () => {
+    /**
+     * This used to wake at `deadlineAt`. With the deadline gone there is no future moment at which
+     * re-reading the task would change anything, so the honest answer is `Infinity`. Leaving a
+     * `deadlineAt` read in place would now compute `Infinity - undefined` → `NaN`, which compares
+     * false against every bound and would sleep the loop out on `NaN`.
+     */
     const waiting = task({
       status: 'paused',
       pauseReason: 'needs_decision',
@@ -368,10 +302,11 @@ describe('event-driven scheduling', () => {
         label: '花钱',
         reason: 'x',
         askedAt: NOW,
-        deadlineAt: NOW + 7 * 60_000,
       },
     });
-    expect(nextCheckDelayMs(deps([waiting]), NOW)).toBe(7 * 60_000);
+    expect(nextCheckDelayMs(deps([waiting]), NOW)).toBe(Number.POSITIVE_INFINITY);
+    // Still bounded, so an answered-elsewhere question is noticed by the periodic re-read.
+    expect(clampSleep(nextCheckDelayMs(deps([waiting]), NOW))).toBe(MAX_WATCHDOG_SLEEP_MS);
   });
 
   it('is due immediately when a heartbeat is already overdue', () => {
@@ -397,11 +332,19 @@ describe('event-driven scheduling', () => {
   });
 });
 
-describe('plan drift', () => {
+describe('a long step is not drift', () => {
+  /**
+   * The forty-minute plan-stall rule was removed on 2026-11-16.
+   *
+   * It paused any task whose plan sat unchanged, calling it 「偏离目标」. But the steps that matter
+   * most are precisely the ones that leave the plan untouched for an hour: an end-to-end run, a
+   * real-device sweep, a full suite. Live T-1: a worker was mid-delivery with a fresh heartbeat and
+   * the rule paused it anyway. Liveness is what the stall/orphaned/unreported rules measure, and
+   * they measure it properly.
+   */
   function withPlan(updatedAt: number): Task {
     return task({
-      // Fresh heartbeat: the worker is alive, it simply stopped reporting
-      // progress — that is exactly the case the plan check exists for.
+      // A live worker: this is the exact fixture that used to be paused.
       stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 30_000, runStartedAt: NOW - 60_000 },
       updatedAt: updatedAt,
       spec: {
@@ -415,31 +358,28 @@ describe('plan drift', () => {
 
   it('leaves a worker whose plan is moving alone', () => {
     expect(inspectTasks(deps([withPlan(NOW - 60_000)]))).toEqual([]);
-  });
+  })
 
-  it('flags a plan that stopped moving for 40 minutes', () => {
-    const findings = inspectTasks(deps([withPlan(NOW - 41 * 60_000)]));
-    expect(findings.map((f) => f.kind)).toEqual(['off_track']);
-  });
+  it('does not pause a live worker whose step has run for hours', () => {
+    // Four hours on one step, heartbeat fresh: still working, so still not a problem.
+    expect(inspectTasks(deps([withPlan(NOW - 4 * 60 * 60_000)]))).toEqual([]);
+  })
 
-  it('pauses the task and says how far it got', () => {
-    const paused: string[] = [];
-    const notified: string[] = [];
-    runWatchdogPass(
-      deps([withPlan(NOW - 41 * 60_000)], {
-        pause: (id) => paused.push(id),
-        notify: (_sup, text) => notified.push(text),
-      }),
-    );
-    expect(paused).toEqual(['T-1']);
-    expect(notified[0]).toContain('1/2');
-  });
-
-  it('does not flag a task that has no plan', () => {
-    const noPlan = task({ updatedAt: NOW - 60_000 });
-    expect(inspectTasks(deps([noPlan]))).toEqual([]);
-  });
-});
+  it('still notices the same worker when its heartbeat goes stale', () => {
+    // The rule that should catch a stuck worker is liveness, and it still does.
+    const stuck = task({
+      stats: {
+        runs: 1,
+        activeMs: 0,
+        lastHeartbeatAt: NOW - 4 * 60 * 60_000,
+        runStartedAt: NOW - 5 * 60 * 60_000,
+      },
+      updatedAt: NOW - 4 * 60 * 60_000,
+      spec: { plan: [{ id: '1.1', title: '改 handler', status: 'doing', updatedAt: NOW - 4 * 60 * 60_000 }] },
+    })
+    expect(inspectTasks(deps([stuck])).map((f) => f.kind)).toContain('stalled')
+  })
+})
 
 describe('finished plan, nothing filed', () => {
   /**
@@ -704,17 +644,19 @@ describe('a task with an open question', () => {
     expect(findings.filter((f) => f.kind === 'idle')).toEqual([])
   })
 
-  it('still expires the unanswered question at its deadline', () => {
-    // Waiting forever is the other failure: a question nobody answers must close itself.
-    // The deadline rule reads the `decision` mirror, so the fixture has to carry both —
-    // the store derives the mirror from the queue on every save.
+  it('keeps the question open past any old deadline it still carries', () => {
+    /**
+     * Records written before 2026-11-16 still hold a `deadlineAt`. It is not a deadline any more:
+     * the field is only kept so old files load, and reading it as an expiry is exactly the
+     * behaviour that was removed. This asserts the *rule* is gone, not just the constant.
+     */
     const overdue = { ...openQuestion, deadlineAt: NOW - 1 }
     const findings = inspectTasks(
       deps([task({ decision: overdue as never, decisions: [overdue] })], {
         sessionWorking: () => false,
       }),
     )
-    expect(findings.map((f) => f.kind)).toEqual(['decision_timeout'])
+    expect(findings.map((f) => f.kind)).toEqual([])
   })
 
   it('resumes being watched once every question is answered', () => {

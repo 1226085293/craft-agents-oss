@@ -14,6 +14,7 @@ import {
 import {
   AlertTriangle,
   ChevronRight,
+  ChevronDown,
   Circle,
   Loader2,
   ArrowRight,
@@ -432,6 +433,20 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
     .filter(isClosed)
     .sort((a, b) => (a.resolvedAt ?? 0) - (b.resolvedAt ?? 0))
   const listedQuestions = [...openQuestions, ...closedQuestions]
+
+  /**
+   * Answered cards start folded.
+   *
+   * They are the record of what was decided and belong on the page — but once everything is
+   * answered there is nothing to act on, and a task that asked six questions pushed its plan and
+   * verdicts off the screen to show them. An open question always wins over the fold: a card asking
+   * for a decision must never be collapsed away from the person who has to make it.
+   *
+   * Seeded rather than synced with an effect, so the initial state is the answer for this render —
+   * an effect would flash the body open for one frame before folding it.
+   */
+  const [answersOpen, setAnswersOpen] = React.useState(openQuestions.length > 0)
+  const answersCollapsed = openQuestions.length === 0 && !answersOpen
 
 
   const { t } = useTranslation()
@@ -924,16 +939,39 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
                   id="task-decision-heading"
                   className={openQuestions.length ? 'text-xs font-semibold text-amber-300' : 'text-xs font-semibold text-foreground/70'}
                 >
-                  {openQuestions.length
-                    ? `等你拍板${openQuestions.length > 1 ? `（${openQuestions.length} 个问题）` : ''}`
-                    : '已答复'}
+                  {openQuestions.length ? (
+                    `等你拍板${openQuestions.length > 1 ? `（${openQuestions.length} 个问题）` : ''}`
+                  ) : (
+                    /**
+                     * The heading is the fold control once nothing is owed.
+                     *
+                     * A separate 「展开」 button beside a heading that already names the thing is two
+                     * controls for one action; the title is the obvious target and the chevron says
+                     * which way it goes.
+                     */
+                    <button
+                      type="button"
+                      onClick={() => setAnswersOpen((open) => !open)}
+                      aria-expanded={!answersCollapsed}
+                      aria-controls="task-decision-body"
+                      className="inline-flex items-center gap-1 text-left transition-colors hover:text-foreground"
+                    >
+                      {answersCollapsed ? (
+                        <ChevronRight className="h-3 w-3" aria-hidden="true" />
+                      ) : (
+                        <ChevronDown className="h-3 w-3" aria-hidden="true" />
+                      )}
+                      已答复
+                      {closedQuestions.length > 1 ? `（${closedQuestions.length} 个问题）` : ''}
+                    </button>
+                  )}
                 </h2>
                 {openQuestions.length > 1 ? (
                   <p className="mt-1 text-[11px] leading-relaxed text-amber-300/80">
                     全部答完才会一起交给督导，中途回答不会打断它。
                   </p>
                 ) : null}
-                <div className="mt-2 space-y-3">
+                <div id="task-decision-body" hidden={answersCollapsed} className="mt-2 space-y-3">
                   {listedQuestions.map((entry, index) => (
                     <div
                       key={entry.id ?? `${entry.askedAt}-${index}`}
@@ -1028,6 +1066,16 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
                 巡检会自动重试一次，不需要手动继续；再失败会停下来等你决定。
               </p>
             ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {detail.lifecycle.lastError ? (
+        <div className="flex items-start gap-3 rounded-lg border border-destructive/25 bg-destructive/5 p-3.5" role="alert">
+          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" aria-hidden="true" />
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-destructive">最近错误</div>
+            <p className="td-body mt-1 whitespace-pre-wrap break-words text-foreground/85">{detail.lifecycle.lastError}</p>
           </div>
         </div>
       ) : null}
@@ -1191,16 +1239,6 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
             ))}
           </ul>
         </section>
-      ) : null}
-
-      {detail.lifecycle.lastError ? (
-        <div className="flex items-start gap-3 rounded-lg border border-destructive/25 bg-destructive/5 p-3.5" role="alert">
-          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" aria-hidden="true" />
-          <div className="min-w-0">
-            <div className="text-xs font-semibold text-destructive">最近错误</div>
-            <p className="td-body mt-1 whitespace-pre-wrap break-words text-foreground/85">{detail.lifecycle.lastError}</p>
-          </div>
-        </div>
       ) : null}
 
       {detail.verify.enabled ? (

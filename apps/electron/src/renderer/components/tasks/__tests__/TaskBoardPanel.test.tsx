@@ -714,3 +714,52 @@ describe('a question carries the moment it was asked', () => {
     expect(html).toContain(String(at.getFullYear()))
   })
 })
+
+describe('answered questions fold away, open ones never do', () => {
+  /*
+   * A task that asked six questions pushed its plan and verdicts off the screen to show answers
+   * there was nothing left to act on. Folding is only right when nothing is owed — a card asking for
+   * a decision must never be collapsed away from the person who has to make it.
+   */
+  const answered: TaskDetailView = {
+    ...detail,
+    pauseReason: null,
+    decisions: [
+      { id: 'd-1', askedAt: Date.now() - 60_000, question: '第一问回答什么？', resolvedAt: Date.now() - 30_000, answer: { text: '就这样', at: Date.now() - 30_000 } },
+    ],
+  }
+
+  const stillAsking: TaskDetailView = {
+    ...detail,
+    pauseReason: 'needs_decision',
+    decisions: [
+      { id: 'd-2', askedAt: Date.now(), question: '还没答的问题？' },
+      ...(answered.decisions ?? []),
+    ],
+  }
+
+  it('starts folded once everything has been answered', () => {
+    const html = renderDetail(answered)
+
+    expect(html).toContain('已答复')
+    // The body is present but hidden — the record stays on the page, just out of the way.
+    expect(html).toContain('hidden')
+    expect(html).toMatch(/aria-expanded="false"/)
+  })
+
+  it('stays open while a question is still waiting for a person', () => {
+    const html = renderDetail(stillAsking)
+
+    expect(html).toContain('等你拍板')
+    expect(html).not.toMatch(/aria-expanded="false"/)
+    expect(html).toContain('还没答的问题？')
+  })
+
+  it('offers the fold as a button with a chevron, not a separate control', () => {
+    const html = renderDetail(answered)
+
+    // The heading is the control: a 「展开」 button beside a heading that already names the thing
+    // would be two controls for one action.
+    expect(html).toContain('aria-controls="task-decision-body"')
+  })
+})

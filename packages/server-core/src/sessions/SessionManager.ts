@@ -8379,6 +8379,27 @@ ${request.prompt}`;
          * A session that is gone contributes nothing: its group cannot be probed, and blocking on
          * it would park the task forever.
          */
+        /**
+         * The task's acceptance session, found the same way `ensureTaskJudgeSession` finds it.
+         *
+         * It matters for the probe because it is a real session with its own strategy group — it
+         * is created outside `startRun`, so it appears in neither `sessionIds` nor
+         * `roundSessionIds`, and a resume that ignored it would trip over a down group the moment
+         * the task reached acceptance.
+         */
+        verifierSessionIdOf: (task) => {
+          for (const candidate of this.sessions.values()) {
+            if (
+              candidate.workspace.id === workspaceId &&
+              candidate.taskId === task.id &&
+              candidate.taskPurpose === 'verify' &&
+              !candidate.isArchived
+            ) {
+              return candidate.id
+            }
+          }
+          return undefined
+        },
         strategiesOf: (_task, sessionIds) => {
           const ids: string[] = []
           for (const sessionId of sessionIds) {

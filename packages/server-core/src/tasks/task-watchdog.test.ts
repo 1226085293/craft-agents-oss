@@ -823,17 +823,46 @@ describe('a task parked on an unreachable provider', () => {
     expect(findings.map((f) => f.kind)).toEqual(['upstream_wait'])
   })
 
-  it('names the strategy groups its own sessions use', () => {
-    const findings = inspectTasks(deps([parked()], {
+  it('names the strategy groups its own sessions use, deduplicated', () => {
+    const findings = inspectTasks(deps([parked({ roundSessionIds: ['sess-1'] } as never)], {
       sessionWorking: () => false,
       strategiesOf: (_task, sessionIds) => {
         expect(sessionIds).toContain('sup')
         expect(sessionIds).toContain('sess-1')
-        return ['commandcode', 'provider', 'commandcode']
+        return ['commandcode', 'provider', 'provider']
       },
     }))
     const wait = findings.find((f) => f.kind === 'upstream_wait')
     expect(wait && 'strategies' in wait ? wait.strategies : null).toEqual(['commandcode', 'provider'])
+  })
+
+  /**
+   * The round's sessions, its supervisor, and its acceptance session — not the lifetime list.
+   *
+   * `sessionIds` is 「every conversation this task ever used, never pruned」: a task that ran twenty
+   * rounds carries twenty dead ids there, none of which has a strategy to probe and any of which
+   * would block a resume forever. `roundSessionIds` is what the round is actually running on, and it
+   * can be several workers in turn. The acceptance session is in neither: it is created outside
+   * `startRun`, so the host is asked for it.
+   */
+  it('asks about the round, the supervisor and the acceptance session — not every session ever', () => {
+    let asked: string[] = []
+    inspectTasks(deps([
+      parked({
+        sessionIds: ['ancient-1', 'ancient-2'],
+        roundSessionIds: ['worker-a', 'worker-b'],
+        currentSessionId: 'worker-b',
+      } as never),
+    ], {
+      sessionWorking: () => false,
+      verifierSessionIdOf: () => 'judge',
+      strategiesOf: (_task, sessionIds) => {
+        asked = sessionIds
+        return ['commandcode']
+      },
+    }))
+    expect(asked).toEqual(['sup', 'worker-a', 'worker-b', 'judge'])
+    expect(asked).not.toContain('ancient-1')
   })
 
   it('resumes only when every group the task needs answers', async () => {

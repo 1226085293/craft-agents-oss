@@ -110,6 +110,14 @@ export interface WatchdogDeps {
    * task can only resume when *its own* groups answer. A global answer would resume a task whose
    * worker is still pointed at a group that is down.
    */
+  /**
+   * The task's acceptance session, if one exists.
+   *
+   * Asked rather than stored: the session is created outside `startRun`, so it is in neither
+   * `sessionIds` nor `roundSessionIds`, and a task record has no field for it. Only the host can
+   * answer, and it answers by looking for `taskId === id && taskPurpose === 'verify'`.
+   */
+  verifierSessionIdOf?: (task: Task) => string | undefined
   strategiesOf?: (task: Task, sessionIds: string[]) => string[]
   /** Whether one strategy group is servable right now — snapshot + one minimal request. */
   probeStrategy?: (strategyId: string) => Promise<boolean>
@@ -456,10 +464,24 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
      * probe owns the decision to resume, and nothing else touches it.
      */
     if (task.status === 'paused' && task.pauseReason === 'upstream') {
+      /**
+       * The sessions that can still be asked about, which is the round's — not the lifetime's.
+       *
+       * `sessionIds` is 「every conversation this task ever used, never pruned」 (it exists so
+       * deleting a task can take them along). Its dead sessions have no strategy to probe and must
+       * not block a resume, so they are the wrong list here. `roundSessionIds` is what the round Is
+       * actually running on — several workers in turn — plus the supervisor, plus the acceptance
+       * session, which is created outside `startRun` and therefore appears in neither list.
+       */
       const sessionIds = [
         task.supervisorSessionId,
-        task.currentSessionId,
-        ...(task.sessionIds ?? []),
+        ...(task.roundSessionIds ?? []),
+        /**
+         * The acceptance session is not in either list: it is created outside `startRun`, so it
+         * never enters `roundSessionIds`, and it is not a worker. The host knows how to find it
+         * (by task id and purpose), so it is the host's job — not a field this layer can guess.
+         */
+        ...(deps.verifierSessionIdOf?.(task) ? [deps.verifierSessionIdOf(task)!] : []),
       ].filter((id): id is string => typeof id === 'string' && id.length > 0)
       findings.push({
         kind: 'upstream_wait',

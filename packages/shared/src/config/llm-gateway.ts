@@ -101,6 +101,14 @@ import {
  */
 const DEFAULT_VISIBLE_OUTPUT_TIMEOUT_MS = 180_000;
 
+/**
+ * How long the recovery probe waits for an answer.
+ *
+ * Short on purpose: a provider that needs longer than this to return one token is not recovered in
+ * any useful sense, and the next probe is only a minute away.
+ */
+const UPSTREAM_PROBE_TIMEOUT_MS = 20_000;
+
 function visibleOutputTimeoutMs(): number {
   const raw = Number(process.env.CRAFT_GATEWAY_VISIBLE_OUTPUT_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_VISIBLE_OUTPUT_TIMEOUT_MS;
@@ -780,6 +788,48 @@ export class LlmGateway {
       if (!pool) return true
       return pool.snapshot(unit.upstreamModel).some((k) => k.available)
     })
+  }
+
+  /**
+   * Ask one strategy whether it can actually answer, with the smallest request that proves it.
+   *
+   * Goes through the real HTTP surface rather than calling the planner directly: the whole point
+   * is to exercise the same path a session's next turn would take — routing, key selection,
+   * cooling, the upstream itself. A probe that bypassed any of those could answer 「fine」 about a
+   * route that is still broken for real requests.
+   *
+   * `max_tokens: 1` and a one-word prompt: the cheapest completion the provider will serve. Any
+   * 2xx counts as recovered; a refusal, a timeout, or a transport error counts as not.
+   */
+  async probe(publicModel: string, strategyId: string): Promise<boolean> {
+    /**
+     * The strategy is pinned in the path, not a header.
+     *
+     * `/s/<id>/v1/...` is how a caller says 「use *this* group」 when its key is authorized for
+     * several (see the router); a header would be ignored and the probe would silently test
+     * whichever group the default picked.
+     */
+    const url = `${this.baseUrl}/s/${encodeURIComponent(strategyId)}/v1/chat/completions`
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), UPSTREAM_PROBE_TIMEOUT_MS)
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: publicModel,
+          messages: [{ role: 'user', content: 'ok' }],
+          max_tokens: 1,
+          stream: false,
+        }),
+        signal: controller.signal,
+      })
+      return response.ok
+    } catch {
+      return false
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   status(): LlmGatewayStatus {

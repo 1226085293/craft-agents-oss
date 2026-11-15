@@ -2379,6 +2379,47 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Park every task this session works for, because the provider — not the task — is down.
+   *
+   * The detail names the sessions and their groups, because recovery is decided per group and the
+   * reader needs to know what is being waited on: 「upstream策略组故障」 alone does not answer
+   * 「which group」 or 「why does my other task keep running」.
+   *
+   * Best-effort by design: this runs while handling an error, and throwing here would replace a
+   * provider outage with a bookkeeping crash.
+   */
+  private parkTaskOnUpstreamOutage(
+    managed: ManagedSession,
+    error: { code?: string; title?: string },
+  ): void {
+    try {
+      const taskId = managed.taskId
+      if (!taskId) return
+      const service = this.getTasks(managed.workspace.id)
+      const task = service.get(taskId)
+      // A finished task has nothing to resume; parking it would rewrite history.
+      if (!task || task.status === 'completed' || task.status === 'canceled') return
+      if (task.status === 'paused' && task.pauseReason === 'upstream') return
+
+      const parts: string[] = []
+      for (const sessionId of [task.supervisorSessionId, task.currentSessionId, ...(task.sessionIds ?? [])]) {
+        if (typeof sessionId !== 'string' || sessionId.length === 0) continue
+        const strategy = this.sessions.get(sessionId)?.strategy
+        const role = sessionId === task.supervisorSessionId ? '任务督导' : '任务会话'
+        parts.push(`${sessionId}（${role}，${strategy ?? '默认策略组'}）`)
+      }
+      const detail = [...new Set(parts)].join('、')
+      service.setStatus(taskId, 'paused', {
+        pauseReason: 'upstream',
+        error: `${error.code ?? 'service_error'}：${detail}`,
+      })
+      sessionLog.info('[tasks] parked on upstream outage', { taskId, code: error.code })
+    } catch (parkError) {
+      sessionLog.warn('[tasks] could not park on upstream outage', { error: parkError })
+    }
+  }
+
+  /**
    * Say something to the person in a lane, without addressing the model.
    *
    * `notifySupervisor` goes through `sendMessage`, which writes a `type: 'user'` row: the notice
@@ -8330,6 +8371,38 @@ ${request.prompt}`;
       const stop = startWatchdog({
         listTasks: () => service.list(),
         sessionExists: (sessionId) => this.sessions.has(sessionId),
+        /**
+         * Which strategy groups this task's own sessions are pinned to.
+         *
+         * A supervisor and its workers do not have to share a group — one may be on the default
+         * and a dispatched worker on a heavier one — so the answer is per task and per session.
+         * A session that is gone contributes nothing: its group cannot be probed, and blocking on
+         * it would park the task forever.
+         */
+        strategiesOf: (_task, sessionIds) => {
+          const ids: string[] = []
+          for (const sessionId of sessionIds) {
+            const strategy = this.sessions.get(sessionId)?.strategy
+            if (typeof strategy === 'string' && strategy.length > 0) ids.push(strategy)
+          }
+          return ids
+        },
+        /**
+         * Is one strategy group servable right now?
+         *
+         * Two steps, and the second is what makes the answer trustworthy: the gateway's own
+         * snapshot says whether any unit is uncooled, and a minimal request confirms the upstream
+         * actually answers. The snapshot alone reported 「servable」 for a route whose upstream was
+         * still returning 502 the moment it was asked.
+         */
+        probeStrategy: async (strategyId) => {
+          try {
+            return await getGatewayRuntime().probeStrategy(strategyId)
+          } catch {
+            // A probe that cannot answer must not be read as 「recovered」.
+            return false
+          }
+        },
         // A session that exists is not a session that is working: it stays in the
         // list after its turn ends. Without this distinction the watchdog answered
         // "alive" for a task nobody was driving.
@@ -15984,6 +16057,24 @@ ${request.prompt}`;
 
         // A terminal typed error means the turn died.
         managed.abnormalTurnEnd = true
+
+        /**
+         * A provider outage is not a task failure, and the task must not be woken every five
+         * minutes to rediscover it.
+         *
+         * Live 2026-11-15 on T-2: a 502 ended the supervisor's turn *mid-dispatch*, the task
+         * parked, and the watchdog read the silence as 「the executor stopped without filing」 —
+         * three identical briefs, each one a fresh request into the same outage. Parking the task
+         * on `upstream` makes the shared probe the only thing that talks to the provider until it
+         * answers again.
+         *
+         * `canRetry` is the system's own verdict that another attempt could work — exactly the
+         * case where waiting beats retrying, because the retry would be immediate and the outage
+         * is not.
+         */
+        if (event.error.canRetry) {
+          this.parkTaskOnUpstreamOutage(managed, event.error)
+        }
 
         // Build rich error message with all diagnostic fields for persistence and UI display
         const typedErrorMessage: Message = {

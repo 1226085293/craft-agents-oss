@@ -10,6 +10,7 @@ import {
   MIN_WATCHDOG_SLEEP_MS,
   nextCheckDelayMs,
   runWatchdogPass,
+  upstreamRecoveredFor,
   startWatchdog,
   type WatchdogDeps,
 } from './task-watchdog.ts';
@@ -252,7 +253,7 @@ describe('decision timeout', () => {
     expect(inspectTasks(deps([pending]))).toEqual([]);
   });
 
-  it('defaults to refusal: denies instead of pausing again', () => {
+  it('defaults to refusal: denies instead of pausing again', async () => {
     const denied: string[] = [];
     const notified: string[] = [];
     const waiting = task({
@@ -267,7 +268,7 @@ describe('decision timeout', () => {
       },
     });
 
-    const acted = runWatchdogPass(
+    const acted = await runWatchdogPass(
       deps([waiting], {
         denyDecision: (id) => denied.push(id),
         pause: () => {
@@ -794,5 +795,115 @@ describe('a hand-off that was accepted is not re-asked for', () => {
     ], quiet))
 
     expect(findings.filter((finding) => finding.kind === 'unreported')).toHaveLength(1)
+  })
+})
+
+describe('a task parked on an unreachable provider', () => {
+  /**
+   * Live 2026-11-15, T-2: a 502 ended the supervisor's turn mid-dispatch, the task parked as
+   * `awaiting_dispatch`, and every rule that reads 「the session stopped」 woke it again — three
+   * identical briefs, each ending in the same 502, while nothing was retrying and nothing said
+   * 「the provider is down」.
+   */
+  const parked = (overrides: Partial<Task> = {}) =>
+    task({
+      status: 'paused',
+      pauseReason: 'upstream' as never,
+      updatedAt: NOW - 5 * 60_000,
+      ...overrides,
+    })
+
+  const strategiesOf = () => ['commandcode']
+
+  it('is reported as upstream_wait and no other rule touches it', () => {
+    const findings = inspectTasks(deps([parked({ handoffs: [] })], {
+      sessionWorking: () => false,
+      strategiesOf,
+    }))
+    expect(findings.map((f) => f.kind)).toEqual(['upstream_wait'])
+  })
+
+  it('names the strategy groups its own sessions use', () => {
+    const findings = inspectTasks(deps([parked()], {
+      sessionWorking: () => false,
+      strategiesOf: (_task, sessionIds) => {
+        expect(sessionIds).toContain('sup')
+        expect(sessionIds).toContain('sess-1')
+        return ['commandcode', 'provider', 'commandcode']
+      },
+    }))
+    const wait = findings.find((f) => f.kind === 'upstream_wait')
+    expect(wait && 'strategies' in wait ? wait.strategies : null).toEqual(['commandcode', 'provider'])
+  })
+
+  it('resumes only when every group the task needs answers', async () => {
+    const woken: string[] = []
+    const depsWithProbe = (answers: Record<string, boolean>) =>
+      deps([parked()], {
+        sessionWorking: () => false,
+        strategiesOf: () => ['commandcode', 'provider'],
+        probeStrategy: async (id) => answers[id] === true,
+        wakeSession: (_task, sessionId) => {
+          woken.push(sessionId)
+          return true
+        },
+        notify: () => undefined,
+      })
+
+    // One of the two groups is still down: the task must stay parked.
+    await runWatchdogPass(depsWithProbe({ commandcode: true, provider: false }))
+    expect(woken).toEqual([])
+
+    await runWatchdogPass(depsWithProbe({ commandcode: true, provider: true }))
+    expect(woken).toEqual(['sup'])
+  })
+
+  it('probes each distinct group once, however many tasks wait on it', async () => {
+    const probed: string[] = []
+    await runWatchdogPass(deps([parked({ id: 'T-1' }), parked({ id: 'T-2' })], {
+      sessionWorking: () => false,
+      strategiesOf: () => ['commandcode'],
+      probeStrategy: async (id) => {
+        probed.push(id)
+        return true
+      },
+      wakeSession: () => true,
+      notify: () => undefined,
+    }))
+    expect(probed).toEqual(['commandcode'])
+  })
+
+  it('stays parked when the probe throws', async () => {
+    const woken: string[] = []
+    await runWatchdogPass(deps([parked()], {
+      sessionWorking: () => false,
+      strategiesOf,
+      probeStrategy: async () => {
+        throw new Error('probe exploded')
+      },
+      wakeSession: (_task, sessionId) => {
+        woken.push(sessionId)
+        return true
+      },
+      notify: () => undefined,
+    }))
+    expect(woken).toEqual([])
+  })
+})
+
+describe('upstreamRecoveredFor', () => {
+  it('needs every group, not any of them', () => {
+    const answers = new Map([['a', true], ['b', false]])
+    expect(upstreamRecoveredFor(['a', 'b'], answers)).toBe(false)
+    expect(upstreamRecoveredFor(['a'], answers)).toBe(true)
+  })
+
+  it('refuses to resume a task with no recorded group', () => {
+    // Resuming on no evidence is worse than staying parked: it recreates the 503 hop.
+    expect(upstreamRecoveredFor([], new Map())).toBe(false)
+  })
+
+  it('treats a group the probe never answered as not recovered', () => {
+    expect(upstreamRecoveredFor(['a'], new Map())).toBe(false)
   })
 })

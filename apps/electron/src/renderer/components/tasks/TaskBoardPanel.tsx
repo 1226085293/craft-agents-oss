@@ -218,6 +218,10 @@ export const PAUSE_REASON_LABEL: Record<string, string> = {
   // Terminal acceptance re-verified `maxIterations` rounds without passing: the plan is done,
   // the work failed every round, and the next decision belongs to a person.
   verify_exhausted: '验收轮数耗尽',
+  // The provider was unreachable, not the work. The detail line names which sessions were on
+  // which strategy group, because 「recovered」 is per group and the reader needs to know what
+  // is being waited on.
+  upstream: '上游策略组故障',
 }
 
 export function pauseReasonLabel(reason: string): string {

@@ -393,7 +393,22 @@ export type TaskPauseReason =
    * the fuse derives from consecutive rejects: this cap trips on the acceptance count, whatever
    * the fuse threshold is, so a maxIterations of 1 pauses here after a single failed round.
    */
-  | 'verify_exhausted';
+  | 'verify_exhausted'
+  /**
+   * The model provider was unreachable — not the task's fault, and not something a retry inside
+   * the turn can fix.
+   *
+   * Distinct from `failures` (the work failed) and from `process_lost` (the process died): here
+   * nothing failed at all. The upstream returned 503 / a dropped stream, and every further request
+   * would hit the same wall until it recovers. Retrying inside the task spends the budget and the
+   * provider's quota to learn the same thing repeatedly, so the task parks instead and one shared
+   * probe asks 「is it back」 on a timer.
+   *
+   * Which strategies count is per task, not global: a supervisor and its workers may each be
+   * pinned to a different strategy group, so the task may only resume once *every* group its own
+   * sessions use answers again — otherwise it resumes into a 503 one hop later.
+   */
+  | 'upstream';
 
 /** What a worker reports when it finishes a turn. */
 export type HandoffOutcome = 'delivered' | 'handoff' | 'needs_decision';

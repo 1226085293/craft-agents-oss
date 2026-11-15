@@ -38,6 +38,24 @@ export type WatchdogFinding =
   | { kind: 'looping'; task: Task }
   | { kind: 'off_track'; task: Task }
   | { kind: 'resume_lost'; task: Task }
+  /**
+   * The provider is unreachable, so the task is parked until it comes back.
+   *
+   * Separate from `resume_lost`: a lost process has an obvious retry (the work is intact, the
+   * process is not), while an unreachable provider has nothing to retry — the next request hits
+   * the same wall. Only the probe deciding 「it answers again」 is evidence enough to move.
+   */
+  | {
+    kind: 'upstream_wait'
+    task: Task
+    /**
+     * The strategies this task's own sessions are on, deduplicated.
+     *
+     * Carried on the finding so the wake decision and the message name the same groups the check
+     * used — recomputing them later would let the session set drift in between.
+     */
+    strategies: string[]
+  }
   | { kind: 'unworded_question'; task: Task }
   /** Paused with nobody told — the relay that owed the person a sentence died. */
   | { kind: 'unannounced_pause'; task: Task };
@@ -85,6 +103,16 @@ export interface WatchdogDeps {
    * reported as a failure. `void` means the implementation cannot tell, and is treated as
    * "started" for compatibility.
    */
+  /**
+   * Which strategy groups this task's own sessions are pinned to.
+   *
+   * Per task, not global: a supervisor and its workers may each sit on a different group, and a
+   * task can only resume when *its own* groups answer. A global answer would resume a task whose
+   * worker is still pointed at a group that is down.
+   */
+  strategiesOf?: (task: Task, sessionIds: string[]) => string[]
+  /** Whether one strategy group is servable right now — snapshot + one minimal request. */
+  probeStrategy?: (strategyId: string) => Promise<boolean>
   wakeSession?: (
     task: Task,
     sessionId: string,
@@ -333,6 +361,35 @@ export function isLooping(task: Task): boolean {
 }
 
 /** Re-exported so the loop and the board cannot drift on how many retries 「一次」 is. */
+/**
+ * How often the shared probe asks whether a downed provider is back.
+ *
+ * One minute because it is the granularity a person perceives as 「it resumed by itself」 — quick
+ * enough that a blip is invisible, slow enough that an hour-long outage costs 60 requests total
+ * instead of one per attempt per task.
+ */
+export const UPSTREAM_PROBE_INTERVAL_MS = 60_000;
+
+/**
+ * Can this task start again, given what the probe found?
+ *
+ * Every strategy the task's own sessions are pinned to must answer. A task whose supervisor is on
+ * one group and whose worker is on another is only resumable when both are back — resuming on one
+ * of them just moves the 503 one hop further and parks the task again.
+ *
+ * Pure so the rule is testable without a gateway or a timer: the caller collects the task's
+ * strategies, probes each, and hands the answers here.
+ */
+export function upstreamRecoveredFor(
+  needed: readonly string[],
+  answers: ReadonlyMap<string, boolean>,
+): boolean {
+  // No recorded strategy means nothing to wait on: the task was parked for a reason this probe
+  // cannot evaluate, so it must not be resumed on this probe's authority.
+  if (needed.length === 0) return false;
+  return needed.every((strategyId) => answers.get(strategyId) === true);
+}
+
 export { MAX_PROCESS_LOST_RETRIES } from '@craft-agent/shared/tasks';
 
 /**
@@ -387,6 +444,29 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
     ) {
       findings.push({ kind: 'unworded_question', task });
       continue;
+    }
+
+    /**
+     * A task parked on an unreachable provider is waiting for something no rule below can supply.
+     *
+     * Idle / unreported / off-track all read 「the session stopped」 and wake it — which, while the
+     * provider is down, means one more request into the same 503. Live 2026-11-15: a 502 ended the
+     * supervisor's turn mid-dispatch, the watchdog read the silence as 「stopped without filing」,
+     * and the same brief was delivered three times. The task is reported as `upstream_wait` so the
+     * probe owns the decision to resume, and nothing else touches it.
+     */
+    if (task.status === 'paused' && task.pauseReason === 'upstream') {
+      const sessionIds = [
+        task.supervisorSessionId,
+        task.currentSessionId,
+        ...(task.sessionIds ?? []),
+      ].filter((id): id is string => typeof id === 'string' && id.length > 0)
+      findings.push({
+        kind: 'upstream_wait',
+        task,
+        strategies: [...new Set(deps.strategiesOf?.(task, sessionIds) ?? [])],
+      })
+      continue
     }
 
     if (task.status === 'paused' && task.pauseReason === 'process_lost') {
@@ -607,7 +687,18 @@ function announceWake(
 }
 
 /** Apply the fixes for a batch of findings. Pure rules; no model calls. */
-export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): number {
+export function applyFindings(
+  deps: WatchdogDeps,
+  findings: WatchdogFinding[],
+  /**
+   * Probe answers per strategy id.
+   *
+   * Absent when the caller has no probe (`runWatchdogPass` without `probeStrategy`, or the tests
+   * that drive `applyFindings` directly) — an absent answer is 「not known to be back」, so a
+   * parked task stays parked rather than resuming on missing evidence.
+   */
+  probeAnswers: ReadonlyMap<string, boolean> = new Map(),
+): number {
   let acted = 0;
   for (const finding of findings) {
     /**
@@ -706,6 +797,29 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         );
         acted += 1;
         break;
+      /**
+       * The provider came back — for every group this task's own sessions use.
+       *
+       * Nothing to retry and nothing to ask: the task was healthy when the outage hit, so the only
+       * thing it needs is the supervisor's turn re-run. `upstreamRecoveredFor` is what decides, so
+       * a task waiting on a group that is still down stays parked while its neighbour resumes.
+       */
+      case 'upstream_wait': {
+        const recovered = upstreamRecoveredFor(finding.strategies, probeAnswers)
+        if (!recovered) break
+        if (!deps.wakeSession || !finding.task.supervisorSessionId) break
+        const result = deps.wakeSession(finding.task, finding.task.supervisorSessionId, 'pause')
+        announceWake(
+          deps,
+          finding.task,
+          'pause',
+          result,
+          `${finding.task.id} 的上游已恢复（${finding.strategies.join('、')}），已让督导继续。`,
+          `${finding.task.id} 的上游已恢复，但唤醒督导失败——任务仍停在暂停，需要你确认。`,
+        )
+        acted += 1
+        break
+      }
       case 'resume_lost': {
         /**
          * The pass itself stays synchronous — it is a pure rule sweep and making it async would
@@ -825,8 +939,41 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
 }
 
 /** One pass: inspect then apply. Returns how many tasks were paused. */
-export function runWatchdogPass(deps: WatchdogDeps): number {
-  return applyFindings(deps, inspectTasks(deps));
+/**
+ * One pass: inspect, ask the probe about any parked task, then act.
+ *
+ * The probe is asynchronous while `inspectTasks` stays pure and synchronous — so the pass collects
+ * findings first, resolves the one question only I/O can answer, and hands the rest to
+ * `applyFindings`. Keeping `inspectTasks` synchronous is what lets every rule stay unit-testable
+ * with a fixed `now`.
+ */
+export async function runWatchdogPass(deps: WatchdogDeps): Promise<number> {
+  const findings = inspectTasks(deps);
+  const parked = findings.filter(
+    (finding): finding is Extract<WatchdogFinding, { kind: 'upstream_wait' }> =>
+      finding.kind === 'upstream_wait',
+  );
+  if (parked.length === 0) return applyFindings(deps, findings);
+
+  /**
+   * One probe per distinct strategy, shared by every task that waits on it.
+   *
+   * This is the whole point of a shared probe: ten tasks parked on the same outage cost one
+   * request per minute, not ten. A failed probe is `false`, never an exception — a probe that
+   * throws must not be read as 「recovered」.
+   */
+  const answers = new Map<string, boolean>();
+  const asked = [...new Set(parked.flatMap((finding) => finding.strategies))];
+  for (const strategyId of asked) {
+    if (!deps.probeStrategy) break;
+    try {
+      answers.set(strategyId, await deps.probeStrategy(strategyId));
+    } catch {
+      answers.set(strategyId, false);
+    }
+  }
+
+  return applyFindings(deps, findings, answers);
 }
 
 /** Default cadence: often enough to catch a stall, cheap enough to ignore. */
@@ -969,50 +1116,79 @@ export function startWatchdog(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
 
+  /**
+   * One pass, and never two at once.
+   *
+   * The pass now awaits the upstream probe, so a slow probe would overlap the next tick. Two
+   * overlapping passes could both see a parked task and both wake it — the double-wake this loop
+   * has already produced once (T-2, 2 ms apart). `ticking` makes the pass self-serialising.
+   */
+  /**
+   * One pass, and never two at once.
+   *
+   * The pass now awaits the upstream probe, so a slow probe would overlap the next tick. Two
+   * overlapping passes could both see the same parked task and both wake it — the double-wake this
+   * loop has already produced once (T-2, two turns 2 ms apart). `ticking` keeps the pass
+   * self-serialising; the timer below still schedules the next one regardless of the outcome.
+   */
+  let ticking = false;
   const tick = (): void => {
-    if (stopped) return;
-    try {
-      const acted = runWatchdogPass(deps);
-      // A silent pass is indistinguishable from a loop that is not running. One line
-      // per pass is the difference between "nothing to do" and "not alive", and this
-      // loop has already been reported dead twice while the code looked correct.
-      log.info(`[watchdog] pass: ${acted} finding(s)`);
-      failures = 0;
-      lastError = '';
-    } catch (error) {
-      failures += 1;
-      lastError = error instanceof Error ? error.message : String(error);
-      log.warn(`[watchdog] pass failed (${failures}/${MAX_WATCHDOG_FAILURES})`, { error: lastError });
-      // Report once per outage, not every pass: a broken watchdog must not add
-      // its own flood to the problem.
-      if (failures === MAX_WATCHDOG_FAILURES) {
-        try {
-          options.onSelfFailure?.({ failures, lastError });
-        } catch {
-          // Nothing left to report to.
+    if (stopped || ticking) return;
+    ticking = true;
+    void (async () => {
+      try {
+        const acted = await runWatchdogPass(deps);
+        // A silent pass is indistinguishable from a loop that is not running. One line
+        // per pass is the difference between "nothing to do" and "not alive", and this
+        // loop has already been reported dead twice while the code looked correct.
+        log.info(`[watchdog] pass: ${acted} finding(s)`);
+        failures = 0;
+        lastError = '';
+      } catch (error) {
+        failures += 1;
+        lastError = error instanceof Error ? error.message : String(error);
+        log.warn(`[watchdog] pass failed (${failures}/${MAX_WATCHDOG_FAILURES})`, { error: lastError });
+        // Report once per outage, not every pass: a broken watchdog must not add
+        // its own flood to the problem.
+        if (failures === MAX_WATCHDOG_FAILURES) {
+          try {
+            options.onSelfFailure?.({ failures, lastError });
+          } catch {
+            // Nothing left to report to.
+          }
         }
+      } finally {
+        ticking = false;
       }
-    }
 
-    // Derive the next wake-up from what is actually pending. `intervalMs` is the
-    // floor when a caller wants a faster sweep than the state suggests.
-    //
-    // This read is inside its own guard on purpose: `nextCheckDelayMs` touches the
-    // task store, and a store that throws here would otherwise escape the timer
-    // callback and stop the loop for good — the exact failure mode the self-
-    // monitor exists to catch.
-    let suggested = Number.POSITIVE_INFINITY;
-    try {
-      suggested = nextCheckDelayMs(deps);
-    } catch (error) {
-      log.warn('[watchdog] cannot compute the next check; retrying later', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-    let delay = clampSleep(suggested);
-    if (Number.isFinite(intervalMs) && intervalMs > 0) delay = Math.min(delay, intervalMs);
-    timer = setTimeout(tick, delay);
-    timer.unref?.();
+      /**
+       * Schedule from inside the pass, not from the callback's end.
+       *
+       * Awaiting the probe means the callback returns before the pass finishes; scheduling outside
+       * this block would queue the next tick while `ticking` is still set, and every tick after a
+       * slow probe would be skipped.
+       */
+      if (stopped) return;
+      // Derive the next wake-up from what is actually pending. `intervalMs` is the
+      // floor when a caller wants a faster sweep than the state suggests.
+      //
+      // This read is inside its own guard on purpose: `nextCheckDelayMs` touches the
+      // task store, and a store that throws here would otherwise escape the timer
+      // callback and stop the loop for good — the exact failure mode the self-
+      // monitor exists to catch.
+      let suggested = Number.POSITIVE_INFINITY;
+      try {
+        suggested = nextCheckDelayMs(deps);
+      } catch (error) {
+        log.warn('[watchdog] cannot compute the next check; retrying later', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      let delay = clampSleep(suggested);
+      if (Number.isFinite(intervalMs) && intervalMs > 0) delay = Math.min(delay, intervalMs);
+      timer = setTimeout(tick, delay);
+      timer.unref?.();
+    })();
   };
 
   // First pass immediately: a task may already be stalled when the app starts.

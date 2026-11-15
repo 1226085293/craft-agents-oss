@@ -268,6 +268,36 @@ export class GatewayRuntime {
     return keys[0]?.key ?? null;
   }
 
+  /**
+   * Is this strategy servable right now? Two steps, and both are needed.
+   *
+   * The snapshot answers 「is any unit uncooled」 for free, but it is a bookkeeping answer: a route
+   * that was cooled and has thawed reads as servable while the upstream may still be refusing. A
+   * minimal request is the only thing that proves the other end answers, and it costs one short
+   * completion — which, once a minute for a whole outage, is far less than the retries it replaces.
+   *
+   * Failure of any kind is `false`: a strategy whose state cannot be read is not known to be up,
+   * and resuming a task on that assumption puts the 503 one hop later.
+   */
+  async probeStrategy(strategyId: string): Promise<boolean> {
+    if (!this.gateway) return false;
+    let publicModel: string | undefined;
+    try {
+      const row = this.gateway.status().strategies.find((entry) => entry.id === strategyId);
+      publicModel = row?.openModels?.[0];
+    } catch {
+      return false;
+    }
+    // Nothing uncooled means there is nothing to prove yet — wait for the cooldown to lapse.
+    if (!publicModel) return false;
+    try {
+      const answer = await this.gateway.probe(publicModel, strategyId);
+      return answer;
+    } catch {
+      return false;
+    }
+  }
+
   /** Snapshot for the settings UI and status broadcasts. */
   status(): LlmGatewayStatus & { enabled: boolean; lastRouteRefusal: string | null } {
     if (!this.gateway) {

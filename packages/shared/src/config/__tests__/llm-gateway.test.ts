@@ -1267,7 +1267,6 @@ describe('the prompt cache expired without the route moving', () => {
     config({
       presets: {
         cacheTest: {
-          id: 'cacheTest',
           ...(ttlSeconds === undefined ? {} : { promptCacheTtlSeconds: ttlSeconds }),
         },
       },

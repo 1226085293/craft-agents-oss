@@ -831,40 +831,70 @@ export class LlmGateway {
    */
   async probe(publicModel: string, strategyId: string): Promise<boolean> {
     /**
-     * The strategy is pinned in the path, not a header.
+     * Straight to the provider, not through this gateway's own HTTP surface.
      *
-     * `/s/<id>/v1/...` is how a caller says 「use *this* group」 when its key is authorized for
-     * several (see the router); a header would be ignored and the probe would silently test
-     * whichever group the default picked.
+     * A probe asks one question — 「does this route answer」 — and the least surprising way to ask
+     * it is the same request a real turn would make upstream. Routing it back through `/s/<id>/…`
+     * put the answer at the mercy of the gateway's own request transformation: `reasoning_effort`
+     * there comes from the *client's* thinking level, which a probe has none of, so the field was
+     * dropped and a reasoning model spent the budget thinking instead of answering — the probe then
+     * reported 「still down」 about a provider that was fine (measured 2026-11-15, commandcode).
      */
-    const url = `${this.baseUrl}/s/${encodeURIComponent(strategyId)}/v1/chat/completions`
+    const config = this.getConfig();
+    const strategy = config.strategies.find((entry) => entry.id === strategyId);
+    if (!strategy) return false;
+    let unit: PlannedUnit | undefined;
+    try {
+      unit = candidateUnits(config, strategy, publicModel).units[0];
+    } catch {
+      // A dangling provider reference is the planner's error to report, not a probe's.
+      return false;
+    }
+    if (!unit) return false;
+    const provider = unit.provider;
+    const key = provider.keys.find((entry) => entry.enabled !== false);
+    // A provider that needs no key still gets a request; one that needs it and has none cannot
+    // answer, and saying so here is more useful than sending an unauthenticated call.
+    if (!key && provider.keys.length > 0) return false;
+
+    const isOpenAI = provider.protocol === 'openai-completions';
+    const url = isOpenAI
+      ? `${provider.baseUrl.replace(/\/+$/, '')}/chat/completions`
+      : `${provider.baseUrl.replace(/\/+$/, '')}/messages`;
+
+    const body = isOpenAI
+      ? {
+        model: unit.upstreamModel,
+        messages: [{ role: 'user', content: 'ok' }],
+        /**
+         * Reasoning off, because a probe wants the answer and nothing else.
+         *
+         * A reasoning model thinks first, and with a small budget the thought consumes all of it —
+         * `content` comes back empty and a healthy provider looks down. `off` is the value this
+         * provider family accepts (it rejects `none`); one that does not know the field ignores it,
+         * and the budget below still leaves room for a short chain of thought.
+         */
+        reasoning_effort: 'off',
+        max_tokens: PROBE_MAX_TOKENS,
+        stream: false,
+      }
+      : {
+        model: unit.upstreamModel,
+        messages: [{ role: 'user', content: 'ok' }],
+        thinking: { type: 'disabled' },
+        max_tokens: PROBE_MAX_TOKENS,
+      };
+
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), UPSTREAM_PROBE_TIMEOUT_MS)
     try {
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: publicModel,
-          messages: [{ role: 'user', content: 'ok' }],
-          /**
-           * Reasoning off, one token.
-           *
-           * A probe asks one question — 「does this route answer」 — and a reasoning model answers it
-           * twice over unless told not to: it thinks first, and with a small budget the thought
-           * consumes the whole budget, so `content` comes back empty and a working provider looks
-           * down. Measured 2026-11-15 on commandcode: `reasoning_effort: 'off'` with
-           * `max_tokens: 1` returned `content: 'OK'`; without it, the same request returned an
-           * empty `content` after spending its one token on reasoning.
-           *
-           * `off` is the value that provider accepts (it rejects `none`); a provider that does not
-           * know the field ignores it, which is harmless here — the budget below still leaves room
-           * for a short chain of thought.
-           */
-          reasoning_effort: 'off',
-          max_tokens: PROBE_MAX_TOKENS,
-          stream: false,
-        }),
+        headers: {
+          'content-type': 'application/json',
+          ...(key ? { authorization: `Bearer ${key.key}` } : {}),
+        },
+        body: JSON.stringify(body),
         signal: controller.signal,
       })
       return response.ok

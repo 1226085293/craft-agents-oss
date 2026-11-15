@@ -535,3 +535,32 @@ describe('the authorisation boundary is named the way the code reads it', () => 
     }
   })
 })
+
+describe('an unstated scope means the whole plan', () => {
+  /**
+   * Live T-2 2026-11-15: eleven decision cards in ten minutes, every one asking 「continue / stop /
+   * wait」 about a task whose instruction was 「把这两项做完」. The supervisor was reading silence
+   * about the ceiling as an absence of authority, so each hand-off became another 「may I go on」.
+   *
+   * The rule has to be stated, not implied: 「do not ask」 alone leaves the default undefined, and a
+   * model with no default treats every hand-off as a fresh decision.
+   */
+  const taskLane = () => getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane: 'task' })
+
+  it('says that not saying how far means all of it', () => {
+    const text = taskLane()
+    expect(text).toContain('Silence is not a boundary')
+    expect(text).toContain('do all of it, then report')
+  })
+
+  it('still forbids confirming after every sub-step', () => {
+    // The default and the prohibition are two halves of one rule; losing either reopens the loop.
+    expect(taskLane()).toContain('Do not confirm after every sub-step')
+  })
+
+  it('keeps the three cases that do justify asking', () => {
+    const text = taskLane()
+    expect(text).toContain('the `directive` boundary stops before the remaining steps')
+    expect(text).toContain('the plan now contains a step their words never covered')
+  })
+})

@@ -424,6 +424,20 @@ So "I'll just look it up myself" or "I'll edit this file myself" is **only possi
           '- On "message type: answer · task T-x": this is the person answering an `ask_user`. **Read the answer below the header word by word** and turn it into a `directive` with `task_update` (answer "only the login fix" → `directive`: only the login fix, nothing else; answer "stop" → set the task `canceled`). The system releases only after you write the `directive` (or end the task) — an answer without a directive leaves the task parked.',
           '- Anything the person must know or decide goes through `ask_user` — it lands in their lane; do not expect them to read this session.',
           '- When the person authorises only part of the work, write the authorisation into `directive` (`task_update`); `scope` only says what is covered. **Only `directive` is treated as the boundary**: if they said "stop after 1.1" and you wrote no `directive`, no boundary exists and the system may continue after the hand-off.',
+          /**
+           * The default was missing, so 「do it」 became 「shall I keep going」.
+           *
+           * A person who writes 「finish these four things」 and is then asked, mid-plan, whether
+           * to continue has been asked a question they already answered — and the work waits on
+           * the reply. Observed live on T-2 2026-11-15: eleven decision cards in ten minutes, each
+           * one asking the same 「continue / stop / wait」 about a task whose instruction was
+           * 「把这两项做完」. The supervisor was reading the absence of an explicit ceiling as an
+           * absence of authority.
+           *
+           * The rule below is the default that was missing: silence about scope means the whole
+           * plan, and silence about stopping means stop when it is finished.
+           */
+          '- **Silence is not a boundary**: when the person did not say how far to go, or did not say to stop partway, the task is 「do all of it, then report」. Write that as the `directive` (`complete every step of the plan, report when all of it is done`) and dispatch straight through the plan. Never ask 「should I continue」 about work no instruction told you to stop — the answer is already in their request, and asking turns 「do it」 into a decision they have to make twice.',
           '- **After a hand-off, read `directive` before deciding to ask**: if it already covers the remaining steps (their words were "three outline items, all of them", `directive` says "complete 1.1/2.1/3.1 as asked, end when all are done"), dispatch the next step — you already have the authority, and asking again asks the same question twice. Only three cases justify `ask_user`: ① the `directive` boundary stops before the remaining steps (they said "stop after 1.1"); ② the plan now contains a step their words never covered; ③ the next step must choose between two defensible paths. **Do not confirm after every sub-step** — that is not caution, it is pushing the decision back to the person.',
           '- **Disturb the person in exactly three cases** (nothing else is notified, including start, dispatch, progress and individual sub-steps): ① `kind: decision` — only a person can decide (authority sufficient or not, which of two paths, whether to continue); ② `kind: blocked` — stuck and **a human hand is required** to continue (expired credentials, missing permission, broken external dependency); ③ `kind: completed` — **the whole plan is done** and this is the final answer.',
           '- **`completed` is not "I started"**: it means the task has ended. A task just created, a plan just written, dispatch just beginning — none of these notify the person. They already know what they asked for; `ask_user` should speak when they must decide or when it is over.',

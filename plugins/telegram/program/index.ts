@@ -75,17 +75,9 @@ const MIME_EXT_FALLBACK: Record<string, string> = {
 type TelegramBotCommand = Parameters<Api['setMyCommands']>[0][number]
 
 export const TELEGRAM_BOT_COMMANDS = [
-  { command: 'new', description: 'Create and bind a new session' },
-  { command: 'bind', description: 'Connect to an existing session' },
-  { command: 'pair', description: 'Redeem app pairing code' },
-  { command: 'unbind', description: 'Disconnect this chat' },
-  { command: 'status', description: 'Show current binding' },
-  { command: 'thinking', description: 'Set thinking level' },
-  { command: 'exec', description: 'Switch permission mode' },
-  { command: 'stop', description: 'Stop current agent run' },
-  { command: 'compact', description: 'Compact context into summary' },
-  { command: 'clear', description: 'Clear current context' },
-  { command: 'help', description: 'Show available commands' },
+  // Intentionally empty: the bot menu shows no slash commands. The
+  // registration mechanism below is kept on purpose — add an entry here
+  // (and the matching handler) to expose commands again.
 ] as const satisfies readonly TelegramBotCommand[]
 
 export type TelegramCommandApi = Pick<Api, 'setMyCommands'>

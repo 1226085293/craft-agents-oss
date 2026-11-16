@@ -80,27 +80,17 @@ describe('TelegramAdapter inbound dispatch', () => {
 })
 
 describe('Telegram bot command registration', () => {
-  it('publishes clear in Telegram slash suggestions', async () => {
+  it('keeps the registration mechanism but exposes an empty command menu', async () => {
     const setMyCommands = mock(async (
       _commands: Parameters<TelegramCommandApi['setMyCommands']>[0],
     ) => true as const)
 
     await registerTelegramBotCommands({ setMyCommands })
 
+    // The mechanism stays (one setMyCommands call per boot, so the menu is
+    // actively cleared/refreshed), but no commands are exposed. Add entries
+    // to TELEGRAM_BOT_COMMANDS to publish slash suggestions again.
     expect(setMyCommands).toHaveBeenCalledTimes(1)
-    const registered = setMyCommands.mock.calls[0]?.[0] ?? []
-    expect(registered).toEqual(TELEGRAM_BOT_COMMANDS)
-    expect(registered).toContainEqual({
-      command: 'clear',
-      description: 'Clear current context',
-    })
-    expect(registered).toContainEqual({
-      command: 'thinking',
-      description: 'Set thinking level',
-    })
-    expect(registered).toContainEqual({
-      command: 'exec',
-      description: 'Switch permission mode',
-    })
+    expect(TELEGRAM_BOT_COMMANDS).toEqual([])
   })
 })

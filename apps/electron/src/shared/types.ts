@@ -784,6 +784,8 @@ export interface ElectronAPI {
       tag?: string
       hasRecipients?: boolean
       delivered?: boolean
+      /** Only events a receiving session has finished acting on (or only ones it has not, when false). */
+      handled?: boolean
       since?: number
       until?: number
       search?: string
@@ -815,6 +817,15 @@ export interface ElectronAPI {
   onEventsChanged(
     callback: (workspaceId: string, event: import('@craft-agent/shared/protocol/dto').EventMetaDto) => void
   ): () => void
+  /** Durable outbox, newest first; pass a status to filter one delivery state. */
+  listOutbox(
+    workspaceId: string,
+    status?: 'sent' | 'pending' | 'failed'
+  ): Promise<import('@craft-agent/shared/protocol/dto').OutboxRecordDto[]>
+  /** Re-arm a failed outbox record so the dispatcher retries it. */
+  retryOutbox(workspaceId: string, id: string): Promise<boolean>
+  /** Drop sent/failed outbox records; pending ones keep their place. Returns how many. */
+  purgeOutbox(workspaceId: string): Promise<number>
   listEventListeners(
     workspaceId: string,
     skipProbes?: boolean,
@@ -1185,7 +1196,8 @@ export interface PagesNavigationState {
  */
 export interface EventsNavigationState {
   navigator: 'events'
-  section: 'list' | 'listeners'
+  /** list = 事件日志, listeners = 插件卡片, inbox = 未处理事件, outbox = 发出消息。 */
+  section: 'list' | 'listeners' | 'inbox' | 'outbox'
   /** Selected event id, or null. */
   details: { type: 'event'; eventId: string } | { type: 'listener'; listenerId: string } | null
   rightSidebar?: RightSidebarPanel
@@ -1258,6 +1270,14 @@ export const isEventListenersNavigation = (state: NavigationState): boolean =>
 export const isEventListNavigation = (state: NavigationState): boolean =>
   state.navigator === 'events' && state.section === 'list'
 
+/** The 收件箱 section: arrived events nobody has finished acting on yet. */
+export const isEventInboxNavigation = (state: NavigationState): boolean =>
+  state.navigator === 'events' && state.section === 'inbox'
+
+/** The 发件箱 section: outbound messages and their delivery state. */
+export const isEventOutboxNavigation = (state: NavigationState): boolean =>
+  state.navigator === 'events' && state.section === 'outbox'
+
 export const DEFAULT_NAVIGATION_STATE: NavigationState = {
   navigator: 'sessions',
   filter: { kind: 'allSessions' },
@@ -1293,7 +1313,7 @@ export const getNavigationStateKey = (state: NavigationState): string => {
   if (state.navigator === 'events') {
     if (state.details?.type === 'event') return `events/list/event/${state.details.eventId}`
     if (state.details?.type === 'listener') return `events/listeners/listener/${state.details.listenerId}`
-    return state.section === 'listeners' ? 'events/listeners' : 'events/list'
+    return `events/${state.section}`
   }
   if (state.navigator === 'settings') {
     if (state.subpage === null) return 'settings'

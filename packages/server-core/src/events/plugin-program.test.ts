@@ -72,6 +72,9 @@ function spawnPlugin(dir: string, pluginId: string): { stop: () => void; port: P
       CRAFT_LISTENER_ID: pluginId,
       CRAFT_PLUGIN_ENTRY: './program/index.ts',
       CRAFT_LISTENER_CONFIG: join(dir, 'config.json'),
+      // The data dir is where the control service publishes itself; without it
+      // the plugin has nowhere to write control.json and /action is ungated.
+      CRAFT_LISTENER_DATA: join(dir, 'data'),
       CRAFT_PLUGIN_PORT: '0',
     },
     stdout: 'pipe',
@@ -92,6 +95,30 @@ function spawnPlugin(dir: string, pluginId: string): { stop: () => void; port: P
   })()
 
   return { stop: () => proc.kill(), port }
+}
+
+/**
+ * Wait for the plugin to publish its control service (port + per-process
+ * bearer token). The write happens right after the readiness line, so this
+ * is a short poll, exactly the way the host's callPluginAction learns the
+ * address — nothing is guessed.
+ */
+async function waitForControl(dataDir: string): Promise<{ port: number; token: string }> {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      const info = JSON.parse(readFileSync(join(dataDir, 'control.json'), 'utf8')) as {
+        port?: unknown
+        token?: unknown
+      }
+      if (typeof info.port === 'number' && typeof info.token === 'string') {
+        return { port: info.port, token: info.token }
+      }
+    } catch {
+      // Not written yet.
+    }
+    await Bun.sleep(50)
+  }
+  throw new Error('control.json was never written')
 }
 
 const adapterThatEmitsOneMessage = `
@@ -143,13 +170,27 @@ describe('plugin program', () => {
       const health = await fetch(`http://127.0.0.1:${port}/health`)
       expect(health.status).toBe(200)
 
-      const sent = await fetch(`http://127.0.0.1:${port}/action`, {
+      const control = await waitForControl(join(dir, 'data'))
+      const sent = await fetch(`http://127.0.0.1:${control.port}/action`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${control.token}`,
+        },
         body: JSON.stringify({ action: 'send_message', args: { channelId: 'chat-9', text: 'hi' } }),
       })
       expect(sent.status).toBe(200)
       expect(await sent.json()).toEqual({ ok: true, message: 'sent to chat-9' })
+
+      // Without the bearer token the same endpoint refuses: the gate is what
+      // keeps a random local process from driving the plugin on the user's
+      // behalf.
+      const refused = await fetch(`http://127.0.0.1:${control.port}/action`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'send_message', args: { channelId: 'chat-9', text: 'no' } }),
+      })
+      expect(refused.status).toBe(401)
     } finally {
       plugin.stop()
       cleanup(dir)
@@ -188,6 +229,7 @@ describe('contributed tools', () => {
         ...env,
         CRAFT_LISTENER_ID: 'slack',
         CRAFT_PLUGIN_ENTRY: './program/index.ts',
+        CRAFT_LISTENER_DATA: join(dir, 'data'),
         CRAFT_PLUGIN_PORT: '0',
       },
       stdout: 'pipe',
@@ -207,9 +249,13 @@ describe('contributed tools', () => {
         if (line) port = (JSON.parse(line) as { port: number }).port
       }
 
-      const res = await fetch(`http://127.0.0.1:${port}/action`, {
+      const control = await waitForControl(join(dir, 'data'))
+      const res = await fetch(`http://127.0.0.1:${control.port}/action`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${control.token}`,
+        },
         body: JSON.stringify({ action: 'slack_search', args: { q: 'build', limit: 3 } }),
       })
       expect(await res.json()).toEqual({ ok: true, message: 'found 3 for build' })

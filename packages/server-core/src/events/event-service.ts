@@ -21,7 +21,16 @@ import type { HostCommand } from './host-command-server.ts';
 import { buildStartupReport } from '@craft-agent/shared/events/startup-report.ts';
 import { ListenerSupervisor, type ListenerRuntimeStatus } from './listener-supervisor.ts';
 import { EventDispatcher, type DispatchTarget } from './event-dispatcher.ts';
-import { fetchReportedDeps } from './listener-control.ts';
+import { callPluginAction, fetchReportedDeps } from './listener-control.ts';
+import {
+  loadOutbox,
+  saveOutbox,
+  outboxDue,
+  nextBackoffMs,
+  OUTBOX_MAX_ATTEMPTS,
+  OUTBOX_PACE_MS,
+  type OutboxRecord,
+} from '@craft-agent/shared/events/outbox.ts';
 import { loadSubscriptions } from '@craft-agent/shared/events/subscriptions.ts';
 import { deriveThreadKey, findThreadOwner } from '@craft-agent/shared/events/thread-bindings.ts';
 import type { ListenerConfigSchema, ListenerUi } from '@craft-agent/shared/events/manifest.ts';
@@ -97,6 +106,14 @@ export class EventService {
   private readonly supervisor: ListenerSupervisor;
   private dispatcher: EventDispatcher | null;
   private started = false;
+  /**
+   * Outbox dispatcher: one tick every few seconds claims due pending sends
+   * and retries them through the plugin's control service. The timer lives
+   * here because the service is the per-workspace owner of the outbox file.
+   */
+  private outboxTimer?: ReturnType<typeof setInterval>;
+  private outboxTickInFlight = false;
+  private readonly outboxLastSentAt = new Map<string, number>();
 
   constructor(options: EventServiceOptions) {
     this.options = options;
@@ -125,6 +142,102 @@ export class EventService {
       envFor: (listenerId) => this.ingest.listenerEnv(listenerId),
       onStatus: (status) => this.options.onListenerStatus?.(status),
     });
+
+    // A failed send is only finished when it is delivered or the user gave up
+    // on it; the dispatcher is what keeps that promise alive across restarts
+    // of the plugin process (a stopped plugin never deletes its outbox).
+    this.outboxTimer = setInterval(() => {
+      void this.outboxTick();
+    }, 5000);
+  }
+
+  /**
+   * One pass over the outbox: send every due pending record through the
+   * plugin's control service, with per-plugin pacing and backoff. Records
+   * whose plugin is stopped keep failing and keep their backoff — they do
+   * not reset, so a plugin that comes back later picks up where it left off.
+   */
+  private async outboxTick(): Promise<void> {
+    if (this.outboxTickInFlight) return;
+    this.outboxTickInFlight = true;
+    try {
+      const now = Date.now();
+      const records = loadOutbox(this.options.workspaceRoot);
+      const due = outboxDue(records, now);
+      if (due.length === 0) return;
+
+      const listeners = loadListeners({
+        workspaceRoot: this.options.workspaceRoot,
+        catalogDirs: pluginCatalogDirs(),
+        skipProbes: true,
+      });
+      let changed = false;
+      for (const record of due) {
+        const pacer = this.outboxLastSentAt.get(record.listenerId) ?? 0;
+        if (now - pacer < OUTBOX_PACE_MS) {
+          // Pacing holds the attempt; it must not burn one of the backoff steps.
+          record.nextAttemptAt = pacer + OUTBOX_PACE_MS;
+          record.updatedAt = now;
+          changed = true;
+          continue;
+        }
+        const entry = listeners.find((l) => l.id === record.listenerId);
+        const result = entry
+          ? await callPluginAction(entry.dataDir, { action: record.action, args: record.args })
+          : { ok: false, message: '插件未安装' };
+        this.outboxLastSentAt.set(record.listenerId, Date.now());
+        record.attempts += 1;
+        record.updatedAt = Date.now();
+        if (result.ok) {
+          record.status = 'sent';
+          delete record.lastError;
+          delete record.nextAttemptAt;
+        } else {
+          record.lastError = result.message;
+          if (record.attempts >= OUTBOX_MAX_ATTEMPTS) {
+            // Give up automatically; the panel's 重试 button re-arms it.
+            record.status = 'failed';
+            delete record.nextAttemptAt;
+          } else {
+            record.nextAttemptAt = Date.now() + nextBackoffMs(record.attempts);
+          }
+        }
+        changed = true;
+      }
+      if (changed) saveOutbox(this.options.workspaceRoot, records);
+    } catch (error) {
+      eventLog.warn(`[events] outbox tick failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.outboxTickInFlight = false;
+    }
+  }
+
+  /** The outbox for the 发件箱 panel, newest first. */
+  outboxList(status?: 'sent' | 'pending' | 'failed'): OutboxRecord[] {
+    const records = loadOutbox(this.options.workspaceRoot);
+    return status ? records.filter((record) => record.status === status) : records;
+  }
+
+  /** Re-arm a record the dispatcher gave up on. */
+  outboxRetry(id: string): boolean {
+    const records = loadOutbox(this.options.workspaceRoot);
+    const record = records.find((entry) => entry.id === id);
+    if (!record || record.status !== 'failed') return false;
+    record.status = 'pending';
+    record.attempts = 0;
+    record.updatedAt = Date.now();
+    record.nextAttemptAt = Date.now();
+    saveOutbox(this.options.workspaceRoot, records);
+    return true;
+  }
+
+  /** Drop finished records; pending ones keep their queue position. */
+  outboxPurge(): number {
+    const records = loadOutbox(this.options.workspaceRoot);
+    const kept = records.filter((record) => record.status === 'pending');
+    const removed = records.length - kept.length;
+    if (removed > 0) saveOutbox(this.options.workspaceRoot, kept);
+    return removed;
   }
 
   /**
@@ -332,6 +445,11 @@ export class EventService {
   async stop(): Promise<void> {
     await this.supervisor.stopAll();
     await this.ingest.stop();
+    if (this.outboxTimer) {
+      clearInterval(this.outboxTimer);
+      this.outboxTimer = undefined;
+    }
+    this.outboxLastSentAt.clear();
     this.started = false;
   }
 

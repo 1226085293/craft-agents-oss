@@ -23,6 +23,7 @@ import { loadListeners } from '../../events/listener-registry';
 import { runInstallCommand, type InstallResult } from '../../events/dependency-installer';
 import { installMcp, type McpInstallResult } from '../../events/mcp-registry';
 import { fetchReportedDeps, postDepAction, callPluginAction } from '../../events/listener-control';
+import { recordOutboxCall } from '@craft-agent/shared/events/outbox.ts';
 import {
   loadSubscriptions,
   saveSubscriptions,
@@ -58,6 +59,9 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.events.LIST_SUBSCRIPTIONS,
   RPC_CHANNELS.events.SUBSCRIBE,
   RPC_CHANNELS.events.UNSUBSCRIBE,
+  RPC_CHANNELS.events.OUTBOX_LIST,
+  RPC_CHANNELS.events.OUTBOX_RETRY,
+  RPC_CHANNELS.events.OUTBOX_PURGE,
 ] as const;
 
 function requireWorkspace(workspaceId: string) {
@@ -352,9 +356,36 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
       if (!entry) return { ok: false, message: `插件 ${id} 未安装` };
       const declared = (entry.manifest.actions ?? []).find((a) => a.name === action);
       if (!declared) return { ok: false, message: `插件 ${id} 没有声明动作 ${action}` };
-      return callPluginAction(entry.dataDir, { action, args: args ?? {} });
+      const result = await callPluginAction(entry.dataDir, { action, args: args ?? {} });
+      recordOutboxCall(workspace.rootPath, {
+        listenerId: id,
+        action,
+        args: args ?? {},
+        ok: result.ok,
+        error: result.ok ? undefined : result.message,
+      });
+      return result;
     },
   );
+
+  // --- Outbox -------------------------------------------------------------
+
+  server.handle(RPC_CHANNELS.events.OUTBOX_LIST, async (_ctx, workspaceId: string, status?: string) => {
+    const valid = status === 'sent' || status === 'pending' || status === 'failed';
+    const svc = await service(workspaceId);
+    return svc.outboxList(valid ? (status as 'sent' | 'pending' | 'failed') : undefined);
+  });
+
+  server.handle(RPC_CHANNELS.events.OUTBOX_RETRY, async (_ctx, workspaceId: string, id: string) => {
+    if (!id) throw new Error('id is required');
+    const svc = await service(workspaceId);
+    return svc.outboxRetry(id);
+  });
+
+  server.handle(RPC_CHANNELS.events.OUTBOX_PURGE, async (_ctx, workspaceId: string) => {
+    const svc = await service(workspaceId);
+    return svc.outboxPurge();
+  });
 
   // --- Subscriptions -------------------------------------------------------
 

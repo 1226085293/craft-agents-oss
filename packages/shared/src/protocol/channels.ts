@@ -491,6 +491,17 @@ export const RPC_CHANNELS = {
      */
     LISTENER_CHANGED: 'events:listenerChanged',
 
+    /**
+     * Durable outbox: the outbound messages this agent asked to send, and
+     * whether each one actually went out. Read by the 发件箱 panel; the
+     * server-side dispatcher retries the pending ones.
+     */
+    OUTBOX_LIST: 'events:outboxList',
+    /** Re-arm a record the dispatcher gave up on, for automatic retry. */
+    OUTBOX_RETRY: 'events:outboxRetry',
+    /** Drop finished (sent / failed) records; pending ones keep their place. */
+    OUTBOX_PURGE: 'events:outboxPurge',
+
     /** This session's subscriptions. */
     LIST_SUBSCRIPTIONS: 'events:listSubscriptions',
     SUBSCRIBE: 'events:subscribe',

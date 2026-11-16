@@ -1018,6 +1018,26 @@ export interface EventRecordDto extends EventMetaDto {
   body?: string
 }
 
+/**
+ * One outbound message in the durable outbox.
+ *
+ * The record is written when the send is attempted; `status` tells the panel
+ * what happened to it — sent (delivered), pending (a retry is scheduled),
+ * or failed (the dispatcher gave up and a manual 重试 is needed).
+ */
+export interface OutboxRecordDto {
+  id: string
+  listenerId: string
+  action: string
+  args: Record<string, unknown>
+  status: 'sent' | 'pending' | 'failed'
+  attempts: number
+  createdAt: number
+  updatedAt: number
+  nextAttemptAt?: number
+  lastError?: string
+}
+
 /** Listener process state, mirrored to the renderer. */
 export interface ListenerStatusDto {
   id: string

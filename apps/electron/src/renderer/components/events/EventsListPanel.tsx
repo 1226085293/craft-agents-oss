@@ -175,7 +175,7 @@ export function EventsListPanel({
         ...(filters.source ? { source: filters.source } : {}),
         ...(filters.type ? { type: filters.type } : {}),
         ...(filters.reception === 'has-recipients' ? { hasRecipients: true } : {}),
-        ...(filters.reception === 'undelivered' ? { delivered: false } : {}),
+        ...(filters.reception === 'undelivered' ? { handled: false } : {}),
         limit: 200,
       })
       setEvents(Array.isArray(rows) ? rows : [])

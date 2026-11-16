@@ -470,6 +470,9 @@ export const CHANNEL_MAP = {
   listEventSubscriptions: invoke(RPC_CHANNELS.events.LIST_SUBSCRIPTIONS),
   subscribeEvent: invoke(RPC_CHANNELS.events.SUBSCRIBE),
   unsubscribeEvent: invoke(RPC_CHANNELS.events.UNSUBSCRIBE),
+  listOutbox: invoke(RPC_CHANNELS.events.OUTBOX_LIST),
+  retryOutbox: invoke(RPC_CHANNELS.events.OUTBOX_RETRY),
+  purgeOutbox: invoke(RPC_CHANNELS.events.OUTBOX_PURGE),
 
   // Pages
   getPages: invoke(RPC_CHANNELS.pages.GET),

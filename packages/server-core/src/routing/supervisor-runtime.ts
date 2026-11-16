@@ -51,6 +51,8 @@ export interface SupervisorSessionInfo {
   role: 'supervisor' | 'worker';
   spawnDepth?: number;
   agentId?: string;
+  /** Which supervisor lane the session belongs to; pre-lane sessions read as the task lane. */
+  lane?: 'user' | 'task';
   /**
    * Task this session is working on, if any.
    *
@@ -79,8 +81,8 @@ export interface SupervisorSessionInfo {
 
 export interface SupervisorRuntimeDeps {
   workspaceRoot: string;
-  /** Find or lazily create the workspace's on-duty supervisor. */
-  ensureSupervisorSession: () => Promise<SupervisorSessionInfo | null>;
+  /** Find or lazily create the workspace's on-duty supervisor for a lane. */
+  ensureSupervisorSession: (lane?: 'user' | 'task') => Promise<SupervisorSessionInfo | null>;
   getSession: (sessionId: string) => SupervisorSessionInfo | null;
   /** Create a worker session and start it with `instruction`. Refused when the task's run lock is held (serial mode: one live run per task). */
   spawnWorker: (params: {
@@ -188,7 +190,16 @@ export interface SupervisorRuntimeDeps {
 }
 
 export class SupervisorRuntime {
-  private backlog = new EventBacklog();
+  /**
+   * Unclaimed-event queues, one per supervisor lane.
+   *
+   * Conversation events (a messaging plugin's message link) queue for the user
+   * lane — the lane that owns the dialogue and can escalate to tasks. Everything
+   * else (webhooks, cron ticks, task-trigger leftovers) queues for the task
+   * lane. Two queues: a group-chat storm must not hold up a direct message.
+   */
+  private readonly taskBacklog = new EventBacklog();
+  private readonly userBacklog = new EventBacklog();
   /**
    * Per-turn state, one slot per supervisor session.
    *
@@ -205,8 +216,8 @@ export class SupervisorRuntime {
    * compares this turn's instruction with the last one sent, which is a fact about earlier turns.
    */
   private readonly guardStates = new Map<string, SupervisorGuardState>()
-  /** Cached on-duty supervisor id, refreshed lazily. */
-  private onDuty?: string;
+  /** Cached on-duty supervisor id, one per lane, refreshed lazily. */
+  private readonly onDutyByLane = new Map<'user' | 'task', string>();
   /**
    * Per-rule concurrency ceiling.
    *
@@ -250,6 +261,7 @@ export class SupervisorRuntime {
     type: string;
     title: string;
     summary?: string;
+    links?: Array<{ rel?: string; url: string }>;
   }): Promise<'routed' | 'queued'> {
     const rules = loadRoutes(this.deps.workspaceRoot);
     const decision = matchRoute(
@@ -296,11 +308,11 @@ export class SupervisorRuntime {
         if (!known.has(wantedAgent)) {
           const notice = formatRouteRuleIssue({ rule: decision.rule.name, agentId: wantedAgent });
           log.error(`[supervisor] ${notice}`);
-          this.backlog.push({
+          this.taskBacklog.push({
             id: event.id,
             summary: `${event.source}/${event.type}: ${event.title} — ${notice}`,
           });
-          await this.drainToSupervisor();
+          await this.drainToSupervisor('task');
           return 'queued';
         }
 
@@ -347,27 +359,53 @@ export class SupervisorRuntime {
       if (started > 0) return 'routed';
     }
 
-    this.backlog.push({
+    // No one owns this event yet: queue it for the lane that should triage it.
+    // A conversation event is the user talking — the user lane owns the dialogue
+    // (and can escalate to a task); an environment event is the task lane's.
+    const lane = this.laneForEvent(event);
+    this.backlogFor(lane).push({
       id: event.id,
       summary: `${event.source}/${event.type}: ${event.title}`,
     });
-    await this.drainToSupervisor();
+    await this.drainToSupervisor(lane);
     return 'queued';
   }
 
-  /** Push the current backlog into the supervisor, once, merged. */
-  private async drainToSupervisor(): Promise<void> {
-    if (this.backlog.size === 0) return;
+  /**
+   * Lane selection for unclaimed events — deterministic, no model call.
+   *
+   * A `message://` link is the plugin's signature that this event is a
+   * conversation message (a human talking to the agent, on some platform),
+   * so it is the user lane's to answer. Everything else — a webhook, a cron
+   * tick, a trigger no task claimed — is environment state, and the task lane
+   * is where environment state is worked.
+   */
+  private laneForEvent(event: { links?: Array<{ url?: string }> }): 'user' | 'task' {
+    return event.links?.some((link) => link?.url?.startsWith('message://')) ? 'user' : 'task';
+  }
 
-    const supervisor = await this.ensureSupervisor();
+  private backlogFor(lane: 'user' | 'task'): EventBacklog {
+    return lane === 'user' ? this.userBacklog : this.taskBacklog;
+  }
+
+  private laneOf(sessionId: string): 'user' | 'task' {
+    return this.deps.getSession(sessionId)?.lane ?? 'task';
+  }
+
+  /** Push one lane's backlog into its supervisor, once, merged. */
+  private async drainToSupervisor(lane: 'user' | 'task' = 'task'): Promise<void> {
+    const backlog = this.backlogFor(lane);
+    if (backlog.size === 0) return;
+
+    const supervisor = await this.ensureSupervisor(lane);
     if (!supervisor) {
-      log.warn('[supervisor] no supervisor session available; events stay queued');
+      log.warn(`[supervisor] no ${lane}-lane supervisor session available; events stay queued`);
       return;
     }
     // Busy supervisor: keep the backlog; it will be drained on its next turn.
     if (supervisor.isProcessing) return;
 
-    const items = this.backlog.drain();
+    const items = backlog.drain();
     await this.deps.sendToSession(supervisor.id, formatBacklogNudge(items));
   }
 
@@ -392,6 +430,9 @@ export class SupervisorRuntime {
     if (supervisorSessionId) {
       await this.drainActivations(supervisorSessionId)
       this.turnStates.delete(supervisorSessionId)
+      // Only that lane's queue: the user lane finishing a turn must not hand
+      // the task lane's events to the user's supervisor, and vice versa.
+      await this.drainToSupervisor(this.laneOf(supervisorSessionId))
     } else {
       // No id given: every turn that is open may be over, so finish all of them rather than
       // guessing which supervisor the caller meant.
@@ -399,24 +440,27 @@ export class SupervisorRuntime {
         await this.drainActivations(id)
         this.turnStates.delete(id)
       }
+      await this.drainToSupervisor('user')
+      await this.drainToSupervisor('task')
     }
-    await this.drainToSupervisor();
   }
 
-  private async ensureSupervisor(): Promise<SupervisorSessionInfo | null> {
-    if (this.onDuty) {
-      const existing = this.deps.getSession(this.onDuty);
+  private async ensureSupervisor(lane: 'user' | 'task'): Promise<SupervisorSessionInfo | null> {
+    const cached = this.onDutyByLane.get(lane);
+    if (cached) {
+      const existing = this.deps.getSession(cached);
       if (existing) return existing;
-      this.onDuty = undefined;
+      this.onDutyByLane.delete(lane);
     }
-    const created = await this.deps.ensureSupervisorSession();
-    this.onDuty = created?.id;
+    const created = await this.deps.ensureSupervisorSession(lane);
+    if (created) this.onDutyByLane.set(lane, created.id);
     return created;
   }
 
   private async resolveSessionForAgent(agentId?: string): Promise<string | undefined> {
     if (!agentId) return undefined;
-    const supervisor = await this.ensureSupervisor();
+    // Rule targets are task-domain: the task lane is where rules dispatch from.
+    const supervisor = await this.ensureSupervisor('task');
     return supervisor && supervisor.agentId === agentId ? supervisor.id : undefined;
   }
 
@@ -1241,7 +1285,7 @@ export class SupervisorRuntime {
 
   /** Exposed for tests and for the turn-timeout guard. */
   get pendingEvents(): number {
-    return this.backlog.size;
+    return this.userBacklog.size + this.taskBacklog.size;
   }
 
   /** Release the slot a finished worker held, draining any queued sibling. */

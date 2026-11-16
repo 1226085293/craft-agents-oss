@@ -41,6 +41,7 @@ import {
   Brain,
   ChevronLeft,
   ArrowLeft,
+  Send,
 } from "lucide-react"
 import { SourceAvatar } from "@/components/ui/source-avatar"
 import { TopBar } from "./TopBar"
@@ -130,6 +131,8 @@ import {
   isEventsNavigation,
   isEventListenersNavigation,
   isEventListNavigation,
+  isEventInboxNavigation,
+  isEventOutboxNavigation,
   isTasksNavigation,
   type NavigationState,
 } from "@/contexts/NavigationContext"
@@ -138,6 +141,8 @@ import { SourcesListPanel } from "./SourcesListPanel"
 import { TasksListPanel } from '@/components/tasks/TasksPanel'
 import { EventsListPanel } from "../events/EventsListPanel"
 import { EventsListenersPanel } from "../events/EventsListenersPanel"
+import { InboxPanel } from "../events/InboxPanel"
+import { OutboxPanel } from "../events/OutboxPanel"
 import { SkillsListPanel } from "./SkillsListPanel"
 import { ProjectsListPanel } from "./ProjectsListPanel"
 import { useProjects } from "@/hooks/useProjects"
@@ -1549,6 +1554,16 @@ function AppShellContent({
     navigate(routes.view.eventListeners())
   }, [])
 
+  // The two queues under 事件: what arrived but is still unhandled, and what
+  // the agent asked to send and whether it went out.
+  const handleInboxClick = useCallback(() => {
+    navigate(routes.view.inbox())
+  }, [])
+
+  const handleOutboxClick = useCallback(() => {
+    navigate(routes.view.outbox())
+  }, [])
+
   const handleEventSelect = useCallback((eventId: string) => {
     navigate(routes.view.events(eventId))
   }, [])
@@ -2047,7 +2062,10 @@ function AppShellContent({
     // Events navigator — the second-left panel lists events/listeners, not
     // sessions, so the sessions fallback below would mislabel it "所有会话".
     if (isEventsNavigation(navState)) {
-      return navState.section === 'listeners' ? t("sidebar.eventListeners") : t("sidebar.eventList")
+      return navState.section === 'listeners' ? t("sidebar.eventListeners")
+        : navState.section === 'inbox' ? t("sidebar.inbox", { defaultValue: "收件箱" })
+        : navState.section === 'outbox' ? t("sidebar.outbox", { defaultValue: "发件箱" })
+        : t("sidebar.eventList")
     }
 
     // Sessions navigator - use sessionFilter
@@ -2497,6 +2515,21 @@ function AppShellContent({
                       onClick: handleEventsClick,
                     },
                     {
+                      // 事件下面的两条队列：进来的还没处理的，和发出去的没发成功的。
+                      id: "nav:inbox",
+                      title: t("sidebar.inbox", { defaultValue: "收件箱" }),
+                      icon: Inbox,
+                      variant: isEventInboxNavigation(navState) ? "default" : "ghost",
+                      onClick: handleInboxClick,
+                    },
+                    {
+                      id: "nav:outbox",
+                      title: t("sidebar.outbox", { defaultValue: "发件箱" }),
+                      icon: Send,
+                      variant: isEventOutboxNavigation(navState) ? "default" : "ghost",
+                      onClick: handleOutboxClick,
+                    },
+                    {
                       // Plugins sit first because they are the workspace's
                       // hardware: every event that reaches it, and every
                       // channel it can answer on, comes from one of them.
@@ -2773,7 +2806,7 @@ function AppShellContent({
                 </Tooltip>
               </div>
             )}
-            {/* Events navigator: the log or the listener section */}
+            {/* Events navigator: the log, the listener section, or the two queues */}
             {isEventsNavigation(navState) && activeWorkspaceId && (
               navState.section === 'listeners' ? (
                 <EventsListenersPanel
@@ -2781,6 +2814,13 @@ function AppShellContent({
                   selectedListenerId={navState.details?.type === 'listener' ? navState.details.listenerId : null}
                   onSelectListener={handleListenerSelect}
                 />
+              ) : navState.section === 'inbox' ? (
+                <InboxPanel
+                  workspaceId={activeWorkspaceId}
+                  onSelectEvent={handleEventSelect}
+                />
+              ) : navState.section === 'outbox' ? (
+                <OutboxPanel workspaceId={activeWorkspaceId} />
               ) : (
                 <EventsListPanel
                   workspaceId={activeWorkspaceId}

@@ -42,6 +42,7 @@ import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
 import { assemblePluginTools } from '@craft-agent/shared/events/plugin-tools'
+import { recordOutboxCall } from '@craft-agent/shared/events/outbox.ts'
 
 /** 6-hex id, used for collision-free attachment names. */
 /** Everything `task_update` and the task board can change about a task. */
@@ -4353,7 +4354,14 @@ export class SessionManager implements ISessionManager {
    */
   async routeUnclaimedEvent(
     workspaceId: string,
-    event: { id: string; source: string; type: string; title: string; summary?: string },
+    event: {
+      id: string;
+      source: string;
+      type: string;
+      title: string;
+      summary?: string;
+      links?: Array<{ rel?: string; url: string }>;
+    },
   ): Promise<void> {
     await this.getSupervisorRuntime(workspaceId).routeUnclaimed(event)
   }
@@ -7749,7 +7757,17 @@ ${request.prompt}`;
           // The plugin executes, always. There is no in-process alternative:
           // one code path means the HTTP one is exercised by every platform,
           // instead of being a rarely-used branch behind a `builtin` flag.
-          return callPluginAction(installed.dataDir, { action, args: payload })
+          const result = await callPluginAction(installed.dataDir, { action, args: payload })
+          // The outbox is the durable half of this send: a failed message is
+          // retried by the dispatcher, not lost with the model's error reply.
+          recordOutboxCall(managed.workspace.rootPath, {
+            listenerId: plugin,
+            action,
+            args: payload,
+            ok: result.ok,
+            error: result.ok ? undefined : result.message,
+          })
+          return result
         },
 
         // A "binding" is now just a routing rule: which event source reaches
@@ -7825,16 +7843,20 @@ ${request.prompt}`;
               results.push({ ok: false, message: `${source} 未安装或已停用` })
               continue
             }
-            results.push(
-              await callPluginAction(plugin.dataDir, {
-                action: 'deliver_file',
-                args: {
-                  filePath: safePath,
-                  ...(args.filename ? { filename: args.filename } : {}),
-                  ...(args.caption ? { caption: args.caption } : {}),
-                },
-              }),
-            )
+            const fileArgs: Record<string, unknown> = {
+              filePath: safePath,
+              ...(args.filename ? { filename: args.filename } : {}),
+              ...(args.caption ? { caption: args.caption } : {}),
+            }
+            const delivered = await callPluginAction(plugin.dataDir, { action: 'deliver_file', args: fileArgs })
+            recordOutboxCall(managed.workspace.rootPath, {
+              listenerId: source,
+              action: 'deliver_file',
+              args: fileArgs,
+              ok: delivered.ok,
+              error: delivered.ok ? undefined : delivered.message,
+            })
+            results.push(delivered)
           }
           return {
             filename: args.filename ?? safePath.split(/[\/]/).pop() ?? safePath,
@@ -9158,22 +9180,24 @@ ${request.prompt}`;
 
     const runtime = new SupervisorRuntime({
       workspaceRoot: getWorkspaceByNameOrId(workspaceId)?.rootPath ?? '',
-      ensureSupervisorSession: async () => {
-        const existing = this.findOnDutySupervisor(workspaceId)
-        if (existing) {
-          return {
-            id: existing.id,
-            role: 'supervisor',
-            spawnDepth: existing.spawnDepth ?? 0,
-            agentId: existing.agentId,
-            isProcessing: existing.isProcessing,
-          }
-        }
+      ensureSupervisorSession: async (lane) => {
+        const target = lane ?? 'task'
+        // The lane's on-duty supervisor ('督导 · 用户' / '督导 · 任务') is the public
+        // one: it finds the lane's session, renames legacy 督导 sessions, and
+        // lazily creates the lane's hidden infrastructure session.
         try {
-          const created = await this.createSession(workspaceId, { role: 'supervisor', name: '督导' })
-          return { id: created.id, role: 'supervisor', spawnDepth: 0, isProcessing: false }
+          const created = await this.ensureSupervisorSession(workspaceId, target)
+          const managed = this.sessions.get(created.id)
+          return {
+            id: created.id,
+            role: 'supervisor',
+            spawnDepth: 0,
+            agentId: created.agentId,
+            isProcessing: managed?.isProcessing ?? false,
+            lane: managed?.supervisorLane ?? target,
+          }
         } catch (error) {
-          sessionLog.warn('Failed to create supervisor session', { workspaceId, error })
+          sessionLog.warn('Failed to create supervisor session', { workspaceId, lane: target, error })
           return null
         }
       },
@@ -9192,6 +9216,7 @@ ${request.prompt}`;
           // that does not carry the task binding.
           ...(managed.taskId ? { taskId: managed.taskId } : {}),
           ...(managed.taskScope ? { taskScope: managed.taskScope } : {}),
+          ...(managed.supervisorLane ? { lane: managed.supervisorLane } : {}),
           isProcessing: managed.isProcessing,
         }
       },

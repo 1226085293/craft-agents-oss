@@ -207,7 +207,7 @@ export interface ISessionManager {
   /** Event Center: route events with no subscriber to rules, then the supervisor. */
   routeUnclaimedEvent?(
     workspaceId: string,
-    event: Pick<EventMeta, 'id' | 'source' | 'type' | 'title' | 'summary'>,
+    event: Pick<EventMeta, 'id' | 'source' | 'type' | 'title' | 'summary' | 'links'>,
   ): Promise<void>
   /** Event Center: the delivery target handed to the dispatcher. */
   createEventDispatchTarget?(): {

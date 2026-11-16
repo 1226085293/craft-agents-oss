@@ -51,8 +51,8 @@ export interface ParsedCompoundRoute {
   sessionFilter?: SessionFilter
   /** Source filter (only for sources navigator) */
   sourceFilter?: SourceFilter
-  /** Which section of the events navigator: the log or the listener cards. */
-  eventsSection?: 'list' | 'listeners'
+  /** Which section of the events navigator: the log, the listener cards, or the two queues. */
+  eventsSection?: 'list' | 'listeners' | 'inbox' | 'outbox'
   /** Selected task (only for the tasks navigator). */
   selectedTaskId?: string | null
   /** Details page info (null for empty state) */
@@ -187,9 +187,14 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
     return null
   }
 
-  // Events navigator: events/list[/event/:id] and events/listeners[/listener/:id]
+  // Events navigator: events/list[/event/:id], events/listeners[/listener/:id],
+  // and the queue views events/inbox / events/outbox (list views, no detail level).
   if (first === 'events') {
-    const section = segments[1] === 'listeners' ? 'listeners' : 'list'
+    const section =
+      segments[1] === 'listeners' ? 'listeners'
+      : segments[1] === 'inbox' ? 'inbox'
+      : segments[1] === 'outbox' ? 'outbox'
+      : 'list'
     const detailsType = section === 'listeners' ? 'listener' : 'event'
     if (segments.length === 1) {
       return { navigator: 'events', eventsSection: 'list', details: null }
@@ -199,6 +204,9 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
     }
     if (segments[1] === 'listeners' && segments.length === 2) {
       return { navigator: 'events', eventsSection: 'listeners', details: null }
+    }
+    if ((segments[1] === 'inbox' || segments[1] === 'outbox') && segments.length === 2) {
+      return { navigator: 'events', eventsSection: section, details: null }
     }
     if (segments[2] === detailsType && segments[3]) {
       return {
@@ -303,7 +311,7 @@ export function buildCompoundRoute(parsed: ParsedCompoundRoute): string {
 
   if (parsed.navigator === 'events') {
     const section = parsed.eventsSection ?? 'list'
-    if (!parsed.details) return section === 'listeners' ? 'events/listeners' : 'events/list'
+    if (!parsed.details) return `events/${section}`
     return `events/${section}/${parsed.details.type}/${parsed.details.id}`
   }
 
@@ -447,7 +455,12 @@ function convertCompoundToViewRoute(compound: ParsedCompoundRoute): ParsedRoute 
   if (compound.navigator === 'events') {
     const section = compound.eventsSection ?? 'list'
     if (!compound.details) {
-      return { type: 'view', name: section === 'listeners' ? 'event-listeners' : 'event-list', params: {} }
+      const name =
+        section === 'listeners' ? 'event-listeners'
+        : section === 'inbox' ? 'inbox'
+        : section === 'outbox' ? 'outbox'
+        : 'event-list'
+      return { type: 'view', name, params: {} }
     }
     return { type: 'view', name: 'event-info', id: compound.details.id, params: {} }
   }

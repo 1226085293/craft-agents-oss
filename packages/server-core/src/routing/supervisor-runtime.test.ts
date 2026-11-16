@@ -1756,3 +1756,101 @@ describe('a finished task accepts no dispatch', () => {
     expect(h.claimed).toEqual([{ taskId: 'T-5', sessionId: 'sess_live5' }])
   })
 })
+
+/**
+ * Lane-aware unclaimed routing: a conversation event is the user talking, so
+ * the user-lane supervisor triages it; an environment event belongs to the
+ * task lane. The two backlogs never cross.
+ */
+describe('lane routing for unclaimed events', () => {
+  interface LaneHarness {
+    runtime: SupervisorRuntime;
+    sent: Array<{ sessionId: string; text: string }>;
+    ensureCalls: Array<'user' | 'task'>;
+    userSup: SupervisorSessionInfo;
+    taskSup: SupervisorSessionInfo;
+  }
+
+  function laneHarness(root: string, busy: { user?: boolean; task?: boolean } = {}): LaneHarness {
+    const sent: LaneHarness['sent'] = [];
+    const ensureCalls: LaneHarness['ensureCalls'] = [];
+    const userSup: SupervisorSessionInfo = {
+      id: 'sess_sup_user',
+      role: 'supervisor',
+      isProcessing: busy.user ?? false,
+      lane: 'user',
+    };
+    const taskSup: SupervisorSessionInfo = {
+      id: 'sess_sup_task',
+      role: 'supervisor',
+      isProcessing: busy.task ?? false,
+      lane: 'task',
+    };
+    const sessions = new Map<string, SupervisorSessionInfo>([
+      [userSup.id, userSup],
+      [taskSup.id, taskSup],
+    ]);
+    const runtime = new SupervisorRuntime({
+      workspaceRoot: root,
+      ensureSupervisorSession: async (lane) => {
+        const target = lane ?? 'task'
+        ensureCalls.push(target)
+        return target === 'user' ? userSup : taskSup
+      },
+      getSession: (id) => sessions.get(id) ?? null,
+      spawnWorker: async () => ({ refused: true, reason: 'not used in this case' }),
+      sendToSession: async (sessionId, text) => {
+        sent.push({ sessionId, text })
+      },
+      claimRun: () => undefined,
+      writeToSupervisor: async () => undefined,
+      askUser: async () => undefined,
+      getTask: () => null,
+    });
+    return { runtime, sent, ensureCalls, userSup, taskSup };
+  }
+
+  it('sends a conversation event (a message link) to the user-lane supervisor', async () => {
+    const ws = workspace();
+    const h = laneHarness(ws);
+    const result = await h.runtime.routeUnclaimed(
+      event({ links: [{ url: 'message://telegram/8362946740/14629' }] }),
+    );
+    expect(result).toBe('queued');
+    expect(h.sent.map((entry) => entry.sessionId)).toEqual(['sess_sup_user']);
+    expect(h.ensureCalls).toEqual(['user']);
+  });
+
+  it('sends an environment event (no conversation link) to the task-lane supervisor', async () => {
+    const ws = workspace();
+    const h = laneHarness(ws);
+    const result = await h.runtime.routeUnclaimed(event()); // qqmail, no links
+    expect(result).toBe('queued');
+    expect(h.sent.map((entry) => entry.sessionId)).toEqual(['sess_sup_task']);
+    expect(h.ensureCalls).toEqual(['task']);
+  });
+
+  it('keeps the two backlogs separate while one lane is busy', async () => {
+    const ws = workspace();
+    const h = laneHarness(ws, { user: true }); // user lane mid-turn
+
+    // Task lane is free: the environment event drains immediately.
+    await h.runtime.routeUnclaimed(event({ id: 'e-env', title: 'CI 红了' }));
+    expect(h.sent.map((entry) => entry.sessionId)).toEqual(['sess_sup_task']);
+
+    // User lane is busy: the conversation event stays in the user backlog.
+    await h.runtime.routeUnclaimed(
+      event({ id: 'e-chat', source: 'telegram', type: 'telegram.message', title: '你好', links: [{ url: 'message://telegram/8362946740/1' }] }),
+    );
+    expect(h.sent).toHaveLength(1); // still only the task-lane nudge
+
+    // The user lane goes idle: exactly its queue is handed over — to the
+    // user-lane supervisor, not the task one.
+    h.userSup.isProcessing = false;
+    await h.runtime.onSupervisorIdle(h.userSup.id);
+    expect(h.sent.map((entry) => entry.sessionId)).toEqual(['sess_sup_task', 'sess_sup_user']);
+    const last = h.sent.at(-1);
+    expect(last?.text).toContain('你好');
+    expect(h.ensureCalls.filter((lane) => lane === 'user')).toHaveLength(1);
+  });
+});

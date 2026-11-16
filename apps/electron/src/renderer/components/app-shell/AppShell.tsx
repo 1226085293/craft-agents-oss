@@ -437,7 +437,11 @@ function AppShellContent({
       if (!entry || Object.keys(entry.projects ?? {}).length === 0) return prev
       return { ...prev, allSessions: { projects: {} } }
     })
-  }, [])
+    // Picking a root folder while the panel shows「已归档」must switch back to
+    //「所有会话」: the archive list ignores folder scopes, so without the
+    // navigation the pick reads as "nothing happened".
+    if (sessionFilter?.kind === 'archived') navigate(routes.view.allSessions())
+  }, [sessionFilter?.kind, navigate])
 
   const handleBrowseRootFolderInProjectMode = useCallback((folderId: string | null) => {
     setRootFolderBrowseId(folderId)
@@ -546,6 +550,13 @@ function AppShellContent({
   // Explicit root-tree browsing while the project rail remains in mode 2.
   // undefined = follow the active project scope; null/string = root tree root/folder.
   const [rootFolderBrowseId, setRootFolderBrowseId] = React.useState<string | null | undefined>(undefined)
+  // Archive-view drill-down: the folder open inside the「已归档」tree (namespaced
+  // key `root:<folderId>`). Lifted out of SessionList so the panel title can
+  // render the same folder-path grammar as「所有会话」.
+  const [archiveScopeKey, setArchiveScopeKey] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    if (sessionFilter?.kind !== 'archived') setArchiveScopeKey(null)
+  }, [sessionFilter?.kind])
   // Mode 2 of the Projects rail section: the project whose folder tree is
   // currently shown under 项目/xxx. Deliberately separate from the include
   // filter — single-clicking an entry jumps to its sessions without flipping
@@ -2037,7 +2048,33 @@ function AppShellContent({
     // Sessions navigator - use sessionFilter
     // The archive view is global (opening it drops the folder scope), so the
     // folder-base title below would mislabel it — name the view itself.
-    if (sessionFilter?.kind === 'archived') return t("sidebar.archived")
+    // Drilled into an archived folder, mirror the allSessions grammar: the
+    // open folder first, then its ARCHIVED ancestors back to the base (live
+    // parents live under「所有会话」and don't belong in the trail).
+    if (sessionFilter?.kind === 'archived') {
+      const archiveFolderId = archiveScopeKey ? archiveScopeKey.slice(archiveScopeKey.indexOf(':') + 1) : null
+      if (archiveFolderId) {
+        const byId = new Map(rootFolderApi.folders.map((f) => [f.id, f] as const))
+        const chain: string[] = []
+        let cursor = byId.get(archiveFolderId)
+        while (cursor) {
+          if (cursor.archivedAt) chain.push(cursor.name)
+          cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined
+        }
+        if (chain.length > 0) {
+          return (
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="shrink-0 font-semibold">{chain[0]}</span>
+              <span className="shrink-0 text-muted-foreground/50">/</span>
+              <span className="min-w-0 truncate text-muted-foreground">
+                {[...chain.slice(1), t("sidebar.archived")].join(" / ")}
+              </span>
+            </span>
+          )
+        }
+      }
+      return t("sidebar.archived")
+    }
     if (!sessionFilter) return t("sidebar.allSessions")
 
     // Project scope: the jumped-to project is the base, and its own tree
@@ -2048,7 +2085,7 @@ function AppShellContent({
     }
 
     return titleWithBase(t("sidebar.allSessions"))
-  }, [navState, t, sessionFilter, activeFolderScopeId, activeFolderApi.folders, projects, projectScopeProjectId, isBrowsingRootTreeInProjectMode])
+  }, [navState, t, sessionFilter, activeFolderScopeId, activeFolderApi.folders, projects, projectScopeProjectId, isBrowsingRootTreeInProjectMode, archiveScopeKey, rootFolderApi.folders])
 
   /**
    * Parent of the folder currently in scope (null at root). Drives the header's
@@ -2854,6 +2891,8 @@ function AppShellContent({
                   onEnterFolder={isBrowsingRootTreeInProjectMode ? handleBrowseRootFolderInProjectMode : handleSelectProjectFolder}
                   folderSessionCounts={folderSessionCounts}
                   folderListRef={navigatorFolderListRef}
+                  archiveScopeKey={archiveScopeKey}
+                  onArchiveScopeKeyChange={setArchiveScopeKey}
                   folderScopeProjectId={isBrowsingRootTreeInProjectMode ? null : projectScopeProjectId}
                   onDropSessionToFolder={(sessionId, folderId) => {
                     void handleDropSessionToScope(sessionId, isBrowsingRootTreeInProjectMode ? null : projectScopeProjectId, folderId)

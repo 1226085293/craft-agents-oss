@@ -83,6 +83,13 @@ interface SessionListProps {
   onDropSessionToFolder?: (sessionId: string, folderId: string) => void
   /** Handle to the folder list, so the panel's context menu can start a create. */
   folderListRef?: React.Ref<NavigatorFolderListHandle>
+  /**
+   * The folder open inside the「已归档」tree (namespaced key, e.g. `root:<id>`).
+   * Controlled by the panel so the list title can render the folder path; the
+   * standalone preview (no handler) keeps its own local copy.
+   */
+  archiveScopeKey?: string | null
+  onArchiveScopeKeyChange?: (key: string | null) => void
   /** Override which session is highlighted (for multi-panel focused panel tracking) */
   focusedSessionId?: string | null
   /** Override navigation target (for multi-panel: focuses existing panel or navigates focused panel) */
@@ -130,6 +137,8 @@ export function SessionList({
   folderSessionCounts,
   onDropSessionToFolder,
   folderListRef,
+  archiveScopeKey: archiveScopeKeyProp,
+  onArchiveScopeKeyChange,
   focusedSessionId,
   onNavigateToSession,
   hasPendingPrompt,
@@ -164,7 +173,14 @@ export function SessionList({
   //「所有会话」— two paths for one folder — and how a truly archived folder
   // became unreachable (nothing rendered it, and `unarchiveFolder` had no UI).
   const isArchiveView = currentFilter?.kind === 'archived'
-  const [archiveScopeKey, setArchiveScopeKey] = useState<string | null>(null)
+  const [localArchiveScopeKey, setLocalArchiveScopeKey] = useState<string | null>(null)
+  // Panel-controlled when wired up (the title needs the open folder), local
+  // otherwise. Same key shape either way: `root:<folderId>`.
+  const archiveScopeKey = onArchiveScopeKeyChange ? (archiveScopeKeyProp ?? null) : localArchiveScopeKey
+  const setArchiveScopeKey = (key: string | null) => {
+    if (onArchiveScopeKeyChange) onArchiveScopeKeyChange(key)
+    else setLocalArchiveScopeKey(key)
+  }
 
   useEffect(() => {
     if (!isArchiveView) setArchiveScopeKey(null)

@@ -1621,7 +1621,8 @@ export class TaskService {
   /**
    * Mark questions as shown to the person.
    *
-   * The mirror of `markAnswersDelivered`, and it exists for the same two reasons. Questions are
+   * The mirror of `markAnswersHandled` in direction only — a question is delivered when it is
+   * shown, an answer when a run has acted on it. It exists for the same two reasons. Questions are
    * collected while the turn runs and delivered once when it ends — so 「shown」 must survive a
    * restart (a crash between turn end and delivery must not lose the question) and must not be
    * repeated (a restart must not draw the same card twice).
@@ -1648,15 +1649,26 @@ export class TaskService {
     return next;
   }
 
-  markAnswersDelivered(id: string): Task {
+  /**
+   * Record that the supervisor has finished working with these answers.
+   *
+   * Called when the run the answers started ends — not when the message is sent. Sending was the
+   * old unit and it was the wrong one: a fire-and-forget delivery whose failure was swallowed still
+   * wrote the mark, so an answer that never arrived was indistinguishable from one that was acted
+   * on, and nothing would ever offer it again.
+   *
+   * Marking on run-end makes the retry safe: anything still unmarked is genuinely unhandled, so the
+   * next batch carries it without double-processing anything that did land.
+   */
+  markAnswersHandled(id: string): Task {
     const task = this.require(id);
     const now = this.now();
     const queue = allDecisions(task).map((entry) =>
-      entry.answer && !entry.deliveredAt ? { ...entry, deliveredAt: now } : entry,
+      entry.answer && !entry.handledAt ? { ...entry, handledAt: now } : entry,
     );
     const next: Task = { ...task, decisions: queue, updatedAt: now };
     this.save(next);
-    appendJournal(this.root, id, { type: 'answers_delivered', at: now, data: { count: queue.filter((e) => e.deliveredAt === now).length } });
+    appendJournal(this.root, id, { type: 'answers_handled', at: now, data: { count: queue.filter((e) => e.handledAt === now).length } });
     return next;
   }
 

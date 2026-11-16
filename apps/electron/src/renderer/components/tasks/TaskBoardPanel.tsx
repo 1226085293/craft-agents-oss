@@ -161,7 +161,21 @@ export interface TaskDetailView {
   /** Profile this task is assigned to; absent means the workspace default. */
   assigneeAgentId?: string
   trigger?: { kind: 'manual' | 'cron' | 'event'; expr?: string; timezone?: string; source?: string; types?: string[]; enabled?: boolean }
-  stats?: { runs: number; activeMs: number; lastHeartbeatAt?: number }
+  stats?: {
+    /**
+     * Claimed runs, retries included — not what 「跑了几轮」 means.
+     *
+     * A retry and a re-claim inside one round each tick this, so it can be far ahead of the work
+     * actually done (live: `runs: 8` against `rounds.ok: 6`). The panel reads `rounds`.
+     */
+    runs: number
+    activeMs: number
+    lastHeartbeatAt?: number
+    /** Rounds that closed, accepted or failed. Present on records written after rounds existed. */
+    rounds?: { ok: number; failed: number }
+    /** Set while a round is open; cleared when it closes. The panel's 「进行中」 signal. */
+    runStartedAt?: number
+  }
   createdAt: number
   updatedAt: number
 }

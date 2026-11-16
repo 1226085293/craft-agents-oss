@@ -30,6 +30,7 @@ import {
   TASK_INDEX_VERSION,
   TASK_VERSION,
   type Task,
+  type TaskDecision,
   type TaskIndex,
   type TaskIndexEntry,
   type TaskSpec,
@@ -139,6 +140,28 @@ export function normalizeTask(task: Task): Task {
    * the honest bootstrap for `currentStageSessionId` — on an old record the only thing known about
    * who is holding the task is that worker.
    */
+  /**
+   * `deliveredAt` was the old name for `handledAt`, and it meant something weaker.
+   *
+   * It recorded that the message had been *sent* to the supervisor, not that a run had acted on
+   * it. Reading it forward is required, not cosmetic: `undeliveredAnswers` now filters on
+   * `handledAt`, so a decision answered under the old build would otherwise look unhandled and
+   * be handed to the supervisor a second time on the first read after the upgrade — a stale
+   * instruction arriving as if it were new.
+   *
+   * The mapping is deliberately one-way and lossy in the safe direction: an old 「sent」 may not
+   * have been acted on, but re-sending every answer ever given is the worse failure.
+   */
+  const decisions = Array.isArray(task.decisions)
+    ? task.decisions.map((entry): TaskDecision => {
+        const { deliveredAt: legacyDeliveredAt, ...rest } = entry as TaskDecision & {
+          deliveredAt?: number;
+        };
+        if (rest.handledAt !== undefined || legacyDeliveredAt === undefined) return rest;
+        return { ...rest, handledAt: legacyDeliveredAt };
+      })
+    : task.decisions;
+
   const legacy = (task as { currentSessionId?: string }).currentSessionId;
   const currentWorkerSessionId = task.currentWorkerSessionId ?? legacy;
   const currentStageSessionId =
@@ -153,6 +176,7 @@ export function normalizeTask(task: Task): Task {
     sessionIds: task.sessionIds ?? [],
     triggers,
     trigger: primaryTrigger(triggers),
+    ...(decisions ? { decisions } : {}),
     stats,
     /**
      * Six fields are defaulted on read; this was not one of them.

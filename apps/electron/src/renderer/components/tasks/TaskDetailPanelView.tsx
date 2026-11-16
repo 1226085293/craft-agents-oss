@@ -668,14 +668,6 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
    */
   const milestones = detail.handoffs.filter((handoff) => handoff.milestone !== false)
   const foldedAttempts = detail.handoffs.length - milestones.length
-  /**
-   * Which round the timeline is about.
-   *
-   * The array holds the round in progress, so 「第 N 轮」 is read off the entries rather than guessed
-   * from the record's total — after a round closes the panel still shows that round until the next one
-   * files its first report, and that is the round a person is asking about.
-   */
-  const timelineRound = [...detail.handoffs].reverse().find((handoff) => handoff.round)?.round
   // A hand-off names the session that produced it by id. An id is a storage key,
   // not something a person can match against the session list, so it is resolved to
   // the name the user sees — and falls back to the id when the session is gone,
@@ -688,6 +680,32 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
   // `activeMs` is the accumulated time actually spent running; the budget is the
   // ceiling and belongs in the hint, not in the value.
   const activeMinutes = Math.round(((detail.stats?.activeMs ?? 0) / 60_000))
+  /**
+   * How many rounds this task has run — the number a person means by 「跑了几次」.
+   *
+   * `stats.runs` was shown here and it was the wrong count: it ticks once per claimed run,
+   * including retries and a re-claim inside the same round, so a task that had completed one
+   * round of work could read 「已运行 8 次」 (live: `runs: 8` against `rounds.ok: 6`). Nobody
+   * reading the panel is asking how many times the lock changed hands.
+   *
+   * Closed rounds plus the one in progress. A task that never started is 0 — an empty record
+   * should not read as one round of work just because a run could start some day.
+   */
+  const closedRounds = (detail.stats?.rounds?.ok ?? 0) + (detail.stats?.rounds?.failed ?? 0)
+  /**
+   * `runStartedAt` is the claim that a round is open — set when a run starts, cleared when the
+   * round closes. Using `runs > 0` alone (the first version) counted a recurring task's idle gap
+   * between rounds as one more round than it had done: six closed rounds and a seventh not yet
+   * fired read as seven.
+   */
+  const roundInProgress = typeof detail.stats?.runStartedAt === 'number'
+  const everStarted = (detail.stats?.runs ?? 0) > 0
+  /**
+   * A one-off task never closes a round — `round_reset` is the recurring path — so `closedRounds`
+   * stays 0 for the whole life of a task that simply does its work and finishes. Its one round is
+   * read from 「did a run ever start」, which is why the floor is 1 rather than 0.
+   */
+  const roundsRun = roundInProgress ? closedRounds + 1 : Math.max(closedRounds, everStarted ? 1 : 0)
   /**
    * Running, but nothing is working on it.
    *
@@ -738,12 +756,8 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
           <p className="td-body mt-2 flex flex-wrap items-center gap-1.5 text-muted-foreground">
             <Clock3 className="h-4 w-4" aria-hidden="true" />
             最近更新 {formatTimestamp(detail.updatedAt)}
-            {typeof detail.stats?.runs === 'number' ? (
-              <>
-                <span className="mx-1 text-border">·</span>
-                已运行 {detail.stats.runs} 次
-              </>
-            ) : null}
+            <span className="mx-1 text-border">·</span>
+            已运行 {roundsRun} 轮
             {/*
               * 触发方式 rides on the meta line. It is one short fact about the task —
               * manual / cron / event — and giving it its own bordered section put a whole
@@ -1326,9 +1340,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <h2 id="task-handoff-heading" className="td-heading text-foreground">交接时间线</h2>
-            {timelineRound ? (
-              <span className="text-xs tabular-nums text-muted-foreground">第 {timelineRound} 轮</span>
-            ) : null}
+
             <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-xs tabular-nums text-muted-foreground">{milestones.length}</span>
           </div>
         </div>

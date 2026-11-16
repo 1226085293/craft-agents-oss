@@ -459,6 +459,54 @@ describe('task detail presentation', () => {
  * only way to move a task's schedule was to edit its JSON. The entry point is what this pins — the
  * editor's own fields are covered by rendering, which is all a static-markup test can see.
  */
+/**
+ * 「跑了几轮」, not 「抢占了几次」.
+ *
+ * The meta line used to print `stats.runs`, which ticks per claimed run — retries and a re-claim
+ * inside one round each counted. A task that had finished one round of work could read
+ * 「已运行 8 次」 (live: `runs: 8` against `rounds.ok: 6`), and the number was read as progress.
+ */
+describe('the run count is rounds, not claims', () => {
+  it('counts nothing for a task that never started', () => {
+    const html = renderDetail({ ...detail, stats: { runs: 0, activeMs: 0 } })
+    expect(html).toContain('已运行 0 轮')
+  })
+
+  it('counts the round in progress as one', () => {
+    // Started, nothing closed yet: a one-off task that is running is on its first round.
+    const html = renderDetail({ ...detail, stats: { runs: 3, activeMs: 0 } })
+    expect(html).toContain('已运行 1 轮')
+  })
+
+  it('does not count retries as rounds', () => {
+    // Eight claims inside one round is still one round of work.
+    const html = renderDetail({
+      ...detail,
+      stats: { runs: 8, activeMs: 0, rounds: { ok: 0, failed: 0 } },
+    })
+    expect(html).toContain('已运行 1 轮')
+    expect(html).not.toContain('已运行 8')
+  })
+
+  it('adds the round in progress to the closed ones', () => {
+    const html = renderDetail({
+      ...detail,
+      stats: { runs: 9, activeMs: 0, rounds: { ok: 6, failed: 1 }, runStartedAt: Date.now() },
+    })
+    expect(html).toContain('已运行 8 轮')
+  })
+
+  it('does not count the idle gap between rounds as a round', () => {
+    // A per-minute task sits in backlog between rounds with `runStartedAt` cleared. Reading
+    // 「runs > 0」 as an open round added one to a task that was not doing anything.
+    const html = renderDetail({
+      ...detail,
+      stats: { runs: 8, activeMs: 0, rounds: { ok: 6, failed: 1 } },
+    })
+    expect(html).toContain('已运行 7 轮')
+  })
+})
+
 describe('the trigger is editable from the page', () => {
   const scheduled: TaskDetailView = {
     ...detail,
@@ -479,20 +527,14 @@ describe('the trigger is editable from the page', () => {
   })
 
 
-  it('says which round the timeline is about', () => {
-    // The array holds the round in progress, so the panel can name it. Before this the timeline of a
-    // per-minute task was every round at once and 「这一轮做到哪」 had no answer.
+  it('does not label the timeline with a round number', () => {
+    // 「第 N 轮」 sat next to 交接时间线 and was noise: the count beside it already says how many
+    // entries there are, and the round number only meant something for a recurring task.
     const html = renderDetail({
       ...detail,
       handoffs: [{ ...detail.handoffs[0]!, round: 7 }],
     })
-    expect(html).toContain('第 7 轮')
-  })
-
-  it('says nothing about rounds when the record has none', () => {
-    // A one-off task never repeats; labelling it 「第 1 轮」 would invent a concept it does not have.
-    const html = renderDetail(detail)
-    expect(html).not.toContain('第 1 轮')
+    expect(html).not.toContain('第 7 轮')
   })
 
   it('does not print a bare expression next to the words that already say it', () => {

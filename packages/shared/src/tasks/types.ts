@@ -604,15 +604,23 @@ export interface TaskDecision {
   /** Set once the user answered, the deadline fired, or the question stopped being true. */
   resolvedAt?: number;
   /**
-   * When this answer was handed to the supervisor.
+   * When the supervisor finished the run this answer started.
    *
-   * Answers are collected before they are delivered: asking three things and interrupting the
-   * supervisor three times is noise, and it made the supervisor act on the first reply before
-   * the person had finished thinking. Delivery waits until nothing is left open, then sends
-   * everything at once — this field is how 「already sent」 is told from 「answered, not yet
-   * sent」, and it must survive a restart, so it lives on the record.
+   * This replaced a field called `deliveredAt`, which recorded that the message had been *sent*.
+   * Sending is not the same as arriving: the delivery call was fired and forgotten, its failure
+   * swallowed, and the mark was written anyway — so an answer whose send failed looked identical
+   * to one that was received, and nothing would ever re-send it.
+   *
+   * The unit is the run, not the message. The supervisor receives the answer, does a turn of work
+   * with it, and the turn ending is when the answer has actually been acted on. That is also what
+   * makes retry possible: an answer nobody handled is still owed, so it goes out again with the
+   * next batch. `undeliveredAnswers` therefore means 「answered, not yet acted on」.
+   *
+   * Answers are still collected before they are sent: asking three things and interrupting the
+   * supervisor three times is noise, and acting on the first reply while the person is still
+   * answering the second builds a turn on half an instruction.
    */
-  deliveredAt?: number;
+  handledAt?: number;
   /**
    * When this QUESTION was shown to the person.
    *

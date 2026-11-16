@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { formatDecisionAnswersLine, openDecisions, undeliveredAnswers } from '@craft-agent/shared/tasks'
@@ -158,9 +158,44 @@ describe('answers wait for the last one before they travel', () => {
     expect(line).toContain('→ 不改')
     expect(line).toContain('任务 T-1')
 
-    svc.markAnswersDelivered(task.id)
+    svc.markAnswersHandled(task.id)
     // The mark is what stops the same answers being sent twice after a restart.
     expect(undeliveredAnswers(svc.get(task.id)!).length).toBe(0)
+
+    rmSync(root, { recursive: true, force: true })
+  })
+})
+
+describe('legacy deliveredAt records', () => {
+  /**
+   * The rename is only safe if old records still read as handled.
+   *
+   * `undeliveredAnswers` now filters on `handledAt`, and every task file written before the
+   * change carries `deliveredAt` instead. Without the read-side migration those answers look
+   * unhandled, so the first batch after an upgrade would re-send instructions the supervisor
+   * already acted on — stale work arriving as if it were new.
+   */
+  it('reads an old deliveredAt as handled instead of sending it again', () => {
+    const { svc, task, root } = service()
+    svc.setDecisionWording(task.id, { question: '要不要继续？' })
+    const [entry] = openDecisions(svc.get(task.id)!)
+    svc.recordDecisionAnswer(task.id, '继续', entry!.id)
+
+    // Rewrite the record the way the previous build left it: the old field, no new one.
+    const path = join(root, 'tasks', `${task.id}.json`)
+    const raw = JSON.parse(readFileSync(path, 'utf-8'))
+    for (const decision of raw.decisions) {
+      if (decision.answer) {
+        decision.deliveredAt = 2000
+        delete decision.handledAt
+      }
+    }
+    writeFileSync(path, JSON.stringify(raw))
+
+    // Re-read through the same path the app uses.
+    const migrated = svc.get(task.id)!
+    expect(migrated.decisions?.[0]?.handledAt).toBe(2000)
+    expect(undeliveredAnswers(migrated)).toHaveLength(0)
 
     rmSync(root, { recursive: true, force: true })
   })

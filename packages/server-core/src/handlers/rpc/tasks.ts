@@ -12,6 +12,7 @@ import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport';
 import type { HandlerDeps } from '../handler-deps';
 import type { TaskService } from '../../tasks/task-service';
 import { readJournal } from '@craft-agent/shared/tasks';
+import { createLogger } from '@craft-agent/shared/utils/debug';
 import {
   normalizeSpec,
   normalizeTriggers,
@@ -23,6 +24,8 @@ import {
   undeliveredAnswers,
 } from '@craft-agent/shared/tasks';
 import type { TaskStatus } from '@craft-agent/shared/tasks';
+
+const sessionLog = createLogger('tasks');
 
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.taskboard.LIST,
@@ -398,21 +401,32 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       if (supervisor && manager.sendMessage) {
         const line = batch.length > 1 ? formatDecisionAnswersLine(task, batch) : formatDecisionAnswerLine(task, text)
         /**
-         * Fire and forget. `sendMessage` resolves when the whole turn has finished
-         * streaming, so awaiting it kept this RPC open for the length of a model turn —
-         * the answer had already been persisted and was already visible in the
-         * supervisor's transcript, while the card still showed its buttons and the
-         * person clicked again. The reply is delivered either way; the card must not
-         * wait for the work it triggered.
+         * Still not awaited on the request path — the card must close at once.
+         *
+         * `sendMessage` resolves when the whole turn has finished streaming, so awaiting it kept
+         * this RPC open for the length of a model turn while the card still showed its buttons and
+         * the person clicked again.
+         *
+         * But it is no longer fire-and-forget either. The run ending is the only evidence that the
+         * answer was acted on, so the promise is what stamps `handledAt`. Its failure is the other
+         * half: an answer whose send fails stays unhandled, and the next batch carries it again
+         * instead of losing it. Before this, the mark was written as soon as the send was issued —
+         * a failed delivery looked handled, and nothing ever retried it.
          */
-        void manager.sendMessage(supervisor, line).catch(() => undefined)
-        // And the lane the card was shown in, so its copy of the question closes too.
+        void manager
+          .sendMessage(supervisor, line)
+          .then(() => service.markAnswersHandled(resolvedId))
+          .catch((error: unknown) => {
+            sessionLog.warn('[tasks] could not hand the answer to the supervisor; it stays owed', {
+              taskId: resolvedId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          })
+        // And the lane the card was shown in, so its copy of the question closes too. Its run is
+        // not what the task is waiting on, so it does not stamp the mark.
         if (askedBy && askedBy !== supervisor) {
           void manager.sendMessage(askedBy, line).catch(() => undefined)
         }
-        // Marked only after the send was issued: an answer that never left is still undelivered,
-        // so a crash between the reply and the delivery does not lose what the person said.
-        service.markAnswersDelivered(resolvedId)
       }
       broadcast(workspaceId)
       return { accepted: true, delivered: batch.length }

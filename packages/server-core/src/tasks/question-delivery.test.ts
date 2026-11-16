@@ -146,7 +146,7 @@ describe('question delivery', () => {
     const after = svc.get(t.id)!
     // The question was shown, the answer has not been delivered yet: two directions, two marks.
     expect(after.decision?.questionDeliveredAt).toBeTruthy()
-    expect(after.decision?.deliveredAt).toBeFalsy()
+    expect(after.decision?.handledAt).toBeFalsy()
     expect(after.decision?.answer?.text).toBe('做')
   });
 });

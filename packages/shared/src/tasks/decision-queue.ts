@@ -25,9 +25,16 @@ export function openDecisions(task: Task): TaskDecision[] {
   return allDecisions(task).filter((entry) => !entry.resolvedAt);
 }
 
-/** Answers the person has given that nobody has been told about yet. */
+/**
+ * Answers the person has given that no run has acted on yet.
+ *
+ * The name is `undelivered` for its callers, but the question it asks is 「has this been handled」,
+ * not 「has this been sent」. Sending without arriving was the defect: the delivery was fired and
+ * its failure swallowed, then the mark written anyway, so a lost answer was indistinguishable from
+ * a received one and nothing retried it. `handledAt` is stamped when the supervisor's run ends.
+ */
 export function undeliveredAnswers(task: Task): TaskDecision[] {
-  return allDecisions(task).filter((entry) => entry.answer && !entry.deliveredAt);
+  return allDecisions(task).filter((entry) => entry.answer && !entry.handledAt);
 }
 
 /**

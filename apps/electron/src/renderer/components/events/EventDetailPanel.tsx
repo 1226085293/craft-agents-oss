@@ -26,12 +26,29 @@ export interface EventDetailPanelProps {
   className?: string
 }
 
-/** Delivery dot + label, reused in header. */
-function DeliveryState({ delivered }: { delivered: boolean }): React.ReactElement {
+/**
+ * Handled dot + label, reused in header.
+ *
+ * 「已投递」 used to sit here and it was the wrong fact: it lit up as soon as a session had been
+ * handed the event, so an item nobody had acted on looked finished. The dot now waits for the run
+ * that received the event to end.
+ */
+function HandlingState({
+  handledAt,
+  delivered,
+}: {
+  handledAt?: number
+  delivered: boolean
+}): React.ReactElement {
+  const label = handledAt
+    ? '已处理'
+    : delivered
+      ? '已送达，处理中'
+      : '尚未送达'
   return (
     <span className="inline-flex items-center gap-1.5">
-      <span className={`h-1.5 w-1.5 rounded-full ${delivered ? 'bg-accent' : 'bg-foreground/20'}`} />
-      {delivered ? '已投递给订阅会话' : '尚未投递'}
+      <span className={`h-1.5 w-1.5 rounded-full ${handledAt ? 'bg-accent' : delivered ? 'bg-amber-500' : 'bg-foreground/20'}`} />
+      {label}
     </span>
   )
 }
@@ -198,7 +215,7 @@ export function EventDetailPanel({
             Same label:value grammar throughout (labels in muted, values in
             foreground/75) so the line reads as one table row. */}
         <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1.5 mt-3 text-[12px]">
-          <DeliveryState delivered={event.delivered} />
+          <HandlingState handledAt={event.handledAt} delivered={(event.deliveries ?? []).length > 0} />
           {deliveries.length > 0 && (
             <span className="text-muted-foreground">{deliveries.length} 个会话</span>
           )}

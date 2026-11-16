@@ -27,7 +27,8 @@ describe('normalizeEventInput', () => {
     expect(event.source).toBe('qqmail');
     expect(event.receivedAt).toBe(identity.receivedAt);
     expect(event.spec).toBe('craft-event/1');
-    expect(event.delivered).toBe(false);
+    // Handling is a fact about the store, not about the envelope a listener submits.
+    expect(event.handledAt).toBeUndefined();
   });
 
   it('requires a namespaced lowercase type', () => {

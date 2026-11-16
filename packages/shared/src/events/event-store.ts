@@ -39,8 +39,18 @@ export interface EventStoreOptions {
 export interface EventDelivery {
   /** Receiving session id. */
   sessionId: string;
-  /** When the delivery surfaced into that session, epoch ms. */
+  /** When the event surfaced into that session, epoch ms. */
   at: number;
+  /**
+   * When the run that received it finished, epoch ms.
+   *
+   * The distinction is the whole point. `at` says the nudge was inserted into the session —
+   * the event arrived. It does not say anything was done about it: the session may still be
+   * mid-turn, the turn may fail, the process may die. Stamping `handledAt` when the run ends is
+   * what turns 「someone was told」 into 「someone acted」, and it is the state the audit question
+   * 「how was it handled」 was always asking for.
+   */
+  handledAt?: number;
 }
 
 /**
@@ -64,6 +74,15 @@ export interface EventRouting {
 export interface EventRecord extends CraftEventEnvelope {
   /** Per-session delivery records, latest entry per session. */
   deliveries: EventDelivery[];
+  /**
+   * When a receiving session finished the run this event started, epoch ms.
+   *
+   * Replaced a boolean called `delivered`. That flag was set as soon as any session had been
+   * handed the event, and it answered the wrong question: an event nobody acted on looked
+   * exactly like one that had been dealt with, so the list could not tell a pending inbox item
+   * from a finished one. The timestamp is the same fact as the article's 「运行结束才算完成」.
+   */
+  handledAt?: number;
   /** Routing history, oldest first (an event can be re-routed after a retry). */
   routing: EventRouting[];
 }
@@ -77,7 +96,8 @@ export interface EventFilter {
   type?: string;
   /** Only events that carry at least one recipient. */
   hasRecipients?: boolean;
-  delivered?: boolean;
+  /** Only events a receiving session has finished acting on. */
+  handled?: boolean;
   /** Inclusive lower bound, epoch ms. */
   since?: number;
   until?: number;
@@ -106,7 +126,7 @@ interface EventRow {
   payload_path: string | null;
   payload_size: number | null;
   dedupe_key: string | null;
-  delivered: number;
+  handled_at: number | null;
   deliveries: string | null;
   routing: string | null;
 }
@@ -147,13 +167,13 @@ function toEvent(row: EventRow, includeBody: boolean): EventRecord {
     routing: parseJsonArray<EventRouting>(row.routing),
     ...(includeBody && row.body !== null ? { body: row.body } : {}),
     ...(payloadRef ? { payloadRef } : {}),
-    delivered: row.delivered === 1,
+    ...(row.handled_at !== null ? { handledAt: row.handled_at } : {}),
   };
 }
 
 const META_COLUMNS = `e.id, e.source, e.type, e.received_at, e.occurred_at, e.title, e.summary, e.routing,
   e.recipients, e.links, e.attachments, e.payload_kind, e.payload_path, e.payload_size,
-  e.dedupe_key, e.delivered, e.deliveries`;
+  e.dedupe_key, e.handled_at, e.deliveries`;
 
 export class EventStore {
   private readonly db: SqliteDatabase;
@@ -193,7 +213,7 @@ export class EventStore {
         payload_path TEXT,
         payload_size INTEGER,
         dedupe_key   TEXT,
-        delivered    INTEGER NOT NULL DEFAULT 0
+        handled_at   INTEGER
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe
@@ -201,7 +221,6 @@ export class EventStore {
       CREATE INDEX IF NOT EXISTS idx_events_time ON events(received_at DESC);
       CREATE INDEX IF NOT EXISTS idx_events_source ON events(source, received_at DESC);
       CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, received_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_events_delivered ON events(delivered, received_at DESC);
 
       CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
         event_id UNINDEXED,
@@ -216,6 +235,29 @@ export class EventStore {
     if (!columns.some((column) => column.name === 'deliveries')) {
       this.db.exec('ALTER TABLE events ADD COLUMN deliveries TEXT');
     }
+    /**
+     * `handled_at` replaces the boolean `delivered`, and old rows must not be relabelled as
+     * 「unhandled」.
+     *
+     * The old flag meant 「some session was handed this」 — weaker than handled, but not nothing:
+     * every event it covered had already been through a delivery attempt. Backfilling from the
+     * latest delivery's timestamp keeps the list honest after the upgrade instead of showing the
+     * whole history as work nobody did. The `delivered` column stays in place unused, because
+     * SQLite cannot drop one cheaply and nothing reads it any more.
+     */
+    if (!columns.some((column) => column.name === 'handled_at')) {
+      this.db.exec('ALTER TABLE events ADD COLUMN handled_at INTEGER');
+      if (columns.some((column) => column.name === 'delivered')) {
+        this.db.exec(`
+          UPDATE events
+             SET handled_at = COALESCE(
+                   (SELECT MAX(CAST(json_extract(value, '$.at') AS INTEGER))
+                      FROM json_each(events.deliveries)),
+                   received_at)
+           WHERE delivered = 1
+        `);
+      }
+    }
     // Attachment references (files a listener wrote next to the event).
     if (!columns.some((column) => column.name === 'attachments')) {
       this.db.exec('ALTER TABLE events ADD COLUMN attachments TEXT');
@@ -224,6 +266,14 @@ export class EventStore {
     if (!columns.some((column) => column.name === 'routing')) {
       this.db.exec('ALTER TABLE events ADD COLUMN routing TEXT');
     }
+    /**
+     * Indexed after the column exists.
+     *
+     * It used to sit in the CREATE TABLE block above, which runs on every open — including against
+     * a database old enough to lack `handled_at`, where creating the index failed before the
+     * ALTER could add it.
+     */
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_events_handled ON events(handled_at, received_at DESC)');
   }
 
   /**
@@ -247,8 +297,8 @@ export class EventStore {
     const insert = this.db.prepare(`
       INSERT INTO events (
         id, source, type, received_at, occurred_at, title, summary, recipients,
-        links, attachments, body, search_text, payload_kind, payload_path, payload_size, dedupe_key, delivered, deliveries
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+        links, attachments, body, search_text, payload_kind, payload_path, payload_size, dedupe_key, handled_at, deliveries
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
     `);
 
     this.db.exec('BEGIN');
@@ -304,9 +354,8 @@ export class EventStore {
     if (filter.hasRecipients) {
       where.push("e.recipients IS NOT NULL AND e.recipients != '[]'");
     }
-    if (filter.delivered !== undefined) {
-      where.push('e.delivered = ?');
-      params.push(filter.delivered ? 1 : 0);
+    if (filter.handled !== undefined) {
+      where.push(filter.handled ? 'e.handled_at IS NOT NULL' : 'e.handled_at IS NULL');
     }
     if (filter.since !== undefined) {
       where.push('e.received_at >= ?');
@@ -347,42 +396,55 @@ export class EventStore {
     return row ? toEvent(row, true) : null;
   }
 
-  markDelivered(ids: string[]): number {
-    if (!ids.length) return 0;
-    const stmt = this.db.prepare('UPDATE events SET delivered = 1 WHERE id = ? AND delivered = 0');
-    let changed = 0;
-    this.db.exec('BEGIN');
-    try {
-      for (const id of ids) {
-        const result = stmt.run(id);
-        changed += Number(result.changes ?? 0);
-      }
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-    return changed;
-  }
 
   /**
-   * Record that a session received this event, and mark it delivered. The
-   * latest delivery per session wins (re-delivery after a deferral replaces
-   * the older entry, so the list answers "who has it now").
+   * Record that a session received this event. The latest delivery per session
+   * wins (re-delivery after a deferral replaces the older entry, so the list
+   * answers "who has it now").
+   *
+   * This is arrival only — it no longer flips a 「delivered」 flag, because that flag was being
+   * read as 「done」. `markHandled` is the other half.
    */
   recordDelivery(id: string, sessionId: string, at: number): void {
     const row = this.db
-      .prepare('SELECT deliveries, delivered FROM events WHERE id = ?')
-      .get(id) as { deliveries: string | null; delivered: number } | undefined;
+      .prepare('SELECT deliveries FROM events WHERE id = ?')
+      .get(id) as { deliveries: string | null } | undefined;
     if (!row) return;
 
-    const deliveries = parseJsonArray<EventDelivery>(row.deliveries).filter(
+    const previous = parseJsonArray<EventDelivery>(row.deliveries).filter(
       (entry) => entry.sessionId !== sessionId,
     );
-    deliveries.push({ sessionId, at });
+    const existing = parseJsonArray<EventDelivery>(row.deliveries).find(
+      (entry) => entry.sessionId === sessionId,
+    );
+    previous.push({ sessionId, at, ...(existing?.handledAt !== undefined ? { handledAt: existing.handledAt } : {}) });
     this.db
-      .prepare('UPDATE events SET deliveries = ?, delivered = 1 WHERE id = ?')
-      .run(JSON.stringify(deliveries), id);
+      .prepare('UPDATE events SET deliveries = ? WHERE id = ?')
+      .run(JSON.stringify(previous), id);
+  }
+
+  /**
+   * Record that a receiving session finished the run this event started.
+   *
+   * Stamped on the delivery entry so the list can say which of several subscribers actually
+   * acted, and on the event so a filter can ask 「is anything still pending」 without walking the
+   * array. Called after the turn ends — that is the only evidence the event was not merely
+   * handed over.
+   */
+  markHandled(id: string, sessionId: string, at: number): void {
+    const row = this.db
+      .prepare('SELECT deliveries, handled_at FROM events WHERE id = ?')
+      .get(id) as { deliveries: string | null; handled_at: number | null } | undefined;
+    if (!row) return;
+
+    const deliveries = parseJsonArray<EventDelivery>(row.deliveries);
+    const index = deliveries.findIndex((entry) => entry.sessionId === sessionId);
+    if (index >= 0 && deliveries[index]!.handledAt === undefined) {
+      deliveries[index] = { ...deliveries[index]!, handledAt: at };
+    }
+    this.db
+      .prepare('UPDATE events SET deliveries = ?, handled_at = COALESCE(handled_at, ?) WHERE id = ?')
+      .run(JSON.stringify(deliveries), at, id);
   }
 
   /**

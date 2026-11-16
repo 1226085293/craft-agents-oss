@@ -38,6 +38,14 @@ export interface DispatchTarget {
       summary?: string;
       receivedAt: number;
       nudge: string;
+      /**
+       * Called once the event is inside the session, before its turn runs.
+       *
+       * Delivery is recorded here rather than after `deliver` resolves, because the resolve
+       * comes at the END of the turn: recording both facts at the same moment is what made
+       * 「arrived」 and 「acted on」 indistinguishable in the first place.
+       */
+      onSurfaced?: () => void;
     },
   ) => Promise<boolean>;
   /** Queue for later when the session is mid-turn. */
@@ -65,8 +73,15 @@ export interface EventDispatcherOptions {
   onUnclaimed?: (event: EventMeta) => void;
   mergeWindowMs?: number;
   dailyLimit?: number;
-  /** Called after a session actually received the event (surface written). */
-  onDelivered?: (eventId: string, sessionId: string) => void;
+  /** Called when the event is inside a session and its turn is about to run. */
+  onSurfaced?: (eventId: string, sessionId: string) => void;
+  /**
+   * Called when the turn that received the event has finished.
+   *
+   * The evidence that the event was handled rather than merely delivered, and the reason the old
+   * boolean could not answer 「how was it handled」.
+   */
+  onHandled?: (eventId: string, sessionId: string) => void;
   /**
    * Thread ownership, consulted before subscriptions.
    *
@@ -183,8 +198,7 @@ export class EventDispatcher {
     for (const event of events) {
       const delivered = await this.deliverOne(sessionId, event, nudge, events.length > 1);
       if (!delivered) break;
-      recordDelivery(sessionId, Date.now());
-      this.options.onDelivered?.(event.id, sessionId);
+      this.options.onHandled?.(event.id, sessionId);
     }
   }
 
@@ -195,6 +209,10 @@ export class EventDispatcher {
     merged = false,
   ): Promise<boolean> {
     try {
+      const surfaced = (): void => {
+        recordDelivery(sessionId, Date.now());
+        this.options.onSurfaced?.(event.id, sessionId);
+      };
       return await this.options.target.deliver(sessionId, {
         eventId: event.id,
         source: event.source,
@@ -202,6 +220,7 @@ export class EventDispatcher {
         title: event.title,
         ...(event.summary ? { summary: event.summary } : {}),
         receivedAt: event.receivedAt,
+        onSurfaced: surfaced,
         // A merged batch shows one nudge per row; the row itself carries the
         // detail, so the extra text would only repeat.
         nudge: merged ? formatEventNudge(event) : nudge,

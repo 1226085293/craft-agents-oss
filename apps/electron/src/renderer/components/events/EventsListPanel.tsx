@@ -314,12 +314,29 @@ export function EventsListPanel({
                 <span className="shrink-0 text-[12px] leading-5 tabular-nums text-muted-foreground/80">
                   {formatTime(event.receivedAt)}
                 </span>
+                {/* Handled, not merely delivered: the dot waits for the receiving run to end. */}
                 <span
                   className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-                    event.delivered ? 'bg-accent' : 'bg-foreground/20'
+                    event.handledAt
+                      ? 'bg-accent'
+                      : (event.deliveries ?? []).length > 0
+                        ? 'bg-amber-500'
+                        : 'bg-foreground/20'
                   }`}
-                  aria-label={(event.deliveries ?? []).length > 0 ? `已投递给 ${(event.deliveries ?? []).length} 个会话` : '尚未投递'}
-                  title={(event.deliveries ?? []).length > 0 ? `已投递给 ${(event.deliveries ?? []).length} 个会话` : '尚未投递给任何会话'}
+                  aria-label={
+                    event.handledAt
+                      ? '已处理'
+                      : (event.deliveries ?? []).length > 0
+                        ? `已送达 ${(event.deliveries ?? []).length} 个会话，处理中`
+                        : '尚未送达'
+                  }
+                  title={
+                    event.handledAt
+                      ? `已处理 · ${formatTime(event.handledAt)}`
+                      : (event.deliveries ?? []).length > 0
+                        ? `已送达 ${(event.deliveries ?? []).length} 个会话，尚未处理完`
+                        : '尚未送达任何会话'
+                  }
                 />
               </div>
               {event.summary && (

@@ -13903,7 +13903,17 @@ ${request.prompt}`;
 
   async surfaceEventToSession(
     sessionId: string,
-    params: { eventId: string; source: string; type: string; title: string; summary?: string; receivedAt: number; nudge: string },
+    params: {
+      eventId: string
+      source: string
+      type: string
+      title: string
+      summary?: string
+      receivedAt: number
+      nudge: string
+      /** Fired once the event is in the transcript, before the turn runs. */
+      onSurfaced?: () => void
+    },
   ): Promise<boolean> {
     const managed = this.sessions.get(sessionId)
     if (!managed || managed.isArchived) return false
@@ -13916,6 +13926,14 @@ ${request.prompt}`;
 
     if (!managed.isProcessing) this.pushEventWakeTitle(managed, params)
     this.insertEventProcessRow(managed, params)
+    /**
+     * Arrival, not completion.
+     *
+     * Reported before the turn runs because the caller's `await` comes back at the END of the
+     * turn — using that one moment for both facts is exactly what made 「已投递」 unable to say
+     * whether anything had been done about the event.
+     */
+    params.onSurfaced?.()
 
     try {
       await this.sendMessage(managed.id, params.nudge, [], [], { hidden: true })

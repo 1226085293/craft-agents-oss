@@ -15,7 +15,6 @@ function makeEvent(overrides: Partial<CraftEventEnvelope> = {}): CraftEventEnvel
     links: [],
     attachments: [],
     body: '请确认附件里的付款条款，谢谢。',
-    delivered: false,
     ...overrides,
   };
 }
@@ -38,7 +37,7 @@ describe('EventStore.insert', () => {
     const loaded = store.get('evt_a');
     expect(loaded?.title).toBe('张三 · 合同确认');
     expect(loaded?.body).toContain('付款条款');
-    expect(loaded?.delivered).toBe(false);
+    expect(loaded?.handledAt).toBeUndefined();
     expect(loaded?.recipients).toEqual(['me@qq.com']);
   });
 
@@ -109,23 +108,49 @@ describe('EventStore.list', () => {
   });
 });
 
-describe('EventStore.markDelivered', () => {
-  it('flips the delivered flag once and reports changed rows', () => {
+describe('EventStore.markHandled', () => {
+  /**
+   * 「Handled」 is not 「delivered」.
+   *
+   * The boolean this replaced was set the moment a session was handed the event, so a fresh
+   * inbox item and a finished one looked the same. The timestamp only exists once the run that
+   * received the event has ended.
+   */
+  it('stamps handledAt on the delivery and on the event, once', () => {
     store.insert(makeEvent({ id: 'evt_a' }));
-    expect(store.markDelivered(['evt_a'])).toBe(1);
-    expect(store.markDelivered(['evt_a'])).toBe(0);
-    expect(store.get('evt_a')?.delivered).toBe(true);
+    store.recordDelivery('evt_a', 'sess_a', 1000)
+    expect(store.get('evt_a')?.handledAt).toBeUndefined();
+
+    store.markHandled('evt_a', 'sess_a', 2000);
+    expect(store.get('evt_a')?.handledAt).toBe(2000);
+    expect(store.get('evt_a')?.deliveries[0]?.handledAt).toBe(2000);
+
+    // A second run does not move the timestamp backwards or forwards.
+    store.markHandled('evt_a', 'sess_a', 3000);
+    expect(store.get('evt_a')?.handledAt).toBe(2000);
+  });
+
+  it('filters handled from pending', () => {
+    store.insert(makeEvent({ id: 'done' }));
+    store.insert(makeEvent({ id: 'waiting' }));
+    store.recordDelivery('done', 'sess_a', 1000);
+    store.recordDelivery('waiting', 'sess_a', 1000);
+    store.markHandled('done', 'sess_a', 2000);
+
+    expect(store.list({ handled: true }).map((e) => e.id)).toEqual(['done']);
+    expect(store.list({ handled: false }).map((e) => e.id)).toEqual(['waiting']);
   });
 });
 
 describe('EventStore.recordDelivery', () => {
-  it('records per-session deliveries and flips delivered', () => {
+  it('records per-session deliveries without claiming they were handled', () => {
     store.insert(makeEvent({ id: 'evt_d1' }));
     store.recordDelivery('evt_d1', 'sess_a', 1_800_000_100_000);
     store.recordDelivery('evt_d1', 'sess_b', 1_800_000_200_000);
 
     const meta = store.list({})[0]!;
-    expect(meta.delivered).toBe(true);
+    // Arrival is not completion: nothing has run yet.
+    expect(meta.handledAt).toBeUndefined();
     expect(meta.deliveries).toHaveLength(2);
     expect(meta.deliveries.map((d) => d.sessionId).sort()).toEqual(['sess_a', 'sess_b']);
     expect(meta.deliveries[0]!.at).toBeTypeOf('number');
@@ -178,7 +203,9 @@ describe('EventStore legacy migration', () => {
       CREATE VIRTUAL TABLE events_fts USING fts5(event_id UNINDEXED, search_text, tokenize='unicode61');
     `);
     legacy.exec(
-      "INSERT INTO events (id, source, type, received_at, title, recipients, delivered) VALUES ('old_1', 'qqmail', 'mail.received', 123, '旧事件', '[]', 0)",
+      // delivered = 1: this row was handed to a session under the old build, so the upgrade
+      // must not relabel it as work nobody did.
+      "INSERT INTO events (id, source, type, received_at, title, recipients, delivered) VALUES ('old_1', 'qqmail', 'mail.received', 123, '旧事件', '[]', 1)",
     );
     legacy.close();
 
@@ -189,7 +216,9 @@ describe('EventStore legacy migration', () => {
       migrated.recordDelivery('old_1', 'sess_b', 6);
       expect(migrated.get('new_1')?.deliveries).toEqual([{ sessionId: 'sess_a', at: 5 }]);
       expect(migrated.get('old_1')?.deliveries).toEqual([{ sessionId: 'sess_b', at: 6 }]);
-      expect(migrated.get('old_1')?.delivered).toBe(true);
+      // Backfilled from the old flag: those rows had been through a delivery attempt,
+      // so labelling the whole history 「unhandled」 after an upgrade would be a lie.
+      expect(migrated.get('old_1')?.handledAt).toBeTypeOf('number');
     } finally {
       migrated.close();
       // WAL sidecar files can linger briefly on Windows; cleanup is not the
@@ -249,7 +278,6 @@ describe('EventStore.recordRouting', () => {
       recipients: [],
       links: [],
       attachments: [],
-      delivered: false,
     });
 
     store.recordRouting('evt_r1', {

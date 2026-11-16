@@ -30,7 +30,6 @@ function event(overrides: Partial<EventMeta> = {}): EventMeta {
     recipients: ['me@qq.com'],
     links: [],
     attachments: [],
-    delivered: false,
     deliveries: [],
     routing: [],
     ...overrides,

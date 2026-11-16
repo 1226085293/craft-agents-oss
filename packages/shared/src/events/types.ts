@@ -85,8 +85,16 @@ export interface CraftEventEnvelope {
   attachments: CraftEventAttachment[];
   body?: string;
   payloadRef?: CraftEventPayloadRef;
-  /** Whether the event was delivered to at least one subscribed session. */
-  delivered: boolean;
+  /**
+   * When a receiving session finished the run this event started.
+   *
+   * A `delivered: boolean` used to sit here, set as soon as any subscribed session had been handed
+   * the event. It answered 「was anyone told」 while everything reading it wanted 「was this dealt
+   * with」, so a pending item and a finished one rendered the same. The timestamp only exists once
+   * the turn that received the event has ended; it lives on `EventRecord`, not on the envelope a
+   * listener submits, because it is a fact about handling rather than about arrival.
+   */
+  handledAt?: number;
 }
 
 /** What a listener is allowed to send. Identity fields are absent on purpose. */
@@ -276,7 +284,6 @@ export function normalizeEventInput(
       attachments,
       ...(body !== undefined ? { body } : {}),
       ...(payloadRef ? { payloadRef } : {}),
-      delivered: false,
     },
   };
 }

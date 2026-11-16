@@ -167,7 +167,6 @@ export function bridgeMessage(msg: BridgeableMessage, context: BridgeContext): B
     links,
     attachments: [],
     body: msg.text,
-    delivered: false,
   };
 
   return {

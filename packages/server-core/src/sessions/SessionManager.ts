@@ -229,7 +229,6 @@ import type { SummarizeCallback } from '@craft-agent/shared/sources'
 import { type ThinkingLevel, DEFAULT_THINKING_LEVEL, normalizeThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import { parseError } from '@craft-agent/shared/agent/errors'
 import { copyTurnLogsForBranch } from '@craft-agent/shared/agent/turn-log'
-import type { IMessagingGatewayRegistry } from '@craft-agent/server-core/handlers'
 import { buildBackendRuntimeSignature, buildRestartRequiredSignature, filterAttachmentsForModelInput } from './runtime-config'
 import { validateArchiveTarget } from './archive-guards'
 

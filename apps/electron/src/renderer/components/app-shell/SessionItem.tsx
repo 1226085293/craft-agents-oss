@@ -6,7 +6,6 @@ import { cn } from "@/lib/utils"
 import { rendererPerf } from "@/lib/perf"
 import { Spinner } from "@craft-agent/ui"
 import { EntityRow } from "@/components/ui/entity-row"
-import { EntityListBadge } from "@/components/ui/entity-list-badge"
 import { SessionMenu } from "./SessionMenu"
 import { BatchSessionMenu } from "./BatchSessionMenu"
 import { CompactSessionMenu } from "./CompactSessionMenu"
@@ -19,19 +18,6 @@ import { useAppShellContext } from "@/context/AppShellContext"
 import { navigate, routes } from "@/lib/navigate"
 import { beginSessionDrag, endDrag, DRAG_ENABLED } from './dragState'
 import type { SessionMeta } from "@/atoms/sessions"
-import { messagingBindingsBySessionAtom } from "@/atoms/messaging"
-import { useAtomValue } from "jotai"
-
-const PLATFORM_PILL: Record<'telegram' | 'whatsapp', { label: string; colorClass: string }> = {
-  telegram: {
-    label: 'Telegram',
-    colorClass: 'bg-sky-500/10 text-sky-600 dark:bg-sky-400/15 dark:text-sky-300',
-  },
-  whatsapp: {
-    label: 'WhatsApp',
-    colorClass: 'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-400/15 dark:text-emerald-300',
-  },
-}
 
 export interface SessionItemProps {
   item: SessionMeta
@@ -69,9 +55,6 @@ export function SessionItem({
   const hasMatch = chatMatchCount != null && chatMatchCount > 0
   const hasPendingPrompt = ctx.hasPendingPrompt?.(item.id) ?? false
   const previewText = isCompactMode ? getSessionPreviewText(item) : null
-  const messagingBindingsBySession = useAtomValue(messagingBindingsBySessionAtom)
-  const sessionBindings = messagingBindingsBySession.get(item.id) ?? []
-  const hasMessagingBinding = sessionBindings.length > 0
 
   // Resolve the bound project so the row can show a project-themed stripe /
   // tint and reveal the project name on hover. Treatment is a user preference
@@ -201,9 +184,9 @@ export function SessionItem({
       titleClassName={cn("text-[13px]", item.isAsyncOperationOngoing && "animate-shimmer-text")}
       subtitle={previewText}
       titleSuffix={
-        (projectName || hasMessagingBinding) ? (
+        projectName ? (
           <div className="flex items-center gap-1">
-            {projectName && !ctx.inProjectScope && (
+            {!ctx.inProjectScope && (
               <span
                 className="text-[11px] text-foreground/40 whitespace-nowrap truncate max-w-[120px] opacity-0 group-hover:opacity-100 transition-opacity duration-150"
                 style={projectColor ? { color: projectColor } : undefined}
@@ -212,20 +195,6 @@ export function SessionItem({
                 {projectName}
               </span>
             )}
-            {hasMessagingBinding && sessionBindings.map((binding) => {
-              const pill = PLATFORM_PILL[binding.platform as 'telegram' | 'whatsapp']
-              if (!pill) return null
-              return (
-                <EntityListBadge
-                  key={binding.id}
-                  variant="text"
-                  colorClass={pill.colorClass}
-                  tooltip={`Connected to ${pill.label}`}
-                >
-                  {pill.label}
-                </EntityListBadge>
-              )
-            })}
           </div>
         ) : undefined
       }

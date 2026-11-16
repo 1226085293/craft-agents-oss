@@ -13,7 +13,6 @@ import type { ThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import type { AuthResult } from '@craft-agent/shared/agent'
 import type { LLMQueryRequest, LLMQueryResult } from '@craft-agent/shared/agent/llm-tool'
 import type { ModelRequestKind } from '@craft-agent/shared/config'
-import type { IMessagingGatewayRegistry } from './messaging-registry-interface'
 import type {
   Session,
   CreateSessionOptions,
@@ -439,7 +438,5 @@ export interface ISessionManager {
    */
   refreshGatewayRuntime(): Promise<void>
   completeAuthRequest(sessionId: string, result: AuthResult): Promise<void>
-  /** Inject messaging registry for session-scoped messaging tools. */
-  setMessagingRegistry?(registry: IMessagingGatewayRegistry): void
 }
 

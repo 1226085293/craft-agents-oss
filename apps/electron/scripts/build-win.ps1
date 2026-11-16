@@ -364,17 +364,6 @@ try {
 # 6. Build Electron app
 Write-Host "Building Electron app..."
 
-# Build WhatsApp worker bundle before packaging. electron-builder.yml includes
-# packages/messaging-whatsapp-worker/dist/worker.cjs as an extraResource.
-Write-Host "  Building WhatsApp worker..."
-Push-Location $RootDir
-try {
-    bun run build:wa-worker
-    if ($LASTEXITCODE -ne 0) { throw "WhatsApp worker build failed" }
-} finally {
-    Pop-Location
-}
-
 # Build main process with OAuth credentials
 Write-Host "  Building main process..."
 $MainArgs = @(
@@ -384,11 +373,6 @@ $MainArgs = @(
     "--format=cjs",
     "--outfile=apps/electron/dist/main.cjs",
     "--external:electron",
-    # Replace grammY's bundled polyfills (node-fetch@2 + abort-controller@3)
-    # with native Node globals. Without this, packaged Telegram API calls can
-    # fail before polling or file download starts.
-    "--alias:node-fetch=./apps/electron/src/main/shims/node-fetch.cjs",
-    "--alias:abort-controller=./apps/electron/src/main/shims/abort-controller.cjs",
     # Embedding engine (bge-small-zh-v1.5): transformers.js + onnxruntime must
     # NOT be inlined — esbuild dead-code-eliminates the onnxruntime-node native
     # binding loader when it bundles them, breaking embedding in the Electron

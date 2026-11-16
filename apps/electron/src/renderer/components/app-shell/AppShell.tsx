@@ -3100,9 +3100,6 @@ function AppShellContent({
         onSubmit={handleCreateProjectSubmit}
       />
 
-      {/* Messaging dialogs (pairing-code + WA connect) — driven by messagingDialogAtom.
-          Mounted here so they survive context-menu / dropdown close. */}
-
       {/* Navigator panel's empty-space menu (New Session / New Folder). Rendered
           through a portal so the panel's overflow cannot clip it. */}
       {listMenu && createPortal(

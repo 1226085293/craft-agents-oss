@@ -75,7 +75,7 @@ export const searchLog = log.scope('search')
  * above), so every `[auto-update]` / `[update-flow]` diagnostic is dropped —
  * leaving update-install failures undiagnosable in the field (see #891). This
  * dedicated, always-on rotating log records the update lifecycle at a stable
- * path regardless of debug mode, mirroring the messaging-gateway log above.
+ * path regardless of debug mode.
  */
 function normalizeLogValue(value: unknown, depth = 0): unknown {
   if (depth > 4) return '[truncated]'

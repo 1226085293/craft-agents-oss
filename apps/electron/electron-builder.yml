@@ -217,9 +217,6 @@ mac:
       to: app/node_modules/onnxruntime-common
     - from: E:/craft-agents-oss/node_modules/sharp
       to: app/node_modules/sharp
-    # WhatsApp worker subprocess (self-contained; Baileys bundled in).
-    - from: ../../packages/messaging-whatsapp-worker/dist/worker.cjs
-      to: messaging-whatsapp-worker/worker.cjs
   # Exclude binaries for other platforms
   files:
     - "!**/resources/bin/win32-*/**"
@@ -308,9 +305,6 @@ win:
     # collected as declared deps via the files whitelist.)
     - from: E:/craft-agents-oss/node_modules/onnxruntime-common
       to: app/node_modules/onnxruntime-common
-    # WhatsApp worker subprocess (self-contained; Baileys bundled in).
-    - from: ../../packages/messaging-whatsapp-worker/dist/worker.cjs
-      to: messaging-whatsapp-worker/worker.cjs
 
 nsis:
   # 自定义脚上入口。必须显式写：不写时 electron-builder 只会在
@@ -355,9 +349,6 @@ linux:
   extraResources:
     - from: node_modules/@vscode/ripgrep
       to: app/node_modules/@vscode/ripgrep
-    # WhatsApp worker subprocess (self-contained; Baileys bundled in).
-    - from: ../../packages/messaging-whatsapp-worker/dist/worker.cjs
-      to: messaging-whatsapp-worker/worker.cjs
   # Exclude binaries for other platforms
   files:
     - "!**/resources/bin/darwin-*/**"

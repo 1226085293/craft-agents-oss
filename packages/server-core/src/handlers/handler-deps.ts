@@ -3,7 +3,6 @@ import type { ISessionManager } from './session-manager-interface'
 import type { IOAuthFlowStore } from './oauth-flow-store-interface'
 import type { IBrowserPaneManager } from './browser-pane-manager-interface'
 import type { IWindowManager } from './window-manager-interface'
-import type { IMessagingGatewayRegistry } from './messaging-registry-interface'
 import type { GatewayRuntime } from '@craft-agent/shared/config'
 import type { LlmUsageRecord } from '@craft-agent/shared/config'
 
@@ -42,7 +41,6 @@ export interface HandlerDeps<
   windowManager?: TWindowManager
   browserPaneManager?: TBrowserPaneManager
   oauthFlowStore: TOAuthFlowStore
-  messagingRegistry?: IMessagingGatewayRegistry
   /** In-process LLM gateway access. Optional so hosts need not provide it. */
   llmGateway?: LlmGatewayAccess
 }

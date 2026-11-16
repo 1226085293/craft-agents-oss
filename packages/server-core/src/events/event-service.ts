@@ -16,7 +16,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createLogger } from '@craft-agent/shared/utils';
 import { EventStore, type EventFilter, type EventMeta, type EventRecord } from '@craft-agent/shared/events/event-store.ts';
 import { EventIngestServer, type EventIngestAddress } from './ingest-server.ts';
-import { loadListeners, missingConfigKeys, setListenerConfig, setListenerEnabled, type LoadedListener, pluginReadiness } from './listener-registry.ts';
+import { installListenerFromCatalog, loadListeners, loadPluginLocales, missingConfigKeys, setListenerConfig, setListenerEnabled, type LoadedListener, pluginReadiness } from './listener-registry.ts';
 import type { HostCommand } from './host-command-server.ts';
 import { buildStartupReport } from '@craft-agent/shared/events/startup-report.ts';
 import { ListenerSupervisor, type ListenerRuntimeStatus } from './listener-supervisor.ts';
@@ -421,6 +421,13 @@ export class EventService {
       await this.supervisor.stop(id);
       return this.supervisor.getStatus(id);
     }
+    // A catalog plugin is code-only until adopted: flipping its switch used to
+    // write `enabled: true` and then dead-end on readiness with
+    // "not installed", leaving the user with a toggle that never starts
+    // anything. Adoption is pure file copy (data lives in events-data, so it
+    // is idempotent and never touches credentials) — do it here, the single
+    // choke point every enable path goes through.
+    installListenerFromCatalog(workspaceRoot, id, pluginCatalogDirs());
     const listener = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() }).find((entry) => entry.id === id);
     if (!listener) {
       return { ...this.supervisor.getStatus(id), state: 'failed', lastError: 'listener not found' };
@@ -540,24 +547,65 @@ export interface ListenerView extends LoadedListener {
 
 /** Map a LoadedListener (fields nested under `manifest`) onto the ListenerView shape. */
 /** Map a LoadedListener (fields nested under `manifest`) onto the ListenerView shape. */
+/**
+ * Translate a plugin's config field labels.
+ *
+ * Keys are `config.<field>.title` / `config.<field>.description`: field names
+ * are stable identifiers, so a translation survives reordering. Only string
+ * labels are touched — types, defaults, bounds and secrets come from the
+ * manifest and must never be altered here.
+ */
+function localizeConfigSchema(
+  schema: ListenerConfigSchema | undefined,
+  prefix: string,
+  strings: Record<string, string>,
+): ListenerConfigSchema | undefined {
+  if (!schema?.properties) return schema;
+  const properties: ListenerConfigSchema['properties'] = {};
+  for (const [key, property] of Object.entries(schema.properties)) {
+    const title = strings[`${prefix}config.${key}.title`];
+    const description = strings[`${prefix}config.${key}.description`];
+    properties[key] = {
+      ...property,
+      ...(title !== undefined ? { title } : {}),
+      ...(description !== undefined ? { description } : {}),
+    };
+  }
+  return { ...schema, properties };
+}
+
 function toListenerView(
   listener: LoadedListener,
   service: EventService,
   logTail: string,
   controlDeps?: ListenerReportedDepsDto,
+  locale?: string,
 ): ListenerView {
   const m = listener.manifest
   const status = service.supervisorStatus(listener.id)
+  // The card chrome is the plugin's own words, so a plugin that ships
+  // `i18n/<locale>.json` gets to rename itself in the reader's language. Missing
+  // keys fall back to the manifest, which is already a complete answer.
+  const strings = locale ? loadPluginLocales(listener, locale) : {}
+  const prefix = `plugin.${listener.id}.`
+  const localized = (key: string, fallback: string | undefined): string | undefined =>
+    strings[`${prefix}${key}`] ?? fallback
   return {
     ...listener,
-    name: m.name,
+    name: localized('name', m.name) ?? m.name,
     version: m.version,
-    description: m.description,
+    description: localized('pluginDescription', m.description),
     icon: m.icon,
     homepage: m.homepage,
-    configSchema: m.config,
+    configSchema: localizeConfigSchema(m.config, prefix, strings),
     ui: m.ui,
-    setup: m.setup ?? [],
+    // Steps are the plugin's own instructions, so they localise by position:
+    // `setup.0`, `setup.1`, … A plugin that ships no translations keeps the
+    // manifest wording, which is already readable.
+    setup: (m.setup ?? []).map((step, index) => ({
+      ...step,
+      text: localized(`setup.${index}`, step.text) ?? step.text,
+    })),
     status,
     missingConfig: missingConfigKeys(listener),
     logTail,
@@ -618,9 +666,14 @@ function readListenerReadme(dir: string): string | undefined {
   return undefined;
 }
 
-export function listListenersFor(service: EventService, workspaceRoot: string, skipProbes = false): ListenerView[] {
+export function listListenersFor(
+  service: EventService,
+  workspaceRoot: string,
+  skipProbes = false,
+  locale?: string,
+): ListenerView[] {
   return loadListeners({ workspaceRoot, skipProbes, catalogDirs: pluginCatalogDirs() }).map((listener) =>
-    toListenerView(listener, service, ''),
+    toListenerView(listener, service, '', undefined, locale),
   )
 }
 
@@ -628,13 +681,14 @@ export async function getListenerFor(
   service: EventService,
   workspaceRoot: string,
   id: string,
+  locale?: string,
 ): Promise<ListenerView | null> {
   const listener = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() }).find((entry) => entry.id === id);
   if (!listener) return null;
   // The control service is listener-provided and optional; a missing or slow
   // answer just renders as "no dependency info".
   const controlDeps = await fetchReportedDeps(listener.dataDir);
-  const view = toListenerView(listener, service, service.tailListenerLog(id, listener.dataDir), controlDeps);
+  const view = toListenerView(listener, service, service.tailListenerLog(id, listener.dataDir), controlDeps, locale);
   const readme = readListenerReadme(listener.dir);
   return readme !== undefined ? { ...view, readme } : view;
 }

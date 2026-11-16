@@ -1,9 +1,10 @@
 import { describe, it, expect, afterEach } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { getEventService, resetEventServicesForTest } from './event-service.ts';
+import { existsSync } from 'node:fs';
 import type { EventMeta, EventRecord } from '@craft-agent/shared/events/event-store.ts';
 
 const roots: string[] = [];
@@ -158,5 +159,48 @@ describe('getEventService callback rebinding', () => {
 
     expect(response.status).toBe(200);
     expect(seen.map((e) => e.title)).toEqual(['空回调不覆盖']);
+  });
+});
+
+/**
+ * Regression: the bundled catalog ships code only. Enabling a catalog plugin
+ * used to write `enabled: true` and then dead-end on readiness with
+ * "not-installed", so the toggle looked broken. Enabling must adopt the
+ * plugin (copy it into the workspace) so the start path actually runs.
+ */
+describe('enabling a catalog listener', () => {
+  it('adopts it into the workspace so the toggle can start it', async () => {
+    const root = makeRoot();
+    // Minimal catalog plugin: manifest + a no-op sleep (node is on PATH in dev).
+    const catalog = mkdtempSync(join(tmpdir(), 'craft-catalog-adopt-'));
+    roots.push(catalog);
+    const catDir = join(catalog, 'adopt');
+    mkdirSync(catDir, { recursive: true });
+    writeFileSync(
+      join(catDir, 'manifest.json'),
+      JSON.stringify({
+        spec: 'craft-listener/1',
+        id: 'adopt',
+        name: 'Adopt',
+        version: '1.0.0',
+        runtime: { program: ['node', '-e', 'setTimeout(() => {}, 45000)'], readyTimeoutMs: 4000 },
+      }, null, 2),
+    );
+    const previousCatalog = process.env.CRAFT_PLUGIN_CATALOG;
+    process.env.CRAFT_PLUGIN_CATALOG = catalog;
+    try {
+      const service = await getEventService('ws-catalog-adopt', root);
+      const status = await service.setListenerEnabled(root, 'adopt', true);
+
+      // Adoption happened: the catalog dir was copied into the workspace.
+      expect(existsSync(join(root, 'events', 'adopt', 'manifest.json'))).toBe(true);
+      // And the start path ran instead of the readiness dead-end.
+      expect(status.state).not.toBe('stopped');
+      expect(status.lastError ?? '').not.toContain('插件尚未安装到工作区');
+      await service.setListenerEnabled(root, 'adopt', false);
+    } finally {
+      if (previousCatalog === undefined) delete process.env.CRAFT_PLUGIN_CATALOG;
+      else process.env.CRAFT_PLUGIN_CATALOG = previousCatalog;
+    }
   });
 });

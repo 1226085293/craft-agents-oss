@@ -1021,7 +1021,7 @@ export class TelegramAdapter implements PlatformAdapter {
   async sendText(channelId: string, text: string, opts?: SendOptions): Promise<SentMessage> {
     if (!this.bot) throw new Error('Telegram adapter not initialized')
     const sent = await sendWithMarkdownFallback(text, TELEGRAM_MAX_MESSAGE_LENGTH, this.log, (body, extra) =>
-      this.bot!.api.sendMessage(Number(channelId), body, { ...sendParams(opts), ...extra }),
+      this.bot!.api.sendMessage(toNumericChatId(channelId), body, { ...sendParams(opts), ...extra }),
     )
     return {
       platform: 'telegram',
@@ -1036,7 +1036,7 @@ export class TelegramAdapter implements PlatformAdapter {
     // accept message_thread_id here. We accept the option for caller
     // uniformity but ignore it.
     await sendWithMarkdownFallback(text, TELEGRAM_MAX_MESSAGE_LENGTH, this.log, (body, extra) =>
-      this.bot!.api.editMessageText(Number(channelId), Number(messageId), body, extra),
+      this.bot!.api.editMessageText(toNumericChatId(channelId), Number(messageId), body, extra),
     )
   }
 
@@ -1051,7 +1051,7 @@ export class TelegramAdapter implements PlatformAdapter {
     }
 
     const sent = await sendWithMarkdownFallback(text, TELEGRAM_MAX_MESSAGE_LENGTH, this.log, (body, extra) =>
-      this.bot!.api.sendMessage(Number(channelId), body, {
+      this.bot!.api.sendMessage(toNumericChatId(channelId), body, {
         reply_markup: keyboard,
         ...sendParams(opts),
         ...extra,
@@ -1068,7 +1068,7 @@ export class TelegramAdapter implements PlatformAdapter {
   async sendTyping(channelId: string, opts?: SendOptions): Promise<void> {
     if (!this.bot) return
     await this.bot.api
-      .sendChatAction(Number(channelId), 'typing', threadParams(opts))
+      .sendChatAction(toNumericChatId(channelId), 'typing', threadParams(opts))
       .catch(() => {})
   }
 
@@ -1076,7 +1076,7 @@ export class TelegramAdapter implements PlatformAdapter {
     if (!this.bot) return
     // deleteMessage is keyed by (chat_id, message_id); Telegram does not use
     // message_thread_id for deletion. Errors are handled by the renderer.
-    await this.bot.api.deleteMessage(Number(channelId), Number(messageId))
+    await this.bot.api.deleteMessage(toNumericChatId(channelId), Number(messageId))
   }
 
   async sendFile(channelId: string, file: Buffer, filename: string, caption?: string, opts?: SendOptions): Promise<SentMessage> {
@@ -1087,14 +1087,14 @@ export class TelegramAdapter implements PlatformAdapter {
 
     let sent: { message_id: number }
     try {
-      sent = await this.bot.api.sendDocument(Number(channelId), inputFile, {
+      sent = await this.bot.api.sendDocument(toNumericChatId(channelId), inputFile, {
         ...formatted,
         ...threadParams(opts),
       })
     } catch (err) {
       if (!isMarkupError(err) || !formatted.parse_mode) throw err
       this.log.warn('Telegram rejected caption markup, resending as plain text')
-      sent = await this.bot.api.sendDocument(Number(channelId), inputFile, {
+      sent = await this.bot.api.sendDocument(toNumericChatId(channelId), inputFile, {
         caption,
         ...threadParams(opts),
       })
@@ -1111,7 +1111,7 @@ export class TelegramAdapter implements PlatformAdapter {
     if (!this.bot) return
     try {
       // editMessageReplyMarkup is also keyed by (chat_id, message_id) only.
-      await this.bot.api.editMessageReplyMarkup(Number(channelId), Number(messageId), {
+      await this.bot.api.editMessageReplyMarkup(toNumericChatId(channelId), Number(messageId), {
         reply_markup: { inline_keyboard: [] },
       })
     } catch {
@@ -1175,6 +1175,16 @@ type MarkupExtra = { parse_mode?: TelegramParseMode }
  * the message entirely. Streaming edits make case 2 very reachable — an
  * intermediate flush can hand us text the converter couldn't balance.
  */
+/**
+ * Channel ids cross the action boundary in two shapes: the manifest contract
+ * promises prefixed ids (`user:123`, `group:123` — what the events' reply
+ * links carry), while host-side link resolution hands the raw numeric chat
+ * id (`123`). Accept both; only the number reaches the Telegram API.
+ */
+function toNumericChatId(channelId: string): number {
+  return Number(channelId.replace(/^(?:user|group):/i, ''))
+}
+
 async function sendWithMarkdownFallback<T>(
   text: string,
   maxLength: number,

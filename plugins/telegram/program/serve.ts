@@ -26,13 +26,27 @@
  */
 
 import { createServer } from 'node:http'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { join } from 'node:path'
 
 const PORT = Number(process.env.CRAFT_PLUGIN_PORT ?? 0)
 const PLUGIN_ID = process.env.CRAFT_LISTENER_ID ?? 'plugin'
 const EVENTS_URL = process.env.CRAFT_EVENTS_URL ?? ''
 const EVENTS_TOKEN = process.env.CRAFT_EVENTS_TOKEN ?? ''
 const CONFIG_PATH = process.env.CRAFT_LISTENER_CONFIG ?? ''
+/** Where the plugin may write `control.json` — Craft reads the service from there. */
+const DATA_DIR = process.env.CRAFT_LISTENER_DATA ?? ''
+/**
+ * Bearer token for the loopback control service.
+ *
+ * Craft and the plugin run on the same machine but not in the same address
+ * space, so the port alone would let any local process drive this plugin's
+ * outbound actions. A fresh random token per process, published only in a
+ * mode-600 file beside the data dir, closes that: nothing outside this
+ * process and Craft ever sees it.
+ */
+const CONTROL_TOKEN = randomBytes(32).toString('hex')
 
 interface IncomingLike {
   channelId?: string
@@ -195,6 +209,15 @@ const server = createServer((req, res) => {
       return
     }
 
+    // Everything below drives the plugin, so it needs the token from
+    // control.json. Without this the published token would be decoration: any
+    // local process could post /action on the user's behalf.
+    const presented = req.headers.authorization ?? ''
+    if (presented !== `Bearer ${CONTROL_TOKEN}`) {
+      send(401, { error: 'unauthorized' })
+      return
+    }
+
     const body = (await readJson(req)) as { action?: string; args?: Record<string, unknown> } | null
     const action = typeof body?.action === 'string' ? body.action : ''
     if (!action) {
@@ -244,6 +267,28 @@ server.listen(PORT, '127.0.0.1', () => {
   const address = server.address()
   const port = typeof address === 'object' && address ? address.port : 0
   console.log(JSON.stringify({ ready: true, port }))
+
+  // Publish the control service so Craft can reach us (`craft-deps/1` contract).
+  // The port is ephemeral and the token is per-process: Craft reads both from
+  // this file, so no port is ever guessed and a stale file cannot impersonate a
+  // fresh process. mode 600 — the token is a bearer credential for 127.0.0.1.
+  if (DATA_DIR) {
+    try {
+      mkdirSync(DATA_DIR, { recursive: true })
+      writeFileSync(
+        join(DATA_DIR, 'control.json'),
+        `${JSON.stringify({ port, token: CONTROL_TOKEN, pid: process.pid }, null, 2)}\n`,
+        { encoding: 'utf8', mode: 0o600 },
+      )
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: 'control_json_failed',
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    }
+  }
 })
 
 // Inbound: the adapter owns the platform connection; this only forwards.

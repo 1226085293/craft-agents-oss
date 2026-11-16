@@ -232,7 +232,9 @@ const server = createServer((req, res) => {
         return
       }
 
-      if (action === 'send_message') {
+      // `reply` carries the same shape: the host has already filled the origin's
+      // channelId (repliesToOrigin), so it is a send to a known channel.
+      if (action === 'send_message' || action === 'reply') {
         const text = typeof args.text === 'string' ? args.text.trim() : ''
         const channelId = typeof args.channelId === 'string' ? args.channelId : ''
         if (!text) {

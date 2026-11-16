@@ -2693,6 +2693,16 @@ function AppShellContent({
                   aria-label={t("folders.back")}
                   onClick={handleGoToParentFolder}
                 />
+              ) : sessionFilter?.kind === "archived" && archiveScopeKey ? (
+                // The in-list archive breadcrumb is gone, so the header row's
+                // button is the only way back to the archive root — placed
+                // exactly like the folder-scope back button of「所有会话」.
+                <HeaderIconButton
+                  icon={<ChevronLeft className="h-4 w-4" />}
+                  tooltip={t("sidebar.archived")}
+                  aria-label={t("sidebar.archived")}
+                  onClick={() => setArchiveScopeKey(null)}
+                />
               ) : undefined}
 
               actions={

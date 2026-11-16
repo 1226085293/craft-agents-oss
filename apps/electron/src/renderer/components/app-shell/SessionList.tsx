@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next"
 import { useSetAtom } from "jotai"
 import { startOfDay } from "date-fns"
 import { useAction } from "@/actions"
-import { Inbox, Archive, ChevronRight } from "lucide-react"
+import { Inbox, Archive } from "lucide-react"
 
 import * as storage from "@/lib/local-storage"
 import { KEYS } from "@/lib/local-storage"
@@ -567,29 +567,6 @@ export function SessionList({
                 archive tree instead of this live navigator: one path per folder. */}
             {isArchiveView && archiveTree ? (
               <>
-                {archiveScopeKey ? (
-                  <nav className="flex flex-wrap items-center gap-0.5 px-3 pt-2 pb-1 text-xs text-muted-foreground">
-                    <button
-                      type="button"
-                      onClick={() => setArchiveScopeKey(null)}
-                      className="rounded px-1 py-0.5 hover:bg-foreground/[0.07] hover:text-foreground"
-                    >
-                      {t("sidebar.archived")}
-                    </button>
-                    {archivePath.map((node) => (
-                      <span key={node.key} className="inline-flex min-w-0 items-center gap-0.5">
-                        <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
-                        <button
-                          type="button"
-                          onClick={() => setArchiveScopeKey(node.key)}
-                          className="max-w-[45%] truncate rounded px-1 py-0.5 hover:bg-foreground/[0.07] hover:text-foreground"
-                        >
-                          {node.name}
-                        </button>
-                      </span>
-                    ))}
-                  </nav>
-                ) : null}
                 <ArchiveFolderList
                   nodes={archiveFoldersHere}
                   sessionCounts={archiveFolderCounts}

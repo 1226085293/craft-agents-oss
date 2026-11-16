@@ -27,10 +27,10 @@ export interface EventsListPanelProps {
 
 /**
  * Reception status is one dropdown, not two independent toggles: "有接收方"
- * (has configured recipients) and "未被接收" (not delivered yet) are the two
- * non-default choices of the same question the user asks about a row.
+ * (has configured recipients) and "未处理" (no receiving run has finished yet)
+ * are the two non-default choices of the same question the user asks about a row.
  */
-type ReceptionFilter = '' | 'has-recipients' | 'undelivered'
+type ReceptionFilter = '' | 'has-recipients' | 'unprocessed'
 /** Sort order of the list, by receivedAt. Newest-first is the default. */
 type SortOrder = 'desc' | 'asc'
 
@@ -175,7 +175,7 @@ export function EventsListPanel({
         ...(filters.source ? { source: filters.source } : {}),
         ...(filters.type ? { type: filters.type } : {}),
         ...(filters.reception === 'has-recipients' ? { hasRecipients: true } : {}),
-        ...(filters.reception === 'undelivered' ? { handled: false } : {}),
+        ...(filters.reception === 'unprocessed' ? { handled: false } : {}),
         limit: 200,
       })
       setEvents(Array.isArray(rows) ? rows : [])
@@ -233,7 +233,7 @@ export function EventsListPanel({
 
   const RECEPTION_OPTIONS: { value: ReceptionFilter; label: string }[] = [
     { value: 'has-recipients', label: t('events.list.hasRecipients') },
-    { value: 'undelivered', label: t('events.list.undelivered') },
+    { value: 'unprocessed', label: t('events.list.unprocessed') },
   ]
 
   return (
@@ -266,7 +266,7 @@ export function EventsListPanel({
           )}
           <FilterMenu
             value={RECEPTION_OPTIONS.find((o) => o.value === filters.reception)?.label ?? ''}
-            placeholder={t('events.list.receiveStatus')}
+            placeholder={t('events.list.rowStatus')}
             allLabel={t('events.list.all')}
             options={RECEPTION_OPTIONS.map((o) => o.label)}
             onChange={(next) =>

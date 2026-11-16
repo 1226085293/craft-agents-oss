@@ -781,9 +781,7 @@ export interface ElectronAPI {
     filter?: {
       source?: string
       type?: string
-      tag?: string
       hasRecipients?: boolean
-      delivered?: boolean
       /** Only events a receiving session has finished acting on (or only ones it has not, when false). */
       handled?: boolean
       since?: number

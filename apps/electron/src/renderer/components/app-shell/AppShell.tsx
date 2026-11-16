@@ -2035,6 +2035,9 @@ function AppShellContent({
     }
 
     // Sessions navigator - use sessionFilter
+    // The archive view is global (opening it drops the folder scope), so the
+    // folder-base title below would mislabel it — name the view itself.
+    if (sessionFilter?.kind === 'archived') return t("sidebar.archived")
     if (!sessionFilter) return t("sidebar.allSessions")
 
     // Project scope: the jumped-to project is the base, and its own tree

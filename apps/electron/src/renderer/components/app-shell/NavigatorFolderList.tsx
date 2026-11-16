@@ -345,7 +345,7 @@ export const NavigatorFolderList = React.forwardRef<NavigatorFolderListHandle, N
         })}
         {inlineCreate ? (
           <li>
-            <div className={ROW_CLASS}>
+            <div className={[ROW_CLASS, 'mx-2 max-w-[calc(100%-1rem)]'].join(' ')}>
               <FolderIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
               <NameInput
                 value={inlineCreate.value}

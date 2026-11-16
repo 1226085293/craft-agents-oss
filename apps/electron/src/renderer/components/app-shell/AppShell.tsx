@@ -437,11 +437,14 @@ function AppShellContent({
       if (!entry || Object.keys(entry.projects ?? {}).length === 0) return prev
       return { ...prev, allSessions: { projects: {} } }
     })
-    // Picking a root folder while the panel shows「已归档」must switch back to
-    //「所有会话」: the archive list ignores folder scopes, so without the
-    // navigation the pick reads as "nothing happened".
-    if (sessionFilter?.kind === 'archived') navigate(routes.view.allSessions())
-  }, [sessionFilter?.kind, navigate])
+    // Picking a root folder only has an effect in the live「所有会话」view:
+    // the archive view ignores folder scopes, and from any non-session view
+    // (events, tasks, …) the scope change would be invisible. Navigate so
+    // the pick reads as "entered that folder" instead of nothing.
+    if (!isSessionsNavigation(navState) || sessionFilter?.kind === 'archived') {
+      navigate(routes.view.allSessions())
+    }
+  }, [navState, sessionFilter?.kind, navigate])
 
   const handleBrowseRootFolderInProjectMode = useCallback((folderId: string | null) => {
     setRootFolderBrowseId(folderId)
@@ -1484,8 +1487,11 @@ function AppShellContent({
     setEnteredProjectId(null)
     setFolderScopeId(null)
     setRootFolderBrowseId(undefined)
+    // Clicking「已归档」again re-enters the archive root: a pick from the
+    // rail must never strand the panel inside a drilled archive folder.
+    setArchiveScopeKey(null)
     navigate(routes.view.archived())
-  }, [])
+  }, [navigate])
 
   // Leave the project browsing state (rail Mode 2): back to the entries list
   // and the root session list — the same navigation as "All Sessions".
@@ -3101,6 +3107,9 @@ function AppShellContent({
             <SquarePenRounded className="h-3.5 w-3.5 shrink-0" />
             {t("session.startSession", { defaultValue: "开始会话" })}
           </button>
+          {/* The archive view has no live folder list to create in (the ref is
+              unmounted there), so offering 新建文件夹 would be a dead item. */}
+          {sessionFilter?.kind !== 'archived' && (
           <button
             type="button"
             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-accent"
@@ -3115,6 +3124,7 @@ function AppShellContent({
             <FolderPlus className="h-3.5 w-3.5 shrink-0" />
             {t("folders.new")}
           </button>
+          )}
         </div>,
         document.body
       )}

@@ -3031,7 +3031,13 @@ function AppShellContent({
       {listMenu && createPortal(
         <div
           className="fixed z-[100] min-w-[180px] overflow-hidden rounded-md border border-foreground/10 bg-popover p-1 text-sm text-popover-foreground shadow-2xl"
-          style={{ left: listMenu.x, top: listMenu.y }}
+          // Clamped to the viewport: an unclamped menu opened near the panel
+          // bottom pushed 「新建文件夹」 off-screen and out of reach (two
+          // ~28px items + padding ≈ 70px tall, 180px wide).
+          style={{
+            left: Math.min(listMenu.x, window.innerWidth - 190),
+            top: Math.min(listMenu.y, window.innerHeight - 80),
+          }}
           onMouseDown={(event) => event.stopPropagation()}
           onContextMenu={(event) => { event.preventDefault(); setListMenu(null) }}
         >

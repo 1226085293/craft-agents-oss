@@ -461,7 +461,13 @@ export function SessionList({
   ])
 
   // --- Empty state (non-search) — render before EntityList ---
-  // Don't show empty state when there are collapsed groups with content
+  // Don't show empty state when there are collapsed groups with content.
+  // The live folder section counts as content too: in browse mode the folder
+  // list (and its create affordance) lives inside the EntityList header, so
+  // an early-return empty screen would swallow it — leaving root folders
+  // invisible in the panel and right-click → 新建文件夹 a silent no-op
+  // (the folder list ref is never mounted).
+  const liveFolderSection = !isArchiveView && !!foldersApi && !!onEnterFolder
   if (flatRows.length === 0 && rowData.groups.length === 0 && !searchActive && archiveFoldersHere.length === 0) {
     if (currentFilter?.kind === 'archived') {
       return (
@@ -473,7 +479,31 @@ export function SessionList({
         />
       )
     }
-
+    if (liveFolderSection) {
+      return (
+        <div className="flex flex-col flex-1 min-h-0">
+          <NavigatorFolderList
+            ref={folderListRef}
+            foldersApi={foldersApi!}
+            folderScopeProjectId={folderScopeProjectId}
+            scopeId={folderScopeId}
+            searchQuery={isSearchMode ? searchQuery : undefined}
+            onEnterFolder={onEnterFolder}
+            sessionCounts={folderSessionCounts}
+            onDropSession={onDropSessionToFolder}
+          />
+          {/* No action button: the list is "empty" in normal operation because
+              the supervisor (督导) is hidden by design, and the sessions that
+              do appear here are created by tasks. Minting a blank session
+              from the empty state is exactly what this list is not for. */}
+          <EntityListEmptyScreen
+            icon={<Inbox />}
+            title={t("session.noSessionsYet")}
+            description={t("session.noSessionsYetDesc")}
+          />
+        </div>
+      )
+    }
     // No action button: the list is "empty" in normal operation because the
     // supervisor (督导) is hidden by design, and the sessions that do appear
     // here are created by tasks. Minting a blank session from the empty state

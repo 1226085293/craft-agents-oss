@@ -9310,6 +9310,10 @@ ${request.prompt}`;
         return { sessionId: created.id }
       },
       sendToSession: (sessionId, text) => this.sendSystemMessage(sessionId, text),
+      bindThread: ({ eventId, sessionId }) => {
+        const managed = this.sessions.get(sessionId)
+        if (managed) this.bindEventThread(managed, eventId)
+      },
       claimRun: (taskId, sessionId, scope) => this.claimTaskRun(workspaceId, taskId, sessionId, scope),
       logDispatch: (message) => sessionLog.info(`[dispatch] ${message}`),
       handoffContext: (taskId) => {

@@ -1767,6 +1767,7 @@ describe('lane routing for unclaimed events', () => {
     runtime: SupervisorRuntime;
     sent: Array<{ sessionId: string; text: string }>;
     ensureCalls: Array<'user' | 'task'>;
+    binds: Array<{ eventId: string; sessionId: string }>;
     userSup: SupervisorSessionInfo;
     taskSup: SupervisorSessionInfo;
   }
@@ -1774,6 +1775,7 @@ describe('lane routing for unclaimed events', () => {
   function laneHarness(root: string, busy: { user?: boolean; task?: boolean } = {}): LaneHarness {
     const sent: LaneHarness['sent'] = [];
     const ensureCalls: LaneHarness['ensureCalls'] = [];
+    const binds: Array<{ eventId: string; sessionId: string }> = [];
     const userSup: SupervisorSessionInfo = {
       id: 'sess_sup_user',
       role: 'supervisor',
@@ -1802,12 +1804,15 @@ describe('lane routing for unclaimed events', () => {
       sendToSession: async (sessionId, text) => {
         sent.push({ sessionId, text })
       },
+      bindThread: (params) => {
+        binds.push(params)
+      },
       claimRun: () => undefined,
       writeToSupervisor: async () => undefined,
       askUser: async () => undefined,
       getTask: () => null,
     });
-    return { runtime, sent, ensureCalls, userSup, taskSup };
+    return { runtime, sent, ensureCalls, binds, userSup, taskSup };
   }
 
   it('sends a conversation event (a message link) to the user-lane supervisor', async () => {
@@ -1819,6 +1824,9 @@ describe('lane routing for unclaimed events', () => {
     expect(result).toBe('queued');
     expect(h.sent.map((entry) => entry.sessionId)).toEqual(['sess_sup_user']);
     expect(h.ensureCalls).toEqual(['user']);
+    // The drained conversation is claimed: the next message in this channel
+    // comes straight to the user-lane supervisor, no re-triage.
+    expect(h.binds).toEqual([{ eventId: 'e1', sessionId: 'sess_sup_user' }]);
   });
 
   it('sends an environment event (no conversation link) to the task-lane supervisor', async () => {
@@ -1828,6 +1836,8 @@ describe('lane routing for unclaimed events', () => {
     expect(result).toBe('queued');
     expect(h.sent.map((entry) => entry.sessionId)).toEqual(['sess_sup_task']);
     expect(h.ensureCalls).toEqual(['task']);
+    // Environment events are claimed by the task lane the same way.
+    expect(h.binds).toEqual([{ eventId: 'e1', sessionId: 'sess_sup_task' }]);
   });
 
   it('keeps the two backlogs separate while one lane is busy', async () => {

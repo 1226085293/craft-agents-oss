@@ -104,6 +104,15 @@ export interface SupervisorRuntimeDeps {
   /** Send a message into an existing session (wakes it if idle). */
   sendToSession: (sessionId: string, text: string) => Promise<void>;
   /**
+   * Record that a session now owns the conversation of one drained event.
+   *
+   * The drain path hands the supervisor a plain nudge, so nothing else would
+   * claim the conversation: without this hook, every follow-up message in
+   * the same channel would re-enter triage instead of the thread fast path.
+   * Absent in hosts that do not persist thread bindings.
+   */
+  bindThread?: (params: { eventId: string; sessionId: string }) => void;
+  /**
    * Mark the task as running in `sessionId`, exactly as the spawn path does.
    *
    * Send-to-existing-session was the one dispatch shape that claimed nothing, so a task could be
@@ -407,6 +416,12 @@ export class SupervisorRuntime {
 
     const items = backlog.drain();
     await this.deps.sendToSession(supervisor.id, formatBacklogNudge(items));
+    // Claim each conversation the backlog carried, so the next message in the
+    // same channel comes straight here instead of re-entering triage. Events
+    // without a message link bind nothing — only conversations are claimed.
+    for (const item of items) {
+      this.deps.bindThread?.({ eventId: item.id, sessionId: supervisor.id });
+    }
   }
 
   /**

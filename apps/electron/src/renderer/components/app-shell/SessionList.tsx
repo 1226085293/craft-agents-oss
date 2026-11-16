@@ -577,6 +577,11 @@ export function SessionList({
                         setArchiveScopeKey(null)
                       }
                     : undefined}
+                  onDelete={foldersApi
+                    ? async (folderId: string) => {
+                        await foldersApi.deleteFolder(folderId)
+                      }
+                    : undefined}
                 />
               </>
             ) : foldersApi && onEnterFolder ? (

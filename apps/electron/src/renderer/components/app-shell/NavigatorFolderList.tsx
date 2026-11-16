@@ -14,7 +14,6 @@
  */
 
 import * as React from 'react'
-import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { ChevronRight, Folder as FolderIcon, Pin } from 'lucide-react'
 import type { FolderConfig } from '@craft-agent/shared/sessions/folders'
@@ -25,7 +24,6 @@ import { compareFolders } from './folder-sort'
 import { filterFolderSearchResults } from './folder-search'
 import { rankFolderSearchResults } from './search-ranking'
 import { highlightMatch } from '@/utils/session'
-import { claimMenu, releaseMenu, subscribeMenu } from './menuRegistry'
 import { Separator } from '@/components/ui/separator'
 
 /** Characters a folder name cannot contain (Windows rules — the data lives on disk). */
@@ -35,12 +33,6 @@ const ROW_CLASS =
   // Vertical padding chosen so a folder row is exactly as tall as a session
   // row (EntityRow), and the two read as one continuous list.
   'group flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-3 text-sm text-left cursor-default select-none overflow-hidden transition-colors hover:bg-foreground/[0.07] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
-
-interface MenuState {
-  x: number
-  y: number
-  folder: FolderConfig
-}
 
 export interface NavigatorFolderListProps {
   foldersApi: UseFoldersResult
@@ -80,10 +72,7 @@ export const NavigatorFolderList = React.forwardRef<NavigatorFolderListHandle, N
   unreadFolderIds,
 }: NavigatorFolderListProps, ref): React.ReactElement | null {
   const { t } = useTranslation()
-  const [menu, setMenu] = React.useState<MenuState | null>(null)
   const [renaming, setRenaming] = React.useState<{ folderId: string; value: string } | null>(null)
-  const [deleting, setDeleting] = React.useState<FolderConfig | null>(null)
-  const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [dropTargetId, setDropTargetId] = React.useState<string | null>(null)
   React.useEffect(() => {
@@ -130,44 +119,13 @@ export const NavigatorFolderList = React.forwardRef<NavigatorFolderListHandle, N
       : visibleFolders.sort(compareByExistingPriority)
   }, [foldersApi.folders, scopeId, searchQuery, unreadFolderIds])
 
-  React.useEffect(() => {
-    if (!menu) return
-    // A menu opened by right-clicking while another one closes can receive that
-    // other menu's dismissal events; ignore anything in the first few frames.
-    const openedAt = Date.now()
-    const close = () => { if (Date.now() - openedAt < 150) return; setMenu(null) }
-    window.addEventListener('click', close)
-    window.addEventListener('keydown', close)
-    return () => {
-      window.removeEventListener('click', close)
-      window.removeEventListener('keydown', close)
-    }
-  }, [menu])
-  // Only one menu in the app may be open: this menu claims the slot while it is
-  // visible, and any other menu claiming it closes this one.
-  const menuId = React.useId()
-
-  React.useEffect(() => {
-    if (!menu) return
-    claimMenu(menuId)
-    return () => releaseMenu(menuId)
-  }, [menu, menuId])
-
-  React.useEffect(() => subscribeMenu((activeId) => {
-    // null = "the slot freed up" — that includes this menu re-opening (its own
-    // release fires before the re-claim), so only react to a *different* menu.
-    if (activeId && activeId !== menuId) setMenu(null)
-  }), [menuId])
 
   const run = React.useCallback(async (work: () => Promise<void>) => {
     try {
-      setBusy(true)
       setError(null)
       await work()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
     }
   }, [])
 
@@ -258,11 +216,6 @@ export const NavigatorFolderList = React.forwardRef<NavigatorFolderListHandle, N
                     event.preventDefault()
                     onEnterFolder(folder.id)
                   }
-                }}
-                onContextMenu={(event) => {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  setMenu({ x: event.clientX, y: event.clientY, folder })
                 }}
                 // Draggable out of this list too: dropping onto a folder in the
                 // sidebar tree re-parents it. The tree owns drop validation
@@ -369,90 +322,9 @@ export const NavigatorFolderList = React.forwardRef<NavigatorFolderListHandle, N
       {foldersApi.error || error ? (
         <div className="mt-1 px-1 text-[11px] text-destructive">{foldersApi.error ?? error}</div>
       ) : null}
-
-      {menu ? createPortal((
-        <div
-          className="fixed z-[100] min-w-[160px] overflow-hidden rounded-md border border-foreground/10 bg-popover p-1 text-sm text-popover-foreground shadow-2xl"
-          style={{ left: menu.x, top: menu.y }}
-          onClick={(event) => event.stopPropagation()}
-        >
-          {/*
-            * No rename.
-            *
-            * Folder names are the task id and nothing else — the folder is found by that name, so a
-            * rename would either orphan the task's conversations or need a separate identity kept
-            * in sync. The board already shows the title next to the id, so nothing a person was
-            * looking for is lost by not offering this.
-            */}
-          <MenuItem onClick={() => { void run(async () => { await foldersApi.pinFolder(menu.folder.id, !menu.folder.pinnedAt) }); setMenu(null) }}>
-            {menu.folder.pinnedAt ? t('folders.unpin') : t('folders.pin')}
-          </MenuItem>
-          <MenuItem onClick={() => { void run(async () => { await foldersApi.archiveFolder(menu.folder.id) }); setMenu(null) }}>
-            {t('folders.archive')}
-          </MenuItem>
-          <MenuItem destructive onClick={() => { setDeleting(menu.folder); setMenu(null) }}>
-            {t('folders.delete')}
-          </MenuItem>
-        </div>
-      ), document.body) : null}
-
-      {deleting ? createPortal((
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setDeleting(null)}>
-          <div className="w-[320px] rounded-lg border border-foreground/10 bg-popover p-4 text-popover-foreground shadow-2xl" onClick={(event) => event.stopPropagation()}>
-            <div className="mb-2 text-sm font-medium">{t('folders.deleteTitle', { name: deleting.name })}</div>
-            <p className="mb-3 text-xs text-muted-foreground">{t('folders.deleteBody')}</p>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className="rounded-md border px-3 py-1.5 text-sm hover:bg-accent"
-                onClick={() => setDeleting(null)}
-              >
-                {t('folders.cancel')}
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                className="rounded-md bg-destructive px-3 py-1.5 text-sm text-white hover:bg-destructive/90 disabled:opacity-50"
-                onClick={() => {
-                  const target = deleting
-                  void run(async () => {
-                    await foldersApi.deleteFolder(target.id)
-                    setDeleting(null)
-                  })
-                }}
-              >
-                {t('folders.deleteForever')}
-              </button>
-            </div>
-          </div>
-        </div>
-      ), document.body) : null}
     </div>
   )
 })
-
-function MenuItem({
-  children,
-  onClick,
-  destructive,
-}: {
-  children: React.ReactNode
-  onClick: () => void
-  destructive?: boolean
-}): React.ReactElement {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent',
-        destructive ? 'text-destructive' : '',
-      ].join(' ')}
-    >
-      {children}
-    </button>
-  )
-}
 
 /** In-place name editor: Enter commits, Escape and blur cancel. */
 function NameInput({

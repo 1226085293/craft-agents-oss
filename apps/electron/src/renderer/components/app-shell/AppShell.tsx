@@ -39,7 +39,6 @@ import {
   FolderKanban,
   PanelsTopLeft,
   Brain,
-  FolderPlus,
   ChevronLeft,
   ArrowLeft,
 } from "lucide-react"
@@ -1958,7 +1957,7 @@ function AppShellContent({
   const handleListBackgroundContextMenu = React.useCallback((event: React.MouseEvent) => {
     if (!isSessionsNavigation(navState)) return
     const target = event.target as HTMLElement | null
-    if (target?.closest('button, a, input, textarea, select, [role="menuitem"], [role="menu"], [data-session-id], [data-folder-id], [data-sidebar-item]')) {
+    if (target?.closest('button, a, input, textarea, select, [role="menuitem"], [role="menu"], [data-session-id], [data-folder-id], [data-nav-folder-id], [data-nav-archive-folder-key], [data-sidebar-item]')) {
       return
     }
     event.preventDefault()
@@ -2432,26 +2431,6 @@ function AppShellContent({
                       // a project (Mode 2 tree) moves its whole subtree across scopes.
                       onDropFolder: (folderId) => {
                         void handleDropFolderToScope(folderId, dragState.projectId, null)
-                      },
-                      contextMenu: {
-                        type: 'allSessions',
-                        // Creating a folder is an "All Sessions" action: the tree under
-                        // this row is where the new node appears.
-                        onNewFolder: () => folderSectionRef.current?.openCreate(null),
-                        onMarkAllRead: () => {
-                          if (!activeWorkspaceId) return
-                          // Optimistic: clear hasUnread on all workspace session metas
-                          setSessionMetaMap(prev => {
-                            const next = new Map(prev)
-                            for (const [id, meta] of next) {
-                              if (meta.workspaceId === activeWorkspaceId && meta.hasUnread && !meta.hidden && !meta.isArchived && !meta.isProcessing) {
-                                next.set(id, { ...meta, hasUnread: false })
-                              }
-                            }
-                            return next
-                          })
-                          window.electronAPI.markAllSessionsRead(activeWorkspaceId)
-                        },
                       },
                       items: [
                         // Folder tree — lives INSIDE "All Sessions" (nested subitems) so
@@ -3107,24 +3086,6 @@ function AppShellContent({
             <SquarePenRounded className="h-3.5 w-3.5 shrink-0" />
             {t("session.startSession", { defaultValue: "开始会话" })}
           </button>
-          {/* The archive view has no live folder list to create in (the ref is
-              unmounted there), so offering 新建文件夹 would be a dead item. */}
-          {sessionFilter?.kind !== 'archived' && (
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-accent"
-            onClick={() => {
-              setListMenu(null)
-              // Create where the user clicked: the navigator's own folder list.
-              // (Falling back to the tree would pop the editor into the wrong panel.)
-              setSearchActive(false)
-              navigatorFolderListRef.current?.openCreate()
-            }}
-          >
-            <FolderPlus className="h-3.5 w-3.5 shrink-0" />
-            {t("folders.new")}
-          </button>
-          )}
         </div>,
         document.body
       )}

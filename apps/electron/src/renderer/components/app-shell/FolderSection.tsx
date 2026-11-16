@@ -2,28 +2,21 @@
  * FolderSection
  *
  * The folder tree that lives UNDER the "All Sessions" nav item in the left
- * panel: the recursive tree, a trailing "new folder" row, a lightweight context
- * menu and inline create/rename/delete dialogs.
+ * panel: the recursive tree and a trailing "new folder" row, with inline
+ * create/rename editing. (The folder context menu and the delete dialog were
+ * removed — folder management now lives in the navigator panel.)
  *
  * Deliberately self-contained: the caller only provides the folder API, the
  * currently selected folder and a selection callback. Routing stays in AppShell.
  */
 
 import * as React from 'react'
-import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { FolderPlus } from 'lucide-react'
-import type { FolderConfig } from '@craft-agent/shared/sessions/folders'
 import { getUniqueFolderName, type FolderTreeNode } from '@craft-agent/shared/sessions/folder-tree'
 import type { UseFoldersResult } from '../../hooks/useFolders'
 import { FolderTree } from './FolderTree'
-import { claimMenu, releaseMenu, subscribeMenu } from './menuRegistry'
 import { dragState } from './dragState'
-
-type DialogState =
-  | { type: 'delete'; folder: FolderConfig; confirmValue: string }
-  | null
 
 /** In-place rename draft (the row's label becomes an input). */
 interface InlineRenameDraft {
@@ -34,12 +27,6 @@ interface InlineRenameDraft {
 /** Characters a folder name cannot contain (Windows rules — the data lives on disk). */
 const INVALID_NAME_CHARS = /[\/:*?"<>|]/
 
-
-interface MenuState {
-  x: number
-  y: number
-  folder: FolderConfig
-}
 
 /** Local draft of the inline "new folder" editor (callbacks are composed below). */
 interface InlineCreateDraft {
@@ -66,7 +53,7 @@ export interface FolderSectionProps {
 }
 
 export interface FolderSectionHandle {
-  /** Opens the create dialog (used by the "New Folder" context-menu action). */
+  /** Opens the inline "new folder" editor at the given parent scope. */
   openCreate: (parentId?: string | null) => void
   /** Collapses the specified folder branches after navigating to an ancestor. */
   collapseFolders: (folderIds: readonly string[]) => void
@@ -76,11 +63,8 @@ export const FolderSection = React.forwardRef<FolderSectionHandle, FolderSection
   function FolderSection({ foldersApi, selectedFolderId, onSelectFolder, highlightFolderId, onDropSession, getSessionFolderId, unreadFolderIds, folderScopeProjectId = null, onDropFolderAcrossScopes }, ref): React.ReactElement {
   const { t } = useTranslation()
   const [expandedIds, setExpandedIds] = React.useState<Set<string>>(() => new Set())
-  const [dialog, setDialog] = React.useState<DialogState>(null)
   const [inlineCreate, setInlineCreate] = React.useState<InlineCreateDraft | null>(null)
   const [renaming, setRenaming] = React.useState<InlineRenameDraft | null>(null)
-  const [menu, setMenu] = React.useState<MenuState | null>(null)
-  const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const committingNameRef = React.useRef(false)
 
@@ -94,8 +78,6 @@ export const FolderSection = React.forwardRef<FolderSectionHandle, FolderSection
       return next
     })
   }, [])
-
-  const closeMenu = React.useCallback(() => setMenu(null), [])
 
   // D3: when the selected session moves, expand and highlight its folder chain.
   const highlightIds = React.useMemo(() => {
@@ -119,44 +101,12 @@ export const FolderSection = React.forwardRef<FolderSectionHandle, FolderSection
     })
   }, [highlightIds])
 
-  React.useEffect(() => {
-    if (!menu) return
-    // A menu opened by right-clicking while another one closes can receive that
-    // other menu's dismissal events; ignore anything in the first few frames.
-    const openedAt = Date.now()
-    const handler = () => { if (Date.now() - openedAt < 150) return; closeMenu() }
-    window.addEventListener('click', handler)
-    window.addEventListener('keydown', handler)
-    return () => {
-      window.removeEventListener('click', handler)
-      window.removeEventListener('keydown', handler)
-    }
-  }, [menu, closeMenu])
-  // Only one menu in the app may be open: this menu claims the slot while it is
-  // visible, and any other menu claiming it closes this one.
-  const menuId = React.useId()
-
-  React.useEffect(() => {
-    if (!menu) return
-    claimMenu(menuId)
-    return () => releaseMenu(menuId)
-  }, [menu, menuId])
-
-  React.useEffect(() => subscribeMenu((activeId) => {
-    // null = "the slot freed up" — that includes this menu re-opening (its own
-    // release fires before the re-claim), so only react to a *different* menu.
-    if (activeId && activeId !== menuId) setMenu(null)
-  }), [menuId])
-
   const run = React.useCallback(async (work: () => Promise<void>) => {
     try {
-      setBusy(true)
       setError(null)
       await work()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
     }
   }, [])
 
@@ -188,19 +138,8 @@ export const FolderSection = React.forwardRef<FolderSectionHandle, FolderSection
     void run(async () => { await foldersApi.moveFolder(draggedFolderId, folderId, name) })
   }, [foldersApi, folderScopeProjectId, onDropFolderAcrossScopes, onDropSession, run, t])
 
-  const submitDialog = React.useCallback(() => {
-    if (!dialog) return
-    if (dialog.type === 'delete') {
-      void run(async () => {
-        await foldersApi.deleteFolder(dialog.folder.id)
-        if (selectedFolderId === dialog.folder.id) onSelectFolder(null)
-        setDialog(null)
-      })
-    }
-  }, [dialog, foldersApi, onSelectFolder, run, selectedFolderId, t])
-
-  // The folder tree has no header of its own any more — creation is triggered from
-  // the "All Sessions" context menu, which calls this handle.
+  // The folder tree has no header of its own — creation is triggered through
+  // this handle (the panel's folder list and the project tree).
   React.useImperativeHandle(ref, () => ({
     openCreate: (parentId: string | null = null) => {
       setInlineCreate({ parentId, value: '' })
@@ -295,7 +234,6 @@ export const FolderSection = React.forwardRef<FolderSectionHandle, FolderSection
         expandedIds={expandedIds}
         onSelect={onSelectFolder}
         onToggle={toggle}
-        onContextMenu={(folder, event) => setMenu({ x: event.clientX, y: event.clientY, folder })}
         onDropOnFolder={handleDropOnFolder}
         folderScopeProjectId={folderScopeProjectId}
         getSessionFolderId={getSessionFolderId}
@@ -319,82 +257,8 @@ export const FolderSection = React.forwardRef<FolderSectionHandle, FolderSection
       {foldersApi.error || error ? (
         <div className="mt-1 px-1 text-[11px] text-destructive">{foldersApi.error ?? error}</div>
       ) : null}
-
-      {menu ? createPortal((
-        <div
-          className="fixed z-[100] min-w-[160px] overflow-hidden rounded-md border border-foreground/10 bg-popover p-1 text-sm text-popover-foreground shadow-2xl"
-          style={{ left: menu.x, top: menu.y }}
-          onClick={(event) => event.stopPropagation()}
-        >
-          <MenuItem onClick={() => { setInlineCreate({ parentId: menu.folder.id, value: '' }); closeMenu() }}>{t('folders.newChild')}</MenuItem>
-          <MenuItem onClick={() => { setRenaming({ folderId: menu.folder.id, value: menu.folder.name }); closeMenu() }}>{t('folders.rename')}</MenuItem>
-          <MenuItem onClick={() => { void run(async () => { await foldersApi.pinFolder(menu.folder.id, !menu.folder.pinnedAt) }); closeMenu() }}>
-            {menu.folder.pinnedAt ? t('folders.unpin') : t('folders.pin')}
-          </MenuItem>
-          <MenuItem onClick={() => { void run(async () => { await foldersApi.archiveFolder(menu.folder.id) }); closeMenu() }}>{t('folders.archive')}</MenuItem>
-          <MenuItem
-            destructive
-            onClick={() => { setDialog({ type: 'delete', folder: menu.folder, confirmValue: '' }); closeMenu() }}
-          >
-            {t('folders.delete')}
-          </MenuItem>
-        </div>
-      ), document.body) : null}
-
-      {dialog ? createPortal((
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setDialog(null)}>
-          <div className="w-[320px] rounded-lg border border-foreground/10 bg-popover p-4 text-popover-foreground shadow-2xl" onClick={(event) => event.stopPropagation()}>
-            <div className="mb-2 text-sm font-medium">
-              {t('folders.deleteTitle', { name: dialog.folder.name })}
-            </div>
-
-            <p className="mb-3 text-xs text-muted-foreground">{t('folders.deleteBody')}</p>
-
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                className="rounded-md border px-3 py-1.5 text-sm hover:bg-accent"
-                onClick={() => setDialog(null)}
-              >
-                {t('folders.cancel')}
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                className="rounded-md bg-destructive px-3 py-1.5 text-sm text-white hover:bg-destructive/90 disabled:opacity-50"
-                onClick={submitDialog}
-              >
-                {t('folders.deleteForever')}
-              </button>
-            </div>
-          </div>
-        </div>
-      ), document.body) : null}
     </div>
   )
 }
 
 )
-
-function MenuItem({
-  children,
-  onClick,
-  destructive,
-}: {
-  children: React.ReactNode
-  onClick: () => void
-  destructive?: boolean
-}): React.ReactElement {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent',
-        destructive ? 'text-destructive' : '',
-      ].join(' ')}
-    >
-      {children}
-    </button>
-  )
-}

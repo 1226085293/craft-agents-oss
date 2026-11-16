@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next'
 import { ChevronRight, Folder as FolderIcon } from 'lucide-react'
 import type { ArchiveTreeNode } from '@craft-agent/shared/sessions/folder-tree'
 import { Separator } from '@/components/ui/separator'
+import { FolderDeleteConfirm } from './folder-delete-confirm'
 
 const ROW_CLASS =
   'group flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-3 text-sm text-left cursor-default select-none overflow-hidden transition-colors hover:bg-foreground/[0.07] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
@@ -40,6 +41,8 @@ export interface ArchiveFolderListProps {
   onEnter: (node: ArchiveTreeNode) => void
   /** Move a folder back to the live tree. Without this an archived folder is a dead end. */
   onUnarchive?: (folderId: string) => Promise<void> | void
+  /** Delete an archived folder and its sessions (behind a confirm dialog). */
+  onDelete?: (folderId: string) => Promise<void> | void
 }
 
 export function ArchiveFolderList({
@@ -47,11 +50,13 @@ export function ArchiveFolderList({
   sessionCounts,
   onEnter,
   onUnarchive,
+  onDelete,
 }: ArchiveFolderListProps): React.ReactElement | null {
   const { t } = useTranslation()
   const [menu, setMenu] = React.useState<MenuState | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [busy, setBusy] = React.useState(false)
+  const [deleting, setDeleting] = React.useState<ArchiveTreeNode | null>(null)
 
   React.useEffect(() => {
     if (!menu) return
@@ -142,8 +147,39 @@ export function ArchiveFolderList({
           >
             {t('folders.unarchive')}
           </MenuItem>
+          {/* Delete is the archive's exit: the folder and its sessions go away. */}
+          <MenuItem
+            destructive
+            disabled={busy || !onDelete}
+            onClick={() => {
+              setDeleting(menu.node)
+              setMenu(null)
+            }}
+          >
+            {t('folders.delete')}
+          </MenuItem>
         </div>
       ), document.body) : null}
+
+      {deleting ? (
+        <FolderDeleteConfirm
+          name={deleting.name}
+          busy={busy}
+          onCancel={() => setDeleting(null)}
+          onConfirm={() => {
+            const node = deleting
+            setDeleting(null)
+            if (!onDelete) return
+            setBusy(true)
+            setError(null)
+            void Promise.resolve(onDelete(node.id))
+              .catch((err: unknown) => {
+                setError(err instanceof Error ? err.message : String(err))
+              })
+              .finally(() => setBusy(false))
+          }}
+        />
+      ) : null}
     </div>
   )
 }
@@ -152,17 +188,22 @@ function MenuItem({
   children,
   onClick,
   disabled,
+  destructive,
 }: {
   children: React.ReactNode
   onClick: () => void
   disabled?: boolean
+  destructive?: boolean
 }) {
   return (
     <button
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="flex w-full items-center rounded px-2 py-1.5 text-left text-sm hover:bg-foreground/[0.06] disabled:opacity-50"
+      className={[
+        'flex w-full items-center rounded px-2 py-1.5 text-left text-sm hover:bg-foreground/[0.06] disabled:opacity-50',
+        destructive ? 'text-destructive' : '',
+      ].join(' ')}
     >
       {children}
     </button>

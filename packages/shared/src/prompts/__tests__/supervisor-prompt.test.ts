@@ -349,6 +349,22 @@ describe('lane-specific rules', () => {
     expect(text).toContain('They read this session directly');
   });
 
+  it('tells the user lane that a channel reply must go back through the channel', () => {
+    // Live 2026-11-17: five Telegram messages reached the user lane and it answered each one
+    // in its own transcript — the person was sitting in Telegram, not in this session, so all
+    // five read as silence. The outbox had zero records from the lane: the reply action was
+    // never called, because the prompt said the transcript itself is what the person reads.
+    const text = userLane()
+    expect(text).toContain('through a channel')
+    expect(text).toContain('reply')
+    expect(text).toContain('outbox')
+    // The old absolute claim — the transcript is always read, no tool needed — must stay gone:
+    // it is only true for the desktop.
+    expect(text).not.toContain('no tool required to relay it')
+    // The rule belongs to the user lane; the task lane talks to workers, not to channels.
+    expect(taskLane()).not.toContain('a channel')
+  });
+
   it('does not let the user lane decide whether something is possible', () => {
     const text = userLane()
     expect(text).toContain('You do not judge feasibility');

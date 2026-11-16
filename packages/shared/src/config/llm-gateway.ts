@@ -112,6 +112,25 @@ const CATALOG_TTL_MS = 10 * 60_000;
 /** How long to wait for a `GET /models` catalog before giving up on it. */
 const CATALOG_TIMEOUT_MS = 10_000;
 
+/**
+ * A gateway-internal phase during which an in-flight request is
+ * intentionally silent. Both the subprocess stall watchdog and the host turn
+ * watchdog read these pauses as "the gateway owns the wait" instead of
+ * mistaking them for a dead turn (2026-11-16 429-storm incident:
+ * retry-backoff silence inside the retry loop was invisible to both
+ * watchdogs, so a 90s stall threshold aborted a request that was still
+ * being retried).
+ */
+export type GatewayWaitPhase = 'cooldown' | 'retry_backoff';
+
+export interface GatewayWaitEvent {
+  sessionId?: string;
+  waiting: boolean;
+  seconds?: number;
+  /** Which gateway phase owns the wait; legacy call sites omit it. */
+  phase?: GatewayWaitPhase;
+}
+
 export interface LlmGatewayOptions {
   /** Current config snapshot. Replaced wholesale on hot reload. */
   getConfig: () => LlmConfig;
@@ -127,8 +146,8 @@ export interface LlmGatewayOptions {
    * only reports the change; the session layer owns compaction.
    */
   onRouteChanged?: (event: LlmRouteChange) => void;
-  /** Notifies the host when a request parks in waitForCooldown. */
-  onCooldownWait?: (event: { sessionId?: string; waiting: boolean; seconds?: number }) => void;
+  /** Notifies the host when a request parks in a gateway-internal wait. */
+  onCooldownWait?: (event: GatewayWaitEvent) => void;
 }
 
 /** A session's route changed since its previous successful request. */
@@ -1577,7 +1596,16 @@ export class LlmGateway {
         if (!targetBudgetAllowsRetry(retryPolicy, keyAttempts, targetStartedAtMs, Date.now(), delayMs)) return false;
         const retryKeyId = selection.keyId;
         releaseKey();
-        if (delayMs > 0) await this.waitForRetry(delayMs);
+        if (delayMs > 0) {
+          // Retry backoff is gateway-owned silence: tell the watchdogs so a
+          // long 429-only retry loop cannot be read as a dead turn.
+          this.onCooldownWait?.({ sessionId, waiting: true, seconds: Math.max(1, Math.ceil(delayMs / 1000)), phase: 'retry_backoff' });
+          try {
+            await this.waitForRetry(delayMs);
+          } finally {
+            this.onCooldownWait?.({ sessionId, waiting: false, phase: 'retry_backoff' });
+          }
+        }
         if (!targetBudgetAllowsRetry(retryPolicy, keyAttempts, targetStartedAtMs, Date.now())) return false;
         try {
           const picked = await pool.retrySameKey(retryKeyId, upstreamModel, estimatedTokens);
@@ -1733,6 +1761,7 @@ export class LlmGateway {
                   config,
                   strategy: plan.strategy,
                   publicModel: unit.publicModel,
+                  sessionId,
                   unitId: unit.id,
                   keyId: selection.keyId,
                   retryPolicy,
@@ -2238,12 +2267,12 @@ export class LlmGateway {
         `(waitForCooldown, rounds left ${opts.roundsLeft - 1}, budget left ${Math.round(opts.budgetLeft - soonest)}s)`,
     );
     try {
-      this.onCooldownWait?.({ sessionId: opts.sessionId, waiting: true, seconds: soonest });
+      this.onCooldownWait?.({ sessionId: opts.sessionId, waiting: true, seconds: soonest, phase: 'cooldown' });
       const end = await this.cooldownSleep(soonest, opts.generation, opts.req, opts.res);
       if (end === 'done') return { action: 'waited', seconds: soonest };
       return { action: end };
     } finally {
-      this.onCooldownWait?.({ sessionId: opts.sessionId, waiting: false });
+      this.onCooldownWait?.({ sessionId: opts.sessionId, waiting: false, phase: 'cooldown' });
     }
   }
 
@@ -3333,6 +3362,8 @@ export class LlmGateway {
     config: LlmConfig;
     strategy: LlmStrategy;
     publicModel: string;
+    /** Craft session id of the owning request; absent for external callers. */
+    sessionId?: string;
     unitId: string;
     keyId: string;
     retryPolicy: RetryPolicy;
@@ -3348,7 +3379,14 @@ export class LlmGateway {
     const attempts = args.state.attemptsByRoute.get(routeKey) ?? 1;
     const delayMs = retryDelayMs(args.retryPolicy, attempts, 0);
     if (targetBudgetAllowsRetry(args.retryPolicy, attempts, startedAt, Date.now(), delayMs)) {
-      if (delayMs > 0) await this.waitForRetry(delayMs);
+      if (delayMs > 0) {
+        this.onCooldownWait?.({ sessionId: args.sessionId, waiting: true, seconds: Math.max(1, Math.ceil(delayMs / 1000)), phase: 'retry_backoff' });
+        try {
+          await this.waitForRetry(delayMs);
+        } finally {
+          this.onCooldownWait?.({ sessionId: args.sessionId, waiting: false, phase: 'retry_backoff' });
+        }
+      }
       if (targetBudgetAllowsRetry(args.retryPolicy, attempts, startedAt, Date.now())) {
         return markers.retry;
       }

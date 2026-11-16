@@ -170,9 +170,9 @@ describe('LlmGateway waitForCooldown', () => {
     const res = await post(gateway!, { stream: true, sessionKey: 'wait-session' });
     await readJson(res);
 
-    expect(events[0]).toMatchObject({ sessionId: 'wait-session', waiting: true });
+    expect(events[0]).toMatchObject({ sessionId: 'wait-session', waiting: true, phase: 'cooldown' });
     expect(events[0]!.seconds).toBeGreaterThanOrEqual(1);
-    expect(events[events.length - 1]).toEqual({ sessionId: 'wait-session', waiting: false });
+    expect(events[events.length - 1]).toEqual({ sessionId: 'wait-session', waiting: false, phase: 'cooldown' });
   });
 
   it('does not wait when the strategy has no waitForCooldown config', async () => {
@@ -341,8 +341,8 @@ describe('LlmGateway waitForCooldown', () => {
     await res.text();
 
     expect(res.status).toBe(503);
-    expect(events[0]).toMatchObject({ sessionId: 'reload-wait', waiting: true });
-    expect(events[events.length - 1]).toEqual({ sessionId: 'reload-wait', waiting: false });
+    expect(events[0]).toMatchObject({ sessionId: 'reload-wait', waiting: true, phase: 'cooldown' });
+    expect(events[events.length - 1]).toEqual({ sessionId: 'reload-wait', waiting: false, phase: 'cooldown' });
   });
 
   it('gives up waiting when the client disconnects mid-wait', async () => {
@@ -366,5 +366,32 @@ describe('LlmGateway waitForCooldown', () => {
     await expect(pending).rejects.toThrow();
     // The wait must end well before the full 30s cooldown elapses.
     expect(stub.calls.length).toBe(1);
+  });
+
+  it('signals retry-backoff waits during same-key retries (429, no local cooldown)', async () => {
+    const cfg = baseConfig();
+    // Enough same-key budget for two 429s, and a small real backoff so the
+    // gap is observable in the wait signal (fixed mode: delay = backoffMs).
+    cfg.strategies[0]!.retry = { maxAttempts: 3, intervalMode: 'fixed', backoffMs: 25, onStatusCodes: [500, 502, 503, 504] };
+    const events: Array<{ sessionId?: string; waiting: boolean; seconds?: number; phase?: string }> = [];
+    await start(
+      cfg,
+      [
+        { status: 429, body: JSON.stringify({ error: 'rate limited' }) },
+        { status: 429, body: JSON.stringify({ error: 'rate limited' }) },
+        { status: 200, body: JSON.stringify({ id: 'after-backoff' }) },
+      ],
+      (event) => events.push(event),
+    );
+
+    const res = await post(gateway!, { stream: true, sessionKey: 'backoff-session' });
+    expect(res.status).toBe(200);
+    expect((await readJson(res)).id).toBe('after-backoff');
+
+    // Two same-key retries ⇒ two backoff waits, each bracketed by signals.
+    const backoffs = events.filter((e) => e.phase === 'retry_backoff');
+    expect(backoffs.length).toBeGreaterThanOrEqual(4);
+    expect(backoffs[0]).toMatchObject({ sessionId: 'backoff-session', waiting: true, seconds: 1 });
+    expect(backoffs[1]).toEqual({ sessionId: 'backoff-session', waiting: false, phase: 'retry_backoff' });
   });
 });

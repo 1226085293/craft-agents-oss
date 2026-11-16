@@ -32,6 +32,45 @@ export interface PromptSettleSession {
 export interface PromptSettleHooks {
   /** Diagnostics sink (the subprocess passes its debugLog). */
   log?: (message: string) => void
+  /** Max time to wait for the session to settle (default 3000ms). */
+  settleTimeoutMs?: number
+}
+
+/** How long the busy self-heal waits for the previous run to settle. */
+export const DEFAULT_BUSY_SETTLE_TIMEOUT_MS = 3000;
+const BUSY_SETTLE_POLL_MS = 50;
+
+/**
+ * Abort whatever run is still unwinding inside the SDK, then wait (bounded)
+ * for the session to actually become idle.
+ *
+ * Returns true when the session settled inside the window. Returns false when
+ * it is still streaming at the deadline — the caller must NOT re-issue a
+ * prompt then; a prompt against a still-busy SDK would throw the same busy
+ * rejection and no self-heal progress was made.
+ */
+export async function abortAndWaitForIdle(
+  session: PromptSettleSession,
+  hooks: PromptSettleHooks = {},
+): Promise<boolean> {
+  const timeoutMs = hooks.settleTimeoutMs ?? DEFAULT_BUSY_SETTLE_TIMEOUT_MS;
+  hooks.log?.(`[prompt] aborting to settle the previous run (busy self-heal, ${timeoutMs}ms window)`);
+  try {
+    await session.abort();
+  } catch (err) {
+    // An abort that throws (already aborted / SDK disposed) is not fatal:
+    // the polling loop below decides whether the session actually settled.
+    hooks.log?.(`[prompt] settle abort failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (session.isStreaming && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, BUSY_SETTLE_POLL_MS));
+  }
+  if (session.isStreaming) {
+    hooks.log?.(`[prompt] still streaming after ${timeoutMs}ms — reporting the original failure instead of re-issuing`);
+    return false;
+  }
+  return true;
 }
 
 /**

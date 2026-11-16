@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { settleStreamingSessionBeforePrompt } from './prompt-settle.ts'
+import { abortAndWaitForIdle, settleStreamingSessionBeforePrompt } from './prompt-settle.ts'
 
 /**
  * Regression guard for 2026-11-03 (session 261103-early-carbon): a fresh user
@@ -52,5 +52,53 @@ describe('settleStreamingSessionBeforePrompt', () => {
     }
     await settleStreamingSessionBeforePrompt(session, { log: (m) => logs.push(m) })
     expect(logs.some(l => l.includes('abort before fresh prompt failed'))).toBe(true)
+  })
+})
+
+function makeBusySession(settleOnAbort: boolean) {
+  let streaming = true
+  const abortCalls: number[] = []
+  const session = {
+    get isStreaming() {
+      return streaming
+    },
+    abortCalls,
+    async abort() {
+      abortCalls.push(Date.now())
+      if (settleOnAbort) streaming = false
+    },
+  }
+  return session
+}
+
+describe('abortAndWaitForIdle (busy-prompt self-heal, 2026-11-16)', () => {
+  it('aborts the unwinding run and returns true once the session is really idle', async () => {
+    const session = makeBusySession(true)
+    await expect(abortAndWaitForIdle(session)).resolves.toBe(true)
+    expect(session.abortCalls).toHaveLength(1)
+    expect(session.isStreaming).toBe(false)
+  })
+
+  it('returns false when the session keeps streaming past the window', async () => {
+    const session = makeBusySession(false)
+    const logs: string[] = []
+    await expect(abortAndWaitForIdle(session, { settleTimeoutMs: 80, log: (m) => logs.push(m) })).resolves.toBe(false)
+    expect(logs.some(l => l.includes('still streaming'))).toBe(true)
+  })
+
+  it('treats an abort that throws as non-fatal and keeps polling', async () => {
+    let settled = false
+    const session = {
+      get isStreaming() {
+        return !settled
+      },
+      async abort() {
+        settled = true
+        throw new Error('already aborted')
+      },
+    }
+    const logs: string[] = []
+    await expect(abortAndWaitForIdle(session, { log: (m) => logs.push(m) })).resolves.toBe(true)
+    expect(logs.some(l => l.includes('settle abort failed'))).toBe(true)
   })
 })

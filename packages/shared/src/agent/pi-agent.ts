@@ -362,6 +362,18 @@ export class PiAgent extends BaseAgent {
   private turnIdleTimer: ReturnType<typeof setTimeout> | null = null;
   /** True while the gateway waits out a cooldown; silence is expected. */
   private gatewayCooldownWaiting = false;
+  /** Which gateway wait phase is currently active (cooldown / retry_backoff). */
+  private gatewayCooldownPhase: string | undefined = undefined;
+  /**
+   * True from the moment a stall recovery re-issues the model step until the
+   * retried run emits its first REAL event (message_update /
+   * tool_execution_start). While set, a synthetic `agent_end` from the
+   * aborted run must NOT complete the event queue — the retry owns the turn
+   * (2026-11-16: the queue completed on the abort's terminal event while the
+   * re-run was still streaming, silently ending the turn and orphaning the
+   * run so the next prompt hit "already processing").
+   */
+  private stallRetryInFlight = false;
   private lastTurnEventAt = 0;
   /**
    * Compaction watch state: `compaction_start` (any, incl. threshold/overflow)
@@ -624,14 +636,20 @@ export class PiAgent extends BaseAgent {
   }
 
   /**
-   * Pause/resume the turn watchdog around a gateway cooldown wait. The
-   * subprocess watchdog is told too: both would otherwise read the intentional
-   * silence as a dead turn and abort a request the gateway is still holding.
+   * Pause/resume the turn watchdog around a gateway-internal wait (cooldown
+   * hold OR retry backoff). The subprocess watchdog is told too, with the
+   * phase attached: both would otherwise read the intentional silence as a
+   * dead turn and abort a request the gateway is still holding.
    */
-  setGatewayCooldownWaiting(waiting: boolean): void {
-    if (this.gatewayCooldownWaiting === waiting) return;
+  setGatewayCooldownWaiting(waiting: boolean, info?: { phase?: string; seconds?: number }): void {
+    const phase = waiting ? (info?.phase ?? 'cooldown') : undefined;
+    if (this.gatewayCooldownWaiting === waiting && this.gatewayCooldownPhase === phase) return;
     this.gatewayCooldownWaiting = waiting;
-    this.send({ type: 'gateway_cooldown_wait', waiting });
+    this.gatewayCooldownPhase = phase;
+    this.send({ type: 'gateway_cooldown_wait', waiting, phase, seconds: info?.seconds });
+    this.debug(
+      `[gateway] ${phase ?? 'cooldown'} wait ${waiting ? `started${info?.seconds ? ` (~${info.seconds}s)` : ''}` : 'ended'}`,
+    );
     if (waiting) this.clearTurnIdleWatchdog();
     else this.refreshTurnIdleWatchdog();
   }
@@ -742,6 +760,7 @@ export class PiAgent extends BaseAgent {
     // re-issue the model step, and arm the stall-restart watchdog so a still-
     // silent subprocess is restarted and the turn resumes.
     this.activeTurnToolIds.clear();
+    this.stallRetryInFlight = true;
     this.armStallRestartWatchdog();
     this.resendModelStep();
   }
@@ -805,6 +824,9 @@ export class PiAgent extends BaseAgent {
       await this.ensureSubprocess();
       this.debug('[stall-recovery] Subprocess restarted — re-issuing the model step');
       this.controlledRestartInProgress = false;
+      // Still the same stall recovery: the retried run owns the turn and a
+      // synthetic agent_end must stay unable to close the queue.
+      this.stallRetryInFlight = true;
       // Give the fresh subprocess a moment to accept input, then re-run the
       // model step so the turn resumes without a new user message.
       const resumeTimer = setTimeout(() => this.resendModelStep(), 1_000);
@@ -812,6 +834,7 @@ export class PiAgent extends BaseAgent {
     } catch (error) {
       this.debug(`[stall-recovery] Restart failed: ${error instanceof Error ? error.message : String(error)}`);
       this.controlledRestartInProgress = false;
+      this.stallRetryInFlight = false;
       if (this._isProcessing) {
         this.eventQueue.enqueue({
           type: 'error',
@@ -829,6 +852,13 @@ export class PiAgent extends BaseAgent {
     // emitted by the very stall path that armed the watchdog.
     if (eventType !== 'agent_end') {
       this.clearStallRestartWatchdog();
+      // 2026-11-16 (stall-retry mutex): the first REAL event of the retried
+      // run (stream delta / tool start) proves the recovery owns the run.
+      // From here on, an `agent_end` is the retry's own terminal event, so
+      // the deferred-completion guard can lift.
+      if (eventType === 'message_update' || eventType === 'tool_execution_start') {
+        this.stallRetryInFlight = false;
+      }
     }
 
     const toolCallId = event.toolCallId as string | undefined;
@@ -2079,6 +2109,7 @@ export class PiAgent extends BaseAgent {
           // a stall error means the SUBPROCESS is stuck. Clear dangling tool
           // markers, re-issue the model step, and arm the restart watchdog.
           this.activeTurnToolIds.clear();
+          this.stallRetryInFlight = true;
           this.armStallRestartWatchdog();
           this.resendModelStep();
           break;
@@ -2263,12 +2294,21 @@ export class PiAgent extends BaseAgent {
     // returns true when the queue should terminate — on a normal `agent_end`
     // with no recovery in flight, on the FINAL `agent_end` after a defense
     // resume, or on a compaction_end failure that drains a held overflow.
-    if (this.adapter.shouldCompleteQueue(
+    const completeNow = this.adapter.shouldCompleteQueue(
       eventType === 'agent_end',
       eventType === 'agent_end' ? (event.defenseResumePending as boolean | undefined) : undefined,
       eventType === 'agent_end' ? (event.queuedFollowUpPending as boolean | undefined) : undefined,
       eventType === 'agent_end' ? (event.defenseVerificationPending as boolean | undefined) : undefined,
-    )) {
+    );
+    // 2026-11-16 (stall-retry mutex): while a stall recovery re-issue is in
+    // flight, an `agent_end` is the ABORTED run's synthetic terminal event —
+    // completing the queue now would end the turn underneath the retry that
+    // owns it (the retried run then streams into a closed queue and is
+    // orphaned, leaving the SDK busy for the next prompt). The adapter still
+    // runs (its defensive FSM must see every agent_end); only the queue
+    // completion is deferred until the retry emits real events and reaches
+    // its own terminal agent_end (or the restart watchdog fires).
+    if (completeNow && !(eventType === 'agent_end' && this.stallRetryInFlight)) {
       this.eventQueue.complete();
     }
   }
@@ -3647,6 +3687,9 @@ export class PiAgent extends BaseAgent {
     // Reset state for new turn
     this._isProcessing = true;
     this.abortReason = undefined;
+    // A stale stall-retry latching from a previous turn (terminated without
+    // further events) must not suppress the new turn's completion.
+    this.stallRetryInFlight = false;
     // A stop latched by a PREVIOUS turn (e.g. its generator was abandoned
     // before it could consume the flag) is stale — dropping it here keeps it
     // from silently cancelling this new turn. A stop that lands DURING this

@@ -15,7 +15,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { FolderPlus } from 'lucide-react'
 import type { FolderConfig } from '@craft-agent/shared/sessions/folders'
-import { getUniqueFolderName } from '@craft-agent/shared/sessions/folder-tree'
+import { getUniqueFolderName, type FolderTreeNode } from '@craft-agent/shared/sessions/folder-tree'
 import type { UseFoldersResult } from '../../hooks/useFolders'
 import { FolderTree } from './FolderTree'
 import { claimMenu, releaseMenu, subscribeMenu } from './menuRegistry'
@@ -275,7 +275,17 @@ export const FolderSection = React.forwardRef<FolderSectionHandle, FolderSection
     })
   }, [inlineCreate, foldersApi, run])
 
-  const visibleTree = foldersApi.tree.filter((node) => !node.folder.archivedAt)
+  // `foldersApi.tree` is built with `includeArchived: true` (the archive view
+  // needs those nodes), so filtering only the roots left archived CHILDREN under
+  // a live parent visible — a second path to a folder that was archived. Prune
+  // the whole subtree instead.
+  const visibleTree = React.useMemo(() => {
+    const prune = (nodes: FolderTreeNode[]): FolderTreeNode[] =>
+      nodes
+        .filter((node) => !node.folder.archivedAt)
+        .map((node) => ({ folder: node.folder, children: prune(node.children) }))
+    return prune(foldersApi.tree)
+  }, [foldersApi.tree])
 
   return (
     <div className="min-w-0 max-w-full overflow-hidden">

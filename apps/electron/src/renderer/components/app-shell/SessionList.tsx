@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next"
 import { useSetAtom } from "jotai"
 import { startOfDay } from "date-fns"
 import { useAction } from "@/actions"
-import { Inbox, Archive } from "lucide-react"
+import { Inbox, Archive, ChevronRight } from "lucide-react"
 
 import * as storage from "@/lib/local-storage"
 import { KEYS } from "@/lib/local-storage"
@@ -18,13 +18,15 @@ import { useSessionSelection, useSessionSelectionStore } from "@/hooks/useSessio
 import { useSessionSearch } from "@/hooks/useSessionSearch"
 import { NavigatorFolderList, type NavigatorFolderListHandle } from "./NavigatorFolderList"
 import { filterFolderSearchResults } from "./folder-search"
+import { ArchiveFolderList } from "./ArchiveFolderList"
+import { buildArchiveTree, type ArchiveTreeNode } from "@craft-agent/shared/sessions/folder-tree"
 import { getInChatSearchQuery } from "./chat-search-routing"
 import type { UseFoldersResult } from "../../hooks/useFolders"
 import { useSessionActions } from "@/hooks/useSessionActions"
 import { useEntityListInteractions } from "@/hooks/useEntityListInteractions"
 import { useFocusZone } from "@/hooks/keyboard"
 import { useEscapeInterrupt } from "@/context/EscapeInterruptContext"
-import { useNavigation, useNavigationState, routes, isSessionsNavigation } from "@/contexts/NavigationContext"
+import { useNavigation, useNavigationState, isSessionsNavigation } from "@/contexts/NavigationContext"
 import { useFocusContext } from "@/context/FocusContext"
 import { sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
 
@@ -146,13 +148,89 @@ export function SessionList({
   } = useSessionSelection()
   const selectionStore = useSessionSelectionStore()
 
-  const { navigate, navigateToSession: navigateToSessionPrimary } = useNavigation()
+  const { navigateToSession: navigateToSessionPrimary } = useNavigation()
   const navigateToSession = onNavigateToSession ?? navigateToSessionPrimary
   const navState = useNavigationState()
   const { showEscapeOverlay } = useEscapeInterrupt()
 
   // Get current filter from navigation state (for preserving context in tab routes)
   const currentFilter = isSessionsNavigation(navState) ? navState.filter : undefined
+
+  // --- Archive view: folders belong here, but ONLY archived ones ---
+  // A folder has exactly one path. Archiving moves it out of the live tree and
+  // the live navigator (both drop `archivedAt`) and into this archive tree; the
+  // reverse is equally true. The old view reused the LIVE navigator, which is
+  // how a live folder could appear under「已归档」 while still living in
+  //「所有会话」— two paths for one folder — and how a truly archived folder
+  // became unreachable (nothing rendered it, and `unarchiveFolder` had no UI).
+  const isArchiveView = currentFilter?.kind === 'archived'
+  const [archiveScopeKey, setArchiveScopeKey] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!isArchiveView) setArchiveScopeKey(null)
+  }, [isArchiveView])
+
+  const archiveTree = useMemo(() => {
+    if (!isArchiveView) return null
+    try {
+      return buildArchiveTree({
+        projects: [],
+        foldersByScope: [{ projectId: null, folders: foldersApi?.folders ?? [] }],
+        sessions: items,
+      })
+    } catch {
+      return null
+    }
+  }, [isArchiveView, foldersApi?.folders, items])
+
+  /** Trail from the archive root to the open archived folder (empty at the root). */
+  const archivePath = useMemo((): ArchiveTreeNode[] => {
+    if (!archiveTree || !archiveScopeKey) return []
+    const walk = (nodes: readonly ArchiveTreeNode[], trail: ArchiveTreeNode[]): ArchiveTreeNode[] | null => {
+      for (const node of nodes) {
+        const next = [...trail, node]
+        if (node.key === archiveScopeKey) return next
+        const hit = walk(node.children, next)
+        if (hit) return hit
+      }
+      return null
+    }
+    return walk(archiveTree.nodes, []) ?? []
+  }, [archiveTree, archiveScopeKey])
+
+  const archiveNode = archivePath.length > 0 ? archivePath[archivePath.length - 1]! : null
+
+  // The open folder vanished (unarchived, deleted or moved elsewhere): drop back
+  // to the archive root instead of paging through a scope that no longer exists.
+  useEffect(() => {
+    if (isArchiveView && archiveScopeKey && archiveTree && !archiveNode) setArchiveScopeKey(null)
+  }, [isArchiveView, archiveScopeKey, archiveTree, archiveNode])
+
+  const archiveFolderCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    if (!archiveTree) return counts
+    const count = (node: ArchiveTreeNode): number => {
+      let total = node.sessions.length
+      for (const child of node.children) total += count(child)
+      counts.set(node.key, total)
+      return total
+    }
+    for (const node of archiveTree.nodes) count(node)
+    return counts
+  }, [archiveTree])
+
+  const archiveFoldersHere: readonly ArchiveTreeNode[] = archiveNode
+    ? archiveNode.children
+    : archiveTree?.nodes ?? []
+
+  // Scope the session rows to the open archived folder. Search stays global: an
+  // archived session has to be findable from anywhere inside the archive.
+  const listItems = useMemo(() => {
+    if (!isArchiveView || !archiveTree || searchActive) return items
+    const sessions = archiveNode ? archiveNode.sessions : archiveTree.sessions
+    const allowed = new Set(sessions.map(session => session.id))
+    return items.filter(item => allowed.has(item.id))
+  }, [isArchiveView, archiveTree, archiveNode, items, searchActive])
 
   const [renameDialogOpen, setRenameDialogOpen] = useState(false)
   const [renameSessionId, setRenameSessionId] = useState<string | null>(null)
@@ -177,7 +255,7 @@ export function SessionList({
     hasMore,
     searchInputRef,
   } = useSessionSearch({
-    items,
+    items: listItems,
     searchActive: searchActive ?? false,
     searchQuery,
     workspaceId,
@@ -384,7 +462,7 @@ export function SessionList({
 
   // --- Empty state (non-search) — render before EntityList ---
   // Don't show empty state when there are collapsed groups with content
-  if (flatRows.length === 0 && rowData.groups.length === 0 && !searchActive) {
+  if (flatRows.length === 0 && rowData.groups.length === 0 && !searchActive && archiveFoldersHere.length === 0) {
     if (currentFilter?.kind === 'archived') {
       return (
         <EntityListEmptyScreen
@@ -396,27 +474,17 @@ export function SessionList({
       )
     }
 
+    // No action button: the list is "empty" in normal operation because the
+    // supervisor (督导) is hidden by design, and the sessions that do appear
+    // here are created by tasks. Minting a blank session from the empty state
+    // is exactly what this list is not for.
     return (
       <EntityListEmptyScreen
         icon={<Inbox />}
         title={t("session.noSessionsYet")}
         description={t("session.noSessionsYetDesc")}
         className="h-full"
-      >
-        <button
-          // The list is "empty" in normal operation: the supervisor (督导) the
-          // 开始会话 button opens is hidden by design, so an empty list is not a
-          // missing-state. Guide to the supervisor instead of minting blank
-          // worker sessions.
-          onClick={() => {
-            if (onNewSession) onNewSession()
-            else navigate(routes.action.newSession())
-          }}
-          className="inline-flex items-center h-7 px-3 text-xs font-medium rounded-[8px] bg-background shadow-minimal hover:bg-foreground/[0.03] transition-colors"
-        >
-          {t("session.startSession", { defaultValue: "开始会话" })}
-        </button>
-      </EntityListEmptyScreen>
+      />
     )
   }
 
@@ -449,8 +517,46 @@ export function SessionList({
         header={
           <>
             {/* Browse mode lists direct children; search mode lists matching folders
-                throughout the current directory tree. */}
-            {foldersApi && onEnterFolder && (
+                throughout the current directory tree. The archived view gets the
+                archive tree instead of this live navigator: one path per folder. */}
+            {isArchiveView && archiveTree ? (
+              <>
+                {archiveScopeKey ? (
+                  <nav className="flex flex-wrap items-center gap-0.5 px-3 pt-2 pb-1 text-xs text-muted-foreground">
+                    <button
+                      type="button"
+                      onClick={() => setArchiveScopeKey(null)}
+                      className="rounded px-1 py-0.5 hover:bg-foreground/[0.07] hover:text-foreground"
+                    >
+                      {t("sidebar.archived")}
+                    </button>
+                    {archivePath.map((node) => (
+                      <span key={node.key} className="inline-flex min-w-0 items-center gap-0.5">
+                        <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
+                        <button
+                          type="button"
+                          onClick={() => setArchiveScopeKey(node.key)}
+                          className="max-w-[45%] truncate rounded px-1 py-0.5 hover:bg-foreground/[0.07] hover:text-foreground"
+                        >
+                          {node.name}
+                        </button>
+                      </span>
+                    ))}
+                  </nav>
+                ) : null}
+                <ArchiveFolderList
+                  nodes={archiveFoldersHere}
+                  sessionCounts={archiveFolderCounts}
+                  onEnter={(node) => setArchiveScopeKey(node.key)}
+                  onUnarchive={foldersApi
+                    ? async (folderId: string) => {
+                        await foldersApi.unarchiveFolder(folderId)
+                        setArchiveScopeKey(null)
+                      }
+                    : undefined}
+                />
+              </>
+            ) : foldersApi && onEnterFolder ? (
               <NavigatorFolderList
                 ref={folderListRef}
                 foldersApi={foldersApi}
@@ -461,7 +567,7 @@ export function SessionList({
                 sessionCounts={folderSessionCounts}
                 onDropSession={onDropSessionToFolder}
               />
-            )}
+            ) : null}
             {isSearchMode && matchingFilterItems.length === 0 && otherResultItems.length > 0 && (
               <div className="px-4 py-3 text-sm text-muted-foreground">
                 {t("session.noResultsInFilter")}

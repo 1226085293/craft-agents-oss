@@ -769,8 +769,18 @@ function AppShellContent({
   // scopes (project ↔ root) or deleting the folder would otherwise keep
   // filtering the new tree by an id it does not own, which hides every session
   // and leaves the navigator showing an empty list. Drop the stale id instead.
-  const rootFolderIds = React.useMemo(() => new Set(rootFolderApi.folders.map(folder => folder.id)), [rootFolderApi.folders])
-  const projectFolderIds = React.useMemo(() => new Set(projectFolderApi.folders.map(folder => folder.id)), [projectFolderApi.folders])
+  // Live scopes only: an archived folder cannot stay the open folder. Without
+  // the `archivedAt` filter, archiving the folder you are standing in left the
+  // list scoped to it — the folder kept a live path (its children still listed,
+  // its name still in the breadcrumb) while also living under「已归档」.
+  const rootFolderIds = React.useMemo(
+    () => new Set(rootFolderApi.folders.filter(folder => !folder.archivedAt).map(folder => folder.id)),
+    [rootFolderApi.folders],
+  )
+  const projectFolderIds = React.useMemo(
+    () => new Set(projectFolderApi.folders.filter(folder => !folder.archivedAt).map(folder => folder.id)),
+    [projectFolderApi.folders],
+  )
   const rawFolderScopeId = isBrowsingRootTreeInProjectMode ? rootFolderBrowseId! : folderScopeId
   // A scope id that no longer exists in the active tree is treated as "root of
   // this scope" for filtering purposes — without touching the state, so the
@@ -1780,7 +1790,6 @@ function AppShellContent({
   // The plugin list's reload, shared with the navigator's title row: the
   // refresh icon lives in the PanelHeader actions (same row as the title),
   // and the panel registers its load() here. One reload, two owners.
-  const listenerRefreshRef = useRef<(() => void) | null>(null)
   useEffect(() => {
     // Skip initial render
     if (menuTriggerRef.current === menuNewChatTrigger) return
@@ -2705,18 +2714,6 @@ function AppShellContent({
                       onClick={openAddProject}
                     />
                   )}
-                  {/* Refresh the plugin list — on the title row itself. The
-                      panel used to print its own second header row (监听器 +
-                      refresh button), which is where the "two-line" look came
-                      from; the row is gone, the affordance stayed. */}
-                  {isEventsNavigation(navState) && navState.section === 'listeners' && (
-                    <HeaderIconButton
-                      icon={<RefreshCw className="h-4 w-4" />}
-                      tooltip="刷新插件"
-                      aria-label="刷新插件"
-                      onClick={() => listenerRefreshRef.current?.()}
-                    />
-                  )}
                 </>
               }
             />
@@ -2748,7 +2745,6 @@ function AppShellContent({
                   workspaceId={activeWorkspaceId}
                   selectedListenerId={navState.details?.type === 'listener' ? navState.details.listenerId : null}
                   onSelectListener={handleListenerSelect}
-                  refreshRef={listenerRefreshRef}
                 />
               ) : (
                 <EventsListPanel

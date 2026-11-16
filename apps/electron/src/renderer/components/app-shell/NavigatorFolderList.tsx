@@ -120,6 +120,8 @@ export const NavigatorFolderList = React.forwardRef<NavigatorFolderListHandle, N
   }, [foldersApi.folders])
 
   const children = React.useMemo(() => {
+    // `filterFolderSearchResults` already drops archived folders and archived
+    // branches — 「已归档」is a separate tree, so nothing archived may leak here.
     const visibleFolders = filterFolderSearchResults(foldersApi.folders, scopeId, searchQuery)
     const compareByExistingPriority = (a: FolderConfig, b: FolderConfig) =>
       compareFolders(a, b, unreadFolderIds ?? new Set())

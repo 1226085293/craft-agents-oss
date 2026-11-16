@@ -59,12 +59,6 @@ export interface EventsListenersPanelProps {
   workspaceId: string
   selectedListenerId: string | null
   onSelectListener: (listenerId: string) => void
-  /**
-   * The navigator's title row owns the refresh affordance: the panel
-   * registers its reload there, so the header's icon button and the card
-   * list share one source of truth instead of a second header row.
-   */
-  refreshRef?: React.MutableRefObject<(() => void) | null>
   className?: string
 }
 
@@ -72,7 +66,6 @@ export function EventsListenersPanel({
   workspaceId,
   selectedListenerId,
   onSelectListener,
-  refreshRef,
   className,
 }: EventsListenersPanelProps): React.ReactElement {
   const [listeners, setListeners] = React.useState<ListenerDto[]>([])
@@ -104,19 +97,6 @@ export function EventsListenersPanel({
   React.useEffect(() => {
     void load()
   }, [load])
-
-  // The header row's refresh button calls this — one reload function, two
-  // owners (the panel and the PanelHeader icon), so the button is never its
-  // own line again.
-  React.useEffect(() => {
-    if (!refreshRef) return
-    refreshRef.current = () => {
-      void load()
-    }
-    return () => {
-      refreshRef.current = null
-    }
-  }, [load, refreshRef])
 
   const startupReport = React.useMemo(() => {
     if (listeners.length === 0) return null

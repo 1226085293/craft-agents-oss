@@ -1,12 +1,16 @@
 {
   "apiType": "非公式 Web API",
+  "config.pairingMode.description": "ペアリング方法：qr（QR コード、既定）または code（電話番号のペアリングコード）",
   "connected": "WhatsApp に接続済み",
   "connecting": "Starting WhatsApp service…",
   "desktopApprovalsOnly": "承認はデスクトップアプリで行われます",
   "disable": "Disable",
   "disconnected": "WhatsApp から切断しました",
   "forget": "Disconnect",
+  "name": "WhatsApp",
+  "pluginDescription": "WhatsApp Business の会話。",
   "reconnect": "Reconnect",
+  "setup.0": "WhatsApp プラグインのページを開き、コンテンツ欄の「認可を開始」を押して、スマートフォンの WhatsApp でコードを読み取り、ペアリングを完了してください。",
   "title": "WhatsApp",
   "unofficialApiShort": "非公式 API を使用 — 自己責任で"
 }

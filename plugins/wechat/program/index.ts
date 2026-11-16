@@ -235,6 +235,12 @@ export class WeChatAdapter implements PlatformAdapter {
   private updatesBuf = ''
   private pollTimer: ReturnType<typeof setTimeout> | null = null
   private pollLoopPromise: Promise<void> | null = null
+  /**
+   * Identity of the poll loop. `initialize` can be called again (re-pairing
+   * after the sign-in flow hands back fresh credentials); the old loop sees
+   * its token invalidated and stops instead of running a second poller.
+   */
+  private loopToken = 0
 
   // context_token per sender (key: from_user_id), refreshed on every inbound msg
   // + persisted to disk so replies keep working after restarts (official behavior)
@@ -272,6 +278,10 @@ export class WeChatAdapter implements PlatformAdapter {
 
     this.destroyed = false
     this.connected = true
+    // A re-init (re-pairing) must retire the previous loop; the token is the
+    // loop's identity — old loops see it change and stop.
+    this.loopToken += 1
+    const token = this.loopToken
 
     // Register with the server that this client is starting.
     await this.callApi('ilink/bot/msg/notifystart', {}, CONFIG_TIMEOUT_MS).catch((err) => {
@@ -282,20 +292,20 @@ export class WeChatAdapter implements PlatformAdapter {
     })
 
     // Kick off the long-poll loop (not awaited — runs in background).
-    this.pollLoopPromise = this.pollLoop().catch((err) => {
-      if (this.destroyed) return
+    this.pollLoopPromise = this.pollLoop(token).catch((err) => {
+      if (this.destroyed || this.loopToken !== token) return
       this.log.error('[wechat] poll loop crashed', {
         event: 'wechat_poll_crashed',
         error: err instanceof Error ? err.message : String(err),
       })
       this.connected = false
-      // Single retry after 5s if not destroyed.
-      if (!this.destroyed) {
+      // Single retry after 5s if not destroyed and still the current init.
+      if (!this.destroyed && this.loopToken === token) {
         this.pollTimer = setTimeout(() => {
           this.pollTimer = null
-          if (!this.destroyed) {
+          if (!this.destroyed && this.loopToken === token) {
             this.connected = true
-            this.pollLoopPromise = this.pollLoop().catch(() => {})
+            this.pollLoopPromise = this.pollLoop(token).catch(() => {})
           }
         }, 5_000)
       }
@@ -305,6 +315,8 @@ export class WeChatAdapter implements PlatformAdapter {
   async destroy(): Promise<void> {
     this.destroyed = true
     this.connected = false
+    // Retire the running loop; its token no longer matches and it stops out.
+    this.loopToken += 1
     if (this.pollTimer) {
       clearTimeout(this.pollTimer)
       this.pollTimer = null
@@ -331,8 +343,8 @@ export class WeChatAdapter implements PlatformAdapter {
   // Long-poll receive loop
   // -------------------------------------------------------------------------
 
-  private async pollLoop(): Promise<void> {
-    while (!this.destroyed) {
+  private async pollLoop(token: number): Promise<void> {
+    while (!this.destroyed && this.loopToken === token) {
       const resp = await this.getUpdatesOnce()
       if (this.destroyed) break
       if (resp.msgs?.length) {
@@ -668,12 +680,100 @@ export function collectAttachments(msg: WeixinMessage): Array<{ type: 'photo' | 
  * Entry point the host loads. The adapter lives here, in the plugin — Craft only
  * knows the filename and this export name.
  */
+let mainAdapterRef: WeChatAdapter | null = null
+
 export function createAdapter(): WeChatAdapter {
-  return new WeChatAdapter()
+  const adapter = new WeChatAdapter()
+  mainAdapterRef = adapter
+  return adapter
 }
 
 /** Host entry point: this platform's credential format lives here, not in Craft. */
 export const parseCredentials = parseWeChatCredentials
+
+/**
+ * The plugin's own config file, as the process was started with it.
+ * serve.ts reads the same file; this is how the auth surface learns a
+ * `baseUrl` override without serve.ts reaching into this module.
+ */
+function readPluginConfig(): Record<string, unknown> {
+  const p = process.env.CRAFT_LISTENER_CONFIG
+  if (!p) return {}
+  try {
+    return JSON.parse(readFileSync(p, 'utf-8')) as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * The sign-in state machine, one per process. Created lazily so `performAction`
+ * never touches the platform before the UI asks for it.
+ */
+let authSingleton: WeChatQrLogin | null = null
+
+function getAuth(): WeChatQrLogin {
+  if (!authSingleton) {
+    const config = readPluginConfig()
+    const baseUrl = typeof config.baseUrl === 'string' && config.baseUrl.trim() ? config.baseUrl.trim() : undefined
+    authSingleton = new WeChatQrLogin(baseUrl, (event, extra) => {
+      console.log(JSON.stringify({ event, ...(extra ?? {}) }))
+    })
+  }
+  return authSingleton
+}
+
+/**
+ * Plugin-side action handler — the whole contract for the plugin's own page
+ * and for host relays. Auth actions move the sign-in state machine and answer
+ * with its full state as JSON in `message`; send actions go through the main
+ * adapter. Anything else is an honest refusal.
+ */
+export function performAction(
+  action: string,
+  args: Record<string, unknown>,
+): Promise<{ ok: boolean; message?: string }> {
+  switch (action) {
+    case 'auth_start':
+      return getAuth()
+        .start()
+        .then((st) => ({ ok: true, message: JSON.stringify(st) }))
+    case 'auth_state': {
+      const st = getAuth().state()
+      // Idle + a live main adapter means the process is signed in; report it
+      // so the page can show the truthful state even before any attempt.
+      const state =
+        st.phase === 'idle' && mainAdapterRef?.isConnected()
+          ? { phase: 'connected' as const, detail: '已连接' }
+          : st
+      return Promise.resolve({ ok: true, message: JSON.stringify(state) })
+    }
+    case 'auth_submit':
+      return getAuth()
+        .submit(typeof args.code === 'string' ? args.code : '')
+        .then((st) => ({ ok: true, message: JSON.stringify(st) }))
+    case 'auth_cancel':
+      return getAuth()
+        .cancel()
+        .then((st) => ({ ok: true, message: JSON.stringify(st) }))
+    case 'send_message':
+    case 'reply':
+      return Promise.resolve().then(async () => {
+        const text = typeof args.text === 'string' ? args.text.trim() : ''
+        const channelId = typeof args.channelId === 'string' ? args.channelId : ''
+        if (!text || !channelId) return { ok: false, message: 'text 与 channelId 必填' }
+        if (!mainAdapterRef) return { ok: false, message: '适配器未就绪' }
+        try {
+          await mainAdapterRef.sendText(channelId, text)
+          return { ok: true, message: `已发送到 ${channelId}` }
+        } catch (err) {
+          return { ok: false, message: err instanceof Error ? err.message : String(err) }
+        }
+      })
+    default:
+      return Promise.resolve({ ok: false, message: `插件不支持动作 ${action}` })
+  }
+}
 
 /**
  * Host entry point for sign-in.

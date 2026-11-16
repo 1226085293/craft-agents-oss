@@ -15,6 +15,7 @@
  */
 
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import { ExternalLink, Paperclip, Inbox, Send } from 'lucide-react'
 import type { EventRecordDto } from '@craft-agent/shared/protocol/dto'
 import { EventAttachments } from './EventAttachments'
@@ -40,11 +41,12 @@ function HandlingState({
   handledAt?: number
   delivered: boolean
 }): React.ReactElement {
+  const { t } = useTranslation()
   const label = handledAt
-    ? '已处理'
+    ? t('events.detail.handled')
     : delivered
-      ? '已送达，处理中'
-      : '尚未送达'
+      ? t('events.detail.deliveredProcessing')
+      : t('events.detail.notDelivered')
   return (
     <span className="inline-flex items-center gap-1.5">
       <span className={`h-1.5 w-1.5 rounded-full ${handledAt ? 'bg-accent' : delivered ? 'bg-amber-500' : 'bg-foreground/20'}`} />
@@ -90,6 +92,7 @@ export function EventDetailPanel({
   eventId,
   className,
 }: EventDetailPanelProps): React.ReactElement {
+  const { t } = useTranslation()
   const [event, setEvent] = React.useState<EventRecordDto | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [loading, setLoading] = React.useState(false)
@@ -120,10 +123,10 @@ export function EventDetailPanel({
     return <div className={`p-4 text-sm text-destructive ${className ?? ''}`}>{error}</div>
   }
   if (loading && !event) {
-    return <div className={`p-4 text-sm text-muted-foreground ${className ?? ''}`}>加载中…</div>
+    return <div className={`p-4 text-sm text-muted-foreground ${className ?? ''}`}>{t('events.common.loading')}</div>
   }
   if (!event) {
-    return <div className={`p-4 text-sm text-muted-foreground ${className ?? ''}`}>事件不存在</div>
+    return <div className={`p-4 text-sm text-muted-foreground ${className ?? ''}`}>{t('events.common.notFound')}</div>
   }
   // Older main processes (pre-deliveries) omit the field entirely — HMR can
   // pair a new renderer with an old backend, and that must not crash.
@@ -132,11 +135,11 @@ export function EventDetailPanel({
   // Only rows with content render — the block collapses around what exists.
   const extraRows: Array<{ label: string; node: React.ReactNode } | null> = [
     event.occurredAt !== undefined
-      ? { label: '发生时间', node: new Date(event.occurredAt).toLocaleString() }
+      ? { label: t('events.detail.occurredAt'), node: new Date(event.occurredAt).toLocaleString() }
       : null,
     deliveries.length > 0
       ? {
-          label: '投递记录',
+          label: t('events.detail.deliveries'),
           node: (
             <span className="flex flex-col gap-0.5">
               {deliveries.map((delivery) => (
@@ -154,7 +157,7 @@ export function EventDetailPanel({
       : null,
     event.recipients.length > 0
       ? {
-          label: '接收方',
+          label: t('events.detail.recipients'),
           node: (
             <span className="flex flex-wrap gap-1">
               {event.recipients.map((recipient) => (
@@ -166,10 +169,10 @@ export function EventDetailPanel({
           ),
         }
       : null,
-    event.dedupeKey ? { label: '去重键', node: <span className="font-mono text-[12px]">{event.dedupeKey}</span> } : null,
+    event.dedupeKey ? { label: t('events.detail.dedupeKey'), node: <span className="font-mono text-[12px]">{event.dedupeKey}</span> } : null,
     event.links.length > 0
       ? {
-          label: '链接',
+          label: t('events.detail.link'),
           node: (
             <span className="flex flex-col gap-0.5">
               {event.links.map((link) => (
@@ -189,7 +192,7 @@ export function EventDetailPanel({
       : null,
     event.payloadRef
       ? {
-          label: '附件载荷',
+          label: t('events.detail.payload'),
           node: (
             <span className="inline-flex items-center gap-1 text-muted-foreground">
               <Paperclip className="h-3 w-3" />
@@ -217,15 +220,15 @@ export function EventDetailPanel({
         <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1.5 mt-3 text-[12px]">
           <HandlingState handledAt={event.handledAt} delivered={(event.deliveries ?? []).length > 0} />
           {deliveries.length > 0 && (
-            <span className="text-muted-foreground">{deliveries.length} 个会话</span>
+            <span className="text-muted-foreground">{t('events.detail.sessions', { count: deliveries.length })}</span>
           )}
           <span className="h-3 w-px bg-border" aria-hidden />
-          <Chip label="来源" value={event.source} />
+          <Chip label={t('events.detail.source')} value={event.source} />
           <span className="h-3 w-px bg-border" aria-hidden />
-          <Chip label="类型" value={event.type} />
+          <Chip label={t('events.detail.type')} value={event.type} />
           <span className="h-3 w-px bg-border" aria-hidden />
           <Chip
-            label="时间"
+            label={t('events.detail.time')}
             value={new Date(event.receivedAt).toLocaleString()}
           />
         </div>
@@ -235,7 +238,7 @@ export function EventDetailPanel({
         {details.length > 0 && (
           <details className="mt-2 group" open={Boolean(event.links.length || event.payloadRef || deliveries.length)}>
             <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors select-none">
-              详细信息（{details.length}）
+              {t('events.detail.details', { count: details.length })}
             </summary>
             <div className="mt-1.5 space-y-1 pl-3 border-l border-border">
               {details.map((row) => (
@@ -250,11 +253,11 @@ export function EventDetailPanel({
 
       {/* Body: the actual content, line-length capped for readability */}
       <div className="flex-1 overflow-auto px-5 py-4">
-        <SectionLabel>正文</SectionLabel>
+        <SectionLabel>{t('events.detail.body')}</SectionLabel>
         {event.body === undefined ? (
           <p className="text-[13px] text-muted-foreground inline-flex items-center gap-2">
             <Inbox className="h-4 w-4 opacity-60" />
-            该事件没有正文
+            {t('events.detail.noBody')}
           </p>
         ) : (
           <EventBody

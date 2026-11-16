@@ -349,6 +349,13 @@ client.onConnectionStateChanged((state) => {
 
 // i18n: sync language changes to main process (for native menus/dialogs)
 ;(api as ElectronAPI).changeLanguage = (lang: string) => ipcRenderer.invoke('i18n:changeLanguage', lang)
+// ... and receive them from another window (Appearance lives in its own window,
+// so the main window would otherwise keep its startup language forever).
+;(api as ElectronAPI).onLanguageChanged = (cb: (lang: string) => void) => {
+  const handler = (_e: any, lang: string) => cb(lang)
+  ipcRenderer.on('i18n:languageChanged', handler)
+  return () => { ipcRenderer.removeListener('i18n:languageChanged', handler) }
+}
 
 // webUtils.getPathForFile: returns the absolute OS path of a File object obtained
 // from <input type="file"> or OS drag-drop. Returns null for Files fabricated from

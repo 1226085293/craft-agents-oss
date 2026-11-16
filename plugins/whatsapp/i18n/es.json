@@ -1,12 +1,16 @@
 {
   "apiType": "Web API no oficial",
+  "config.pairingMode.description": "Método de emparejamiento: qr (código QR, predeterminado) o code (código por número de teléfono)",
   "connected": "Conectado a WhatsApp",
   "connecting": "Starting WhatsApp service…",
   "desktopApprovalsOnly": "Las aprobaciones ocurren en la app de escritorio",
   "disable": "Disable",
   "disconnected": "WhatsApp desconectado",
   "forget": "Disconnect",
+  "name": "WhatsApp",
+  "pluginDescription": "Conversaciones de WhatsApp Business.",
   "reconnect": "Reconnect",
+  "setup.0": "Abre la página del plugin de WhatsApp y pulsa «Iniciar autorización» en el área de contenido; después escanea el código con WhatsApp en tu teléfono para completar el emparejamiento.",
   "title": "WhatsApp",
   "unofficialApiShort": "Utiliza una API no oficial — úsela bajo su propio riesgo"
 }

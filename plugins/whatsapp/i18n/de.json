@@ -1,12 +1,16 @@
 {
   "apiType": "Inoffizielle Web-API",
+  "config.pairingMode.description": "Kopplungsart: qr (QR-Code, Standard) oder code (Kopplungscode per Telefonnummer)",
   "connected": "Mit WhatsApp verbunden",
   "connecting": "Starting WhatsApp service…",
   "desktopApprovalsOnly": "Genehmigungen erfolgen in der Desktop-App",
   "disable": "Disable",
   "disconnected": "WhatsApp getrennt",
   "forget": "Disconnect",
+  "name": "WhatsApp",
+  "pluginDescription": "WhatsApp-Business-Unterhaltungen.",
   "reconnect": "Reconnect",
+  "setup.0": "Öffne die WhatsApp-Plugin-Seite und klicke im Bereich „Inhalt“ auf „Autorisierung starten“. Scanne dann den Code mit WhatsApp auf deinem Telefon, um die Kopplung abzuschließen.",
   "title": "WhatsApp",
   "unofficialApiShort": "Verwendet eine inoffizielle API — Nutzung auf eigenes Risiko"
 }

@@ -19,6 +19,7 @@
  */
 
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import { AlertTriangle, ArrowDownToLine, Pause, Play, Trash2 } from 'lucide-react'
 import type { ListenerStatusDto } from '@craft-agent/shared/protocol/dto'
 
@@ -92,6 +93,7 @@ export function isLive(state: string | undefined): boolean {
 }
 
 export function ListenerLogView({ logTail, status, onRefresh }: ListenerLogViewProps): React.ReactElement {
+  const { t } = useTranslation()
   const live = isLive(status.state)
   const [following, setFollowing] = React.useState(true)
   const [onlyProblems, setOnlyProblems] = React.useState(false)
@@ -145,7 +147,7 @@ export function ListenerLogView({ logTail, status, onRefresh }: ListenerLogViewP
         </span>
         <span className="text-border">·</span>
         <span className={`text-[12.5px] tabular-nums ${status.attempts > 0 ? 'text-warning' : 'text-muted-foreground'}`}>
-          重启 {status.attempts} 次
+          {t('events.log.restarts', { count: status.attempts })}
         </span>
         {status.lastError && (
           <>
@@ -166,7 +168,7 @@ export function ListenerLogView({ logTail, status, onRefresh }: ListenerLogViewP
                   ? 'bg-destructive/10 text-destructive'
                   : 'text-muted-foreground hover:text-foreground hover:bg-foreground/5'
               }`}
-              title={onlyProblems ? '显示全部行' : '只看错误和警告'}
+              title={onlyProblems ? t('events.log.showAll') : t('events.log.onlyProblems')}
             >
               <AlertTriangle className="h-3 w-3" />
               {problemCount}
@@ -188,15 +190,15 @@ export function ListenerLogView({ logTail, status, onRefresh }: ListenerLogViewP
                   ? 'text-primary hover:bg-foreground/5'
                   : 'text-muted-foreground hover:text-foreground hover:bg-foreground/5'
               }`}
-              title={following ? '暂停自动跟随' : '继续跟随最新日志'}
+              title={following ? t('events.log.pauseFollow') : t('events.log.resumeFollow')}
             >
               {following ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-              {following ? '跟随中' : '已暂停'}
+              {following ? t('events.log.following') : t('events.log.paused')}
             </button>
           ) : (
             <span className="inline-flex items-center gap-1.5 px-2 text-[12.5px] text-muted-foreground">
               <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50" aria-hidden />
-              已停止，无新日志
+              {t('events.log.stoppedNoNew')}
             </span>
           )}
           <button
@@ -204,7 +206,7 @@ export function ListenerLogView({ logTail, status, onRefresh }: ListenerLogViewP
             onClick={() => setClearedAt(parseLog(logTail).length)}
             disabled={lines.length === 0}
             className="h-7 w-7 inline-flex items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground disabled:opacity-40"
-            title="清空当前显示（不影响日志文件）"
+            title={t('events.log.clearView')}
           >
             <Trash2 className="h-3 w-3" />
           </button>
@@ -219,16 +221,16 @@ export function ListenerLogView({ logTail, status, onRefresh }: ListenerLogViewP
         className="flex-1 min-h-0 overflow-auto px-5 py-2.5 font-mono text-[12.5px] leading-[1.75] selection:bg-primary/20"
         tabIndex={0}
         role="log"
-        aria-label="插件进程日志"
+        aria-label={t('events.log.ariaLabel')}
       >
         {shown.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-2 py-12 text-muted-foreground">
             <ArrowDownToLine className="h-5 w-5 opacity-40" />
             <p className="text-[13px]">
-              {onlyProblems && lines.length > 0 ? '没有错误或警告' : '暂无日志'}
+              {onlyProblems && lines.length > 0 ? t('events.log.noProblems') : t('events.log.noOutput')}
             </p>
             {!status.lastError && lines.length === 0 && (
-              <p className="text-[12.5px] opacity-70">插件启动后会在这里输出</p>
+              <p className="text-[12.5px] opacity-70">{t('events.log.emptyHint')}</p>
             )}
           </div>
         ) : (
@@ -256,7 +258,7 @@ export function ListenerLogView({ logTail, status, onRefresh }: ListenerLogViewP
           className="h-8 shrink-0 inline-flex items-center justify-center gap-1.5 border-t border-border/60 text-[12.5px] text-primary transition-colors hover:bg-foreground/5"
         >
           <ArrowDownToLine className="h-3 w-3" />
-          跳到最新
+          {t('events.log.jumpToLatest')}
         </button>
       )}
     </div>

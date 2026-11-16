@@ -13,6 +13,7 @@
  */
 
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import { Search, Inbox, ChevronDown, Check, ArrowDownWideNarrow, ArrowUpNarrowWide, Paperclip } from 'lucide-react'
 import { SimpleDropdown, SimpleDropdownItem } from '@craft-agent/ui'
 import type { EventMetaDto } from '@craft-agent/shared/protocol/dto'
@@ -109,7 +110,8 @@ function SortMenu({
   value: SortOrder
   onChange: (next: SortOrder) => void
 }): React.ReactElement {
-  const label = value === 'desc' ? '最新优先' : '最早优先'
+  const { t } = useTranslation()
+  const label = value === 'desc' ? t('events.list.newestFirst') : t('events.list.oldestFirst')
   const Icon = value === 'desc' ? ArrowDownWideNarrow : ArrowUpNarrowWide
   return (
     <SimpleDropdown
@@ -127,7 +129,7 @@ function SortMenu({
     >
       {(['desc', 'asc'] as const).map((order) => {
         const OrderIcon = order === 'desc' ? ArrowDownWideNarrow : ArrowUpNarrowWide
-        const optionLabel = order === 'desc' ? '最新优先' : '最早优先'
+        const optionLabel = order === 'desc' ? t('events.list.newestFirst') : t('events.list.oldestFirst')
         return (
           <SimpleDropdownItem key={order} onClick={() => onChange(order)}>
             <span className="flex items-center gap-1.5">
@@ -148,6 +150,7 @@ export function EventsListPanel({
   onSelectEvent,
   className,
 }: EventsListPanelProps): React.ReactElement {
+  const { t } = useTranslation()
   const [events, setEvents] = React.useState<EventMetaDto[]>([])
   const [search, setSearch] = React.useState('')
   const [filters, setFilters] = React.useState<FilterState>(EMPTY_FILTERS)
@@ -229,8 +232,8 @@ export function EventsListPanel({
   }
 
   const RECEPTION_OPTIONS: { value: ReceptionFilter; label: string }[] = [
-    { value: 'has-recipients', label: '有接收方' },
-    { value: 'undelivered', label: '未被接收' },
+    { value: 'has-recipients', label: t('events.list.hasRecipients') },
+    { value: 'undelivered', label: t('events.list.undelivered') },
   ]
 
   return (
@@ -241,7 +244,7 @@ export function EventsListPanel({
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="搜索事件…"
+            placeholder={t('events.list.searchPlaceholder')}
             className="w-full h-9 pl-9 pr-2.5 text-[13.5px] bg-muted/40 rounded-md border border-transparent focus:border-foreground/20 focus:outline-none placeholder:text-muted-foreground/60"
           />
         </div>
@@ -249,22 +252,22 @@ export function EventsListPanel({
         <div className="flex flex-wrap items-center gap-2">
           <FilterMenu
             value={filters.source}
-            placeholder="全部来源"
+            placeholder={t('events.list.allSources')}
             options={sources}
             onChange={setSource}
           />
           {filters.source && (
             <FilterMenu
               value={filters.type}
-              placeholder="全部类型"
+              placeholder={t('events.list.allTypes')}
               options={types}
               onChange={(next) => setFilters((prev) => ({ ...prev, type: next }))}
             />
           )}
           <FilterMenu
             value={RECEPTION_OPTIONS.find((o) => o.value === filters.reception)?.label ?? ''}
-            placeholder="接收状态"
-            allLabel="全部"
+            placeholder={t('events.list.receiveStatus')}
+            allLabel={t('events.list.all')}
             options={RECEPTION_OPTIONS.map((o) => o.label)}
             onChange={(next) =>
               setFilters((prev) => ({
@@ -283,8 +286,8 @@ export function EventsListPanel({
         {!error && events.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground">
             <Inbox className="h-7 w-7 opacity-70" />
-            <p className="text-sm">还没有事件</p>
-            <p className="text-xs opacity-70">在「事件监听」里把接收地址交给你的脚本</p>
+            <p className="text-sm">{t('events.list.empty')}</p>
+            <p className="text-xs opacity-70">{t('events.list.emptyHint')}</p>
           </div>
         )}
 
@@ -325,17 +328,17 @@ export function EventsListPanel({
                   }`}
                   aria-label={
                     event.handledAt
-                      ? '已处理'
+                      ? t('events.list.handled')
                       : (event.deliveries ?? []).length > 0
-                        ? `已送达 ${(event.deliveries ?? []).length} 个会话，处理中`
-                        : '尚未送达'
+                        ? t('events.list.deliveredProcessing', { count: (event.deliveries ?? []).length })
+                        : t('events.list.notDelivered')
                   }
                   title={
                     event.handledAt
-                      ? `已处理 · ${formatTime(event.handledAt)}`
+                      ? t('events.list.handledAt', { time: formatTime(event.handledAt) })
                       : (event.deliveries ?? []).length > 0
-                        ? `已送达 ${(event.deliveries ?? []).length} 个会话，尚未处理完`
-                        : '尚未送达任何会话'
+                        ? t('events.list.deliveredNotProcessed', { count: (event.deliveries ?? []).length })
+                        : t('events.list.notDeliveredAny')
                   }
                 />
               </div>

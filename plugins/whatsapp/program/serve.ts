@@ -186,7 +186,7 @@ const url = new URL(entry, `file://${process.cwd().replace(/\\/g, '/')}/`).href
 const plugin = (await import(url)) as ActionModule
 
 const config = readConfig()
-const adapter = plugin.createAdapter?.({ config }) ?? null
+const adapter = plugin.createAdapter?.({ config, dataDir: DATA_DIR }) ?? null
 /** Null when the plugin ships no sign-in flow; /auth/* then answers 404. */
 const auth = plugin.createAuth?.({ config, dataDir: DATA_DIR }) ?? null
 
@@ -212,6 +212,61 @@ function readJson(req: import('node:http').IncomingMessage): Promise<unknown> {
     })
     req.on('error', () => resolve(null))
   })
+}
+
+/**
+ * Generic sign-in finish step, fired when a plugin's own `auth_*` action
+ * reports `connected`.
+ *
+ * It is deliberately platform-agnostic:
+ *   1. persist `credentials.token` into the plugin's config file, when the
+ *      flow produced any — platforms that keep their own state on disk
+ *      (Baileys) have no token and skip this step;
+ *   2. (re)initialize the main adapter IN PLACE so the process becomes
+ *      healthy without a supervisor restart; a failed re-init leaves the
+ *      previous adapter state untouched;
+ *   3. post a health report so the host marks the listener running.
+ *
+ * Fire-and-forget on purpose: the page already holds the `connected` state in
+ * the action result; the health report may take up to a platform round-trip.
+ */
+function finishPluginAuth(
+  action: string,
+  result: { ok: boolean; message?: string },
+): void {
+  if (!result.ok || !action.startsWith('auth_') || typeof result.message !== 'string') return
+  let state: { phase?: string; credentials?: { token?: unknown } } | null
+  try {
+    state = JSON.parse(result.message)
+  } catch {
+    return
+  }
+  if (state?.phase !== 'connected' || !adapter) return
+  void (async () => {
+    const credentials = state!.credentials
+    if (typeof credentials?.token === 'string' && CONFIG_PATH) {
+      try {
+        const cfg = { ...readConfig(), token: credentials.token }
+        writeFileSync(CONFIG_PATH, `${JSON.stringify(cfg, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+        console.log(JSON.stringify({ event: 'auth_credentials_saved' }))
+      } catch (error) {
+        console.error(JSON.stringify({ event: 'auth_credentials_save_failed', message: String(error) }))
+      }
+    }
+    try {
+      await adapter!.initialize?.(readConfig())
+      connected = true
+      console.log(JSON.stringify({ event: 'auth_adapter_reinitialized' }))
+    } catch {
+      // Previous adapter state stays alive; the health post below reports the
+      // process's own /health truth either way.
+    }
+    if (EVENTS_URL) {
+      await fetch(`${EVENTS_URL}/health`, {
+        headers: { authorization: `Bearer ${EVENTS_TOKEN}` },
+      }).catch(() => undefined)
+    }
+  })()
 }
 
 const server = createServer((req, res) => {
@@ -301,7 +356,9 @@ const server = createServer((req, res) => {
 
     try {
       if (typeof plugin.performAction === 'function') {
-        send(200, await plugin.performAction(action, args))
+        const result = await plugin.performAction(action, args)
+        finishPluginAuth(action, result)
+        send(200, result)
         return
       }
 

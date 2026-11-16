@@ -817,9 +817,14 @@ export interface ElectronAPI {
   ): () => void
   listEventListeners(
     workspaceId: string,
-    skipProbes?: boolean
+    skipProbes?: boolean,
+    locale?: string
   ): Promise<import('@craft-agent/shared/protocol/dto').ListenerDto[]>
-  getEventListener(workspaceId: string, listenerId: string): Promise<import('@craft-agent/shared/protocol/dto').ListenerDto | null>
+  getEventListener(
+    workspaceId: string,
+    listenerId: string,
+    locale?: string
+  ): Promise<import('@craft-agent/shared/protocol/dto').ListenerDto | null>
   getEventListenerUi(
     workspaceId: string,
     listenerId: string
@@ -924,6 +929,8 @@ export interface ElectronAPI {
 
   // Language
   changeLanguage(lang: string): Promise<void>
+  /** Fires in every window except the one that changed the language. */
+  onLanguageChanged(cb: (lang: string) => void): () => void
 
   // Resources (cross-workspace export/import)
   exportResources(workspaceId: string, options: ExportResourcesOptions): Promise<ExportResult>

@@ -1,12 +1,16 @@
 {
   "apiType": "Nem hivatalos Web API",
+  "config.pairingMode.description": "Párosítási mód: qr (QR-kód, alapértelmezett) vagy code (telefonszámos párosító kód)",
   "connected": "Csatlakoztatva a WhatsApphoz",
   "connecting": "Starting WhatsApp service…",
   "desktopApprovalsOnly": "A jóváhagyások az asztali alkalmazásban történnek",
   "disable": "Disable",
   "disconnected": "WhatsApp leválasztva",
   "forget": "Disconnect",
+  "name": "WhatsApp",
+  "pluginDescription": "WhatsApp Business beszélgetések.",
   "reconnect": "Reconnect",
+  "setup.0": "Nyisd meg a WhatsApp bővítmény oldalát, és a Tartalom területen kattints az „Engedélyezés indítása” gombra, majd olvasd be a kódot a telefonod WhatsAppjával a párosítás befejezéséhez.",
   "title": "WhatsApp",
   "unofficialApiShort": "Nem hivatalos API-t használ — saját felelősségre"
 }

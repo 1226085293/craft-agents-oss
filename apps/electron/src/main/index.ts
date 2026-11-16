@@ -3,7 +3,7 @@
 import { loadShellEnv } from './shell-env'
 loadShellEnv()
 
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, shell, webContents } from 'electron'
 import { createHash, randomUUID } from 'crypto'
 import { hostname, homedir } from 'os'
 import * as Sentry from '@sentry/electron/main'
@@ -955,7 +955,7 @@ app.whenReady().then(async () => {
       // Language change: sync from renderer to main process, persist, and rebuild native menu.
       // Persistence here is what lets the next app launch hydrate main's i18n correctly —
       // see the `getPersistedUiLanguage()` block at the top of this file.
-      ipcMain.handle('i18n:changeLanguage', async (_event, lang: unknown) => {
+      ipcMain.handle('i18n:changeLanguage', async (sender, lang: unknown) => {
         const previousResolved = i18n.resolvedLanguage ?? null
         if (typeof lang !== 'string' || !SUPPORTED_LANGUAGE_CODES.includes(lang as LanguageCode)) {
           // Defense-in-depth: renderer guarantees a supported code, but if a renegade
@@ -974,6 +974,22 @@ app.whenReady().then(async () => {
           previousResolved,
           newResolved: i18n.resolvedLanguage ?? null,
         })
+        // Every window initialises i18next from localStorage at startup and
+        // never re-reads it, so a switch in Appearance used to leave every
+        // other window (and anything they render, such as a plugin page's
+        // locale) on the previous language. Push the change to all of them.
+        //
+        // Only when the resolved language actually moved: each window pushes its
+        // startup language here (idempotent bootstrap), and broadcasting that
+        // would make two windows relay the same value back and forth.
+        if (previousResolved !== code) {
+          const senderId = sender.sender.id
+          for (const contents of webContents.getAllWebContents()) {
+            if (contents.isDestroyed() || contents.id === senderId) continue
+            contents.send('i18n:languageChanged', code)
+          }
+          mainLog.info('[i18n] broadcast to other windows', { code, previousResolved })
+        }
         const { rebuildMenu } = await import('./menu')
         await rebuildMenu()
       })

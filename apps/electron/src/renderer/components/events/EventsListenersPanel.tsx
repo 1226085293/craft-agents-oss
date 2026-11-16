@@ -17,8 +17,8 @@
  */
 
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { buildStartupReport } from '@craft-agent/shared/events/startup-report'
 import {
   Blocks,
   Bot,
@@ -68,6 +68,7 @@ export function EventsListenersPanel({
   onSelectListener,
   className,
 }: EventsListenersPanelProps): React.ReactElement {
+  const { t, i18n } = useTranslation()
   const [listeners, setListeners] = React.useState<ListenerDto[]>([])
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
@@ -82,8 +83,9 @@ export function EventsListenersPanel({
     setError(null)
     try {
       // skipProbes=true: cards must render instantly; the detail page pays for
-      // the python/pip subprocess checks.
-      const rows = await window.electronAPI.listEventListeners(workspaceId, true)
+      // the python/pip subprocess checks. `locale` lets the plugin rename its
+      // own card in the reader's language.
+      const rows = await window.electronAPI.listEventListeners(workspaceId, true, i18n.resolvedLanguage ?? i18n.language)
       setListeners(Array.isArray(rows) ? rows : [])
     } catch (err) {
       console.error('[EventsListenersPanel] load failed:', err)
@@ -92,30 +94,15 @@ export function EventsListenersPanel({
     } finally {
       setLoading(false)
     }
-  }, [workspaceId])
+  }, [workspaceId, i18n.resolvedLanguage, i18n.language])
 
   React.useEffect(() => {
     void load()
   }, [load])
 
-  const startupReport = React.useMemo(() => {
-    if (listeners.length === 0) return null
-    return buildStartupReport(
-      listeners.map((listener) => ({
-        id: listener.id,
-        name: listener.name,
-        enabled: listener.enabled,
-        ready: listener.ready,
-        missingConfig: listener.missingConfig,
-        dependencies: listener.dependencies.map((dep) => ({ label: dep.label, state: dep.state })),
-        status: listener.status ? { state: listener.status.state, lastError: listener.status.lastError } : undefined,
-      })),
-    )
-  }, [listeners])
-
   // The process side: start / running / degraded / failed / stop events keep
-  // the cached status current without a reload — the startup summary and the
-  // failure toast below read it.
+  // the cached status current without a reload — the failure toast below reads
+  // it.
   React.useEffect(() => {
     if (!workspaceId) return
     // Remember which plugins we have already warned about, so a restart loop
@@ -133,8 +120,8 @@ export function EventsListenersPanel({
       if (status.state === 'failed' && !warned.has(status.id)) {
         warned.add(status.id)
         const name = listenersRef.current.find((l) => l.id === status.id)?.name ?? status.id
-        toast.error(`插件「${name}」启动失败`, {
-          description: status.lastError ?? '检查配置与依赖后重试',
+        toast.error(t('events.listeners.startFailed', { name }), {
+          description: status.lastError ?? t('events.listeners.startFailedHint'),
         })
       }
       if (status.state === 'running') warned.delete(status.id)
@@ -164,31 +151,14 @@ export function EventsListenersPanel({
       <div className={`flex-1 overflow-y-auto p-2 space-y-1.5 ${loading ? 'opacity-60' : ''}`} aria-busy={loading}>
         {error && <div className="px-1 py-2 text-xs text-destructive">{error}</div>}
 
-        {/* Why something is not running, before the list: the same sentence the
-            host logs at boot, so the two never disagree. */}
-        {!error && startupReport && startupReport.reasons.length > 0 && (
-          <div className="rounded-md border border-border/60 bg-muted/30 px-2.5 py-2 text-xs text-muted-foreground">
-            <div className="font-medium text-foreground/80">
-              {startupReport.running} 个运行中 · {startupReport.waiting} 个等待中
-              {startupReport.failed > 0 ? ` · ${startupReport.failed} 个启动失败` : ''}
-            </div>
-            <ul className="mt-1 space-y-0.5">
-              {startupReport.reasons.map((reason) => (
-                <li key={reason.id}>
-                  <span className="text-foreground/70">{reason.label}</span>：{reason.reason}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
         {!error && listeners.length === 0 && (
           <div className="flex flex-col items-center justify-center gap-2 py-8 text-muted-foreground text-center px-3">
             <Plus className="h-7 w-7 opacity-70" />
-            <p className="text-sm">还没有插件</p>
+            <p className="text-sm">{t('events.listeners.empty')}</p>
             <p className="text-xs opacity-70 leading-relaxed">
-              在 <code className="font-mono">&lt;workspace&gt;/events/&lt;id&gt;/manifest.json</code> 放一个清单，
-              这里就会出现卡片
+              {t('events.listeners.emptyHintPath')}{' '}
+              <code className="font-mono">&lt;workspace&gt;/events/&lt;id&gt;/manifest.json</code>{' '}
+              {t('events.listeners.emptyHintTail')}
             </p>
           </div>
         )}
@@ -228,7 +198,7 @@ export function EventsListenersPanel({
                     listener.enabled ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'
                   }`}
                 >
-                  {listener.enabled ? '已启用' : '已停用'}
+                  {listener.enabled ? t('events.listeners.enabled') : t('events.listeners.disabled')}
                 </span>
               </div>
               {listener.errors.length > 0 && (

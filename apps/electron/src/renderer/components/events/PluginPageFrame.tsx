@@ -46,6 +46,7 @@
  */
 
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 
 /**
  * The tokens a plugin page is most likely to style against. Craft's palette
@@ -105,6 +106,16 @@ export interface PluginPageFrameProps {
   /** Whether Craft is currently in dark mode — drives color-scheme + variables. */
   isDark: boolean
   /**
+   * Craft's current UI language (e.g. `zh-Hans`, `en`).
+   *
+   * The frame is sandboxed without `allow-same-origin`, so the page cannot read
+   * the host's locale from `localStorage`, and `navigator.language` only reports
+   * the OS language — a host switched to English still sees `zh-CN` there. The
+   * locale is therefore handed over explicitly, on init and again whenever it
+   * changes.
+   */
+  locale: string
+  /**
    * The listener's saved config, handed to the page on init so it can show
    * its own state (read-only from the page's side; writing goes through the
    * plugin's actions or Craft's config form).
@@ -126,10 +137,12 @@ const DEFAULT_HEIGHT = 320
 export function PluginPageFrame({
   html,
   isDark,
+  locale,
   config,
   onAction,
   className,
 }: PluginPageFrameProps): React.ReactElement {
+  const { t } = useTranslation()
   const iframeRef = React.useRef<HTMLIFrameElement | null>(null)
   const [height, setHeight] = React.useState(DEFAULT_HEIGHT)
 
@@ -151,6 +164,8 @@ export function PluginPageFrame({
   onActionRef.current = onAction
   const isDarkRef = React.useRef(isDark)
   isDarkRef.current = isDark
+  const localeRef = React.useRef(locale)
+  localeRef.current = locale
 
   const post = React.useCallback((message: Record<string, unknown>) => {
     const frame = iframeRef.current
@@ -158,13 +173,41 @@ export function PluginPageFrame({
   }, [])
 
   // Announce the current theme + variables to a live frame on every flip.
+  //
+  // The read is deferred by one frame on purpose: `isDark` changes as soon as
+  // React re-renders, but the host's CSS variables are applied to the document
+  // afterwards. Reading them in the effect body sent the *new* colorScheme
+  // together with the *old* variables — a light-page-on-dark-background pair,
+  // which is exactly the “inverted theme” a plugin saw on every flip.
   React.useEffect(() => {
-    post({
-      type: 'theme',
-      colorScheme: isDark ? 'dark' : 'light',
-      cssVars: collectThemeVars(),
+    let cancelled = false
+    let second = 0
+    const send = () => {
+      if (cancelled) return
+      const vars = collectThemeVars()
+      // Nothing to announce if the host has not painted the new variables yet
+      // (still the previous round's values): the next frame will catch up.
+      post({
+        type: 'theme',
+        colorScheme: isDark ? 'dark' : 'light',
+        cssVars: vars,
+      })
+    }
+    const raf = requestAnimationFrame(() => {
+      second = requestAnimationFrame(send)
     })
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+      if (second) cancelAnimationFrame(second)
+    }
   }, [isDark, post])
+
+  // Language changes arrive the same way: no document reload, so the page keeps
+  // whatever state the person had reached.
+  React.useEffect(() => {
+    post({ type: 'locale', locale })
+  }, [locale, post])
 
   // When the document (re)loads: hand it the full initial state.
   React.useEffect(() => {
@@ -175,6 +218,7 @@ export function PluginPageFrame({
         type: 'init',
         colorScheme: isDarkRef.current ? 'dark' : 'light',
         cssVars: collectThemeVars(),
+        locale: localeRef.current,
         config: configRef.current,
       })
     }
@@ -201,7 +245,7 @@ export function PluginPageFrame({
       if (!data || data.source !== 'craft-plugin-ui' || typeof data.type !== 'string') return
 
       if (data.type === 'ready') {
-        post({ type: 'init', config: configRef.current })
+        post({ type: 'init', locale: localeRef.current, config: configRef.current })
       }
       if (data.type === 'action' && typeof data.action === 'string') {
         const requestId = typeof data.requestId === 'string' || typeof data.requestId === 'number'
@@ -226,7 +270,7 @@ export function PluginPageFrame({
   return (
     <iframe
       ref={iframeRef}
-      title="插件自定义页面"
+      title={t('events.page.title')}
       sandbox="allow-scripts allow-forms"
       srcDoc={srcDoc}
       style={{ height }}

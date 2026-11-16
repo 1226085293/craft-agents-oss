@@ -43,16 +43,65 @@
           "text"
         ]
       }
+    },
+    {
+      "name": "auth_start",
+      "description": "发起（或重新发起）WhatsApp 配对：生成新二维码（code 模式下等待提交手机号）。插件详情页面的配对区会自动展示它；agent 调用后应提示用户到插件页面扫码完成配对。",
+      "input": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "auth_state",
+      "description": "查询 WhatsApp 配对进度。message 是 JSON：{ phase: idle|awaiting|scanned|connected|expired|failed, qr?, code?, detail?, error? }。qr 为可扫码的配对串，code 为需在手机输入的配对码。",
+      "input": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "auth_submit",
+      "description": "code 配对模式下提交手机号，向平台申请 8 位配对码。qr 模式无需使用。",
+      "input": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "要配对的手机号（国际格式，如 +8613800000000）"
+          }
+        },
+        "required": [
+          "code"
+        ]
+      }
+    },
+    {
+      "name": "auth_cancel",
+      "description": "取消当前 WhatsApp 配对尝试（后台 worker 保持运行，重开页面可继续）。",
+      "input": {
+        "type": "object",
+        "properties": {}
+      }
     }
   ],
   "config": {
     "type": "object",
-    "properties": {}
+    "properties": {
+      "pairingMode": {
+        "type": "string",
+        "description": "配对方式：qr（二维码，默认）或 code（手机输入配对码）",
+        "default": "qr"
+      }
+    }
   },
   "icon": "message-circle",
+  "ui": {
+    "page": "ui/index.html"
+  },
   "setup": [
     {
-      "text": "在插件右上角点「连接」后用手机 WhatsApp 扫描二维码配对。"
+      "text": "打开 WhatsApp 插件详情页，在内容区点「开始授权」，用手机 WhatsApp 扫描二维码完成配对。"
     }
   ],
   "commands": [

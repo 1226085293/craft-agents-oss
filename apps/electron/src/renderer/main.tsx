@@ -36,6 +36,20 @@ if (resolvedLanguage) {
   void window.electronAPI?.changeLanguage?.(resolvedLanguage)
 }
 
+// Another window (Appearance lives in the settings window) can change the
+// language while this one is already open. Adopt it here: i18next re-renders
+// every `t()` consumer, and the localStorage write keeps the next reload on the
+// same language.
+window.electronAPI?.onLanguageChanged?.((lang) => {
+  if (!lang || i18n.resolvedLanguage === lang) return
+  void i18n.changeLanguage(lang)
+  try {
+    window.localStorage.setItem('i18nextLng', lang)
+  } catch {
+    // A locked-down localStorage is not a reason to keep the old language.
+  }
+})
+
 // Known-harmless console messages that should NOT be sent to Sentry.
 // These are dev-mode noise or expected warnings that aren't actionable.
 const IGNORED_CONSOLE_PATTERNS = [

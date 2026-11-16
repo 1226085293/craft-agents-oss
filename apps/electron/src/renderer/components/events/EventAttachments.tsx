@@ -12,6 +12,7 @@
  */
 
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import { ChevronDown, ChevronRight, ExternalLink, Paperclip } from 'lucide-react'
 import {
   classifyFile,
@@ -34,13 +35,23 @@ const ICON_TYPE: Record<FilePreviewType, AttachmentType> = {
   text: 'text',
 }
 
-const PREVIEW_LABEL: Record<FilePreviewType, string> = {
-  image: '图片',
-  pdf: 'PDF',
-  code: '代码',
-  markdown: 'Markdown',
-  json: 'JSON',
-  text: '文本',
+/** Label per preview type. Takes `t` because this is module scope, not a hook. */
+function previewLabel(type: FilePreviewType, t: (key: string) => string): string {
+  switch (type) {
+    case 'image':
+      return t('events.attachments.image')
+    case 'code':
+      return t('events.attachments.code')
+    case 'text':
+      return t('events.attachments.text')
+    // These read the same in every language.
+    case 'pdf':
+      return 'PDF'
+    case 'markdown':
+      return 'Markdown'
+    default:
+      return 'JSON'
+  }
 }
 
 /** Read mode each preview type needs from the main process. */
@@ -78,6 +89,7 @@ export function EventAttachments({
   attachments,
   theme = 'dark',
 }: EventAttachmentsProps): React.ReactElement | null {
+  const { t } = useTranslation()
   const [expanded, setExpanded] = React.useState<number | null>(null)
   const [content, setContent] = React.useState<Record<number, EventAttachmentContentDto | { error: string }>>({})
   const [loading, setLoading] = React.useState<number | null>(null)
@@ -134,7 +146,7 @@ export function EventAttachments({
     <div className="mt-6">
       <div className="flex items-center gap-2 mb-2">
         <Paperclip className="h-4 w-4 text-muted-foreground" />
-        <span className="text-[13px] font-medium text-foreground">附件</span>
+        <span className="text-[13px] font-medium text-foreground">{t('events.attachments.title')}</span>
         <span className="text-[12px] text-muted-foreground">{items.length}</span>
       </div>
 
@@ -144,7 +156,7 @@ export function EventAttachments({
           const iconType = preview ? ICON_TYPE[preview] : 'unknown'
           const isOpen = expanded === index
           const item = content[index]
-          const kind = preview ? PREVIEW_LABEL[preview] : getFileTypeLabel(iconType, attachment.mime, attachment.name)
+          const kind = preview ? previewLabel(preview, t) : getFileTypeLabel(iconType, attachment.mime, attachment.name)
 
           return (
             <div key={`${attachment.path}-${index}`} className="bg-muted/20">
@@ -159,7 +171,7 @@ export function EventAttachments({
                   <span className="block text-[12px] text-muted-foreground mt-0.5">
                     {kind}
                     {attachment.size ? ` · ${formatSize(attachment.size)}` : ''}
-                    {!preview ? ' · 无法内联预览' : ''}
+                    {!preview ? ` · ${t('events.attachments.inlineUnavailable')}` : ''}
                   </span>
                 </span>
                 {preview ? (
@@ -175,10 +187,10 @@ export function EventAttachments({
 
               {isOpen && (
                 <div className="px-3 pb-3">
-                  {loading === index && <p className="text-[12.5px] text-muted-foreground">正在读取…</p>}
+                  {loading === index && <p className="text-[12.5px] text-muted-foreground">{t('events.attachments.reading')}</p>}
 
                   {item && 'error' in item && (
-                    <p className="text-[12.5px] text-destructive">读取失败：{item.error}</p>
+                    <p className="text-[12.5px] text-destructive">{t('events.attachments.readFailed', { error: item.error })}</p>
                   )}
 
                   {item && !('error' in item) && item.kind === 'unsupported' && (
@@ -191,7 +203,7 @@ export function EventAttachments({
                           className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-[12px] hover:bg-foreground/[0.06] transition-colors"
                         >
                           <ExternalLink className="h-3.5 w-3.5" />
-                          用默认程序打开
+                          {t('events.attachments.openWithDefault')}
                         </button>
                       )}
                     </div>
@@ -212,7 +224,7 @@ export function EventAttachments({
                       </pre>
                       {item.truncated && (
                         <p className="mt-1 text-[11.5px] text-muted-foreground">
-                          内容较长，仅显示前 2 MB；完整内容请用默认程序打开。
+                          {t('events.attachments.truncated')}
                         </p>
                       )}
                     </>

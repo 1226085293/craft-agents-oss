@@ -43,6 +43,46 @@
           "text"
         ]
       }
+    },
+    {
+      "name": "auth_start",
+      "description": "发起（或重新发起）微信扫码授权：生成新二维码。插件详情页面的扫码区会自动展示它；agent 调用后应提示用户到插件页面扫码完成授权。",
+      "input": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "auth_state",
+      "description": "查询微信扫码授权进度。message 是 JSON：{ phase: idle|awaiting|scanned|need_code|connected|expired|failed, qr?, detail?, error?, credentials? }。qr 为可扫码的链接。",
+      "input": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "auth_submit",
+      "description": "提交手机微信屏幕上显示的验证码数字（授权处于 need_code 阶段时使用）。",
+      "input": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "手机上显示的验证码数字"
+          }
+        },
+        "required": [
+          "code"
+        ]
+      }
+    },
+    {
+      "name": "auth_cancel",
+      "description": "取消当前微信扫码授权尝试。",
+      "input": {
+        "type": "object",
+        "properties": {}
+      }
     }
   ],
   "config": {
@@ -50,9 +90,12 @@
     "properties": {}
   },
   "icon": "messages-square",
+  "ui": {
+    "page": "ui/index.html"
+  },
   "setup": [
     {
-      "text": "在插件右上角点「连接」后扫码授权（社区版微信 ClawBot）。扫码过程中的验证码也在那里输入。"
+      "text": "打开微信插件详情页，在内容区点「开始授权」，用手机微信扫码完成配对；若平台要求验证码，把手机上显示的数字输入到页面里。"
     }
   ],
   "commands": [

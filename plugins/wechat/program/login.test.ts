@@ -95,6 +95,20 @@ describe('WeChatQrLogin', () => {
     await login.cancel()
   })
 
+  it('start() during a live attempt hands back the same QR instead of restarting', async () => {
+    const login = new WeChatQrLogin()
+    const first = await login.start()
+    expect(first.phase).toBe('awaiting')
+
+    // The page's 开始授权 can be clicked twice; that used to throw the on-screen
+    // code away and fetch a new one mid-scan.
+    const second = await login.start()
+    expect(second.phase).toBe('awaiting')
+    expect(second.qr).toBe(first.qr)
+    expect(second.attempt).toBe(first.attempt)
+    await login.cancel()
+  })
+
   it('reports a failed attempt when the platform will not issue a code', async () => {
     qrShouldFail = true
     const login = new WeChatQrLogin()

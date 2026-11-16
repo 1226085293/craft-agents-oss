@@ -1,12 +1,16 @@
 {
   "apiType": "Unofficial Web API",
+  "config.pairingMode.description": "Pairing method: qr (QR code, default) or code (phone-number pairing code)",
   "connected": "Connected to WhatsApp",
   "connecting": "Starting WhatsApp service…",
   "desktopApprovalsOnly": "Approvals happen in the desktop app",
   "disable": "Disable",
   "disconnected": "WhatsApp disconnected",
   "forget": "Disconnect",
+  "name": "WhatsApp",
+  "pluginDescription": "WhatsApp Business conversations.",
   "reconnect": "Reconnect",
+  "setup.0": "Open the WhatsApp plugin page and click “Start authorization” in the Content area, then scan the code with WhatsApp on your phone to finish pairing.",
   "title": "WhatsApp",
   "unofficialApiShort": "Uses an unofficial API — use at your own risk"
 }

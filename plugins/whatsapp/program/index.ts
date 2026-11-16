@@ -8,7 +8,9 @@
  *   (b) Baileys can run under Node even when the host runtime is Bun,
  *   (c) memory isolation: auth state, signal ratchets, etc.
  *
- * The worker contract is defined in @craft-agent/messaging-whatsapp-worker.
+ * The worker contract lives in ./protocol.ts — a vendored copy of the
+ * worker's IPC protocol, because an installed plugin copy runs in the user's
+ * workspace where no @craft-agent package is resolvable.
  * This adapter owns the process lifecycle + translates events to the
  * PlatformAdapter interface.
  *
@@ -18,14 +20,14 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { Buffer } from 'node:buffer'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   encodeMessage,
   parseFrames,
   type WorkerCommand,
   type WorkerEvent,
-} from '@craft-agent/messaging-whatsapp-worker'
+} from './protocol.ts'
 import type {
   PlatformAdapter,
   PlatformConfig,
@@ -57,6 +59,55 @@ const NOOP_LOGGER: MessagingLogger = {
  * Tests pass a much smaller value via `WhatsAppConfig.sendTimeoutMs`.
  */
 const DEFAULT_SEND_TIMEOUT_MS = 30_000
+
+/**
+ * Kill worker processes left behind by a previous plugin process.
+ *
+ * The host stops a plugin with a hard kill, so `destroy()` — the only place
+ * that would have waited for the worker to exit — never runs. The orphan keeps
+ * the Baileys session alive and reconnects, so a fresh worker takes tens of
+ * seconds to produce a QR, or never does. Matching on the worker's own entry
+ * path is precise: only this plugin spawns that file.
+ *
+ * Best effort and synchronous-by-timeout: pairing must not be delayed by a
+ * hostile process table, so failures are logged and ignored.
+ */
+function reapStaleWorkers(workerEntry: string, log: MessagingLogger): void {
+  if (process.platform !== 'win32') return
+  try {
+    // Escaping the path for a single-quoted PowerShell literal: only `'` matters.
+    const target = workerEntry.replace(/'/g, "''")
+    // Only ever kill a process that is the worker binary itself: a shell whose
+    // command line merely mentions the path (a log grep, an editor) must not
+    // match.
+    const script = [
+      `$me = ${process.pid}`,
+      `$needle = '${target}'`,
+      `$runtimes = @('node.exe', 'bun.exe', 'electron.exe')`,
+      `Get-CimInstance Win32_Process |`,
+      `  Where-Object { $runtimes -contains $_.Name -and $_.ProcessId -ne $me -and $_.ParentProcessId -ne $me -and $_.CommandLine -and $_.CommandLine.Contains($needle) } |`,
+      `  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $_.ProcessId }`,
+    ].join('\n')
+    const result = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    })
+    let killed = ''
+    result.stdout?.setEncoding('utf8')
+    result.stdout?.on('data', (chunk: string) => {
+      killed += chunk
+    })
+    result.on('error', () => undefined)
+    result.on('exit', () => {
+      const ids = killed.split(/\s+/).filter(Boolean)
+      if (ids.length > 0) {
+        log.warn('reaped stale WhatsApp workers', { event: 'whatsapp_stale_workers_reaped', pids: ids })
+      }
+    })
+  } catch {
+    // A failed sweep is not a reason to refuse to start.
+  }
+}
 
 function inferMimeType(filename: string): string | undefined {
   const lower = filename.toLowerCase()
@@ -180,6 +231,14 @@ export class WhatsAppAdapter implements PlatformAdapter {
       nodeBin,
     })
 
+    // Reap workers left behind by a previous plugin process. The host stops a
+    // listener with a hard kill on Windows, so the SIGTERM path that would
+    // have called destroy() never runs and the child survives, holding the same
+    // WhatsApp session: the next worker then waits tens of seconds for a QR
+    // while the stale one keeps reconnecting. Sweeping by the worker's own
+    // entry path is safe — only this plugin spawns that file.
+    reapStaleWorkers(cfg.workerEntry, this.log)
+
     this.proc = spawn(nodeBin, [cfg.workerEntry], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
@@ -268,6 +327,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
     this.proc = null
     this.started = false
     this.connected = false
+  }
+
+  /** Whether the worker process is currently running (before it connects). */
+  get running(): boolean {
+    return this.proc !== null
   }
 
   isConnected(): boolean {
@@ -560,8 +624,22 @@ export class WhatsAppAdapter implements PlatformAdapter {
  * with defaults derived from the plugin's own data dir, so a fresh install can
  * pair without the person editing JSON first.
  */
+let mainAdapterRef: WhatsAppAdapter | null = null
+
+/**
+ * The newest QR the main worker has emitted, kept so a page opened AFTER the
+ * worker already showed a code can still pick it up: Baileys re-emits on
+ * expiry, and the main worker runs the whole time the plugin process lives.
+ */
+let latestMainQr: { qr: string; at: number } | null = null
+
 export function createAdapter(options?: Record<string, unknown>): WhatsAppAdapter {
-  return withInjectedConfig(new WhatsAppAdapter(), options)
+  const adapter = withInjectedConfig(new WhatsAppAdapter(), options)
+  mainAdapterRef = adapter
+  adapter.onEvent((event) => {
+    if (event.type === 'qr') latestMainQr = { qr: event.qr, at: Date.now() }
+  })
+  return adapter
 }
 
 /**
@@ -659,7 +737,10 @@ function defaultWorkerEntry(): string | undefined {
  * WhatsApp pairing is driven by the worker inside the adapter: it emits `qr`
  * while pairing and `connected` once the phone confirms. This keeps the latest
  * one so Craft can ask at any time instead of having caught the event, because
- * the adapter may emit the QR before the UI has opened its dialog.
+ * the adapter may emit the QR before the UI has opened its dialog. When the
+ * process's main adapter exists (it does in serve.ts), sign-in drives THAT one
+ * instead of a second worker, so there is never a competing socket on the
+ * same auth-state dir.
  */
 export function createAuth(options?: Record<string, unknown>): WhatsAppAuth {
   const resolved = resolveWhatsAppConfig(options)
@@ -667,6 +748,7 @@ export function createAuth(options?: Record<string, unknown>): WhatsAppAuth {
     () => new WhatsAppAdapter(),
     resolved,
     (event, extra) => console.log(JSON.stringify({ event, ...(extra ?? {}) })),
+    mainAdapterRef,
   )
 }
 
@@ -688,6 +770,9 @@ export class WhatsAppAuth {
 
   private adapter: WhatsAppAdapter | null = null
 
+  /** False when the sign-in flow drives the process's main adapter. */
+  private ownsAdapter = true
+
   private unsubscribe: (() => void) | null = null
 
   private attempt = 0
@@ -696,6 +781,11 @@ export class WhatsAppAuth {
     private readonly makeAdapter: () => WhatsAppAdapter,
     private readonly adapterConfig: Record<string, unknown>,
     private readonly log: (event: string, extra?: Record<string, unknown>) => void = () => {},
+    /**
+     * The process's main adapter. Sign-in drives it when present instead of
+     * opening a second worker for the same auth-state dir.
+     */
+    private readonly preferred?: WhatsAppAdapter | null,
   ) {}
 
   state(): WeChatLikeState {
@@ -703,13 +793,48 @@ export class WhatsAppAuth {
   }
 
   async start(): Promise<WeChatLikeState> {
+    // A live attempt already holds a QR (or is past the scan): return it as-is.
+    // Resetting the snapshot here used to drop that QR and then sit in
+    // waitForFirstSignal() until it timed out — Baileys only emits the next
+    // code on rotation — so a second click on 开始授权 surfaced as a false
+    // “授权失败” while the pairing was still running.
+    if (
+      this.adapter &&
+      (this.snapshot.phase === 'awaiting' || this.snapshot.phase === 'scanned' || this.snapshot.phase === 'need_code')
+    ) {
+      return this.snapshot
+    }
+
     this.attempt += 1
     this.snapshot = { phase: 'awaiting', attempt: this.attempt, detail: '正在启动 WhatsApp 配对…' }
 
     // Reuse a live adapter if one is already pairing; starting a second would
     // open a second socket for the same account.
     if (!this.adapter) {
-      const adapter = this.makeAdapter()
+      let chosen: WhatsAppAdapter | null = null
+      let owns = true
+      if (this.preferred) {
+        if (this.preferred.running) {
+          // The main worker is alive (pairing or about to connect): drive it.
+          chosen = this.preferred
+          owns = false
+        } else {
+          // The main worker died or never started: start it in place. Only a
+          // broken start falls back to a dedicated worker.
+          try {
+            await this.preferred.initialize(this.adapterConfig as PlatformConfig)
+            chosen = this.preferred
+            owns = false
+          } catch (error) {
+            if (error instanceof Error && /already initialized/i.test(error.message)) {
+              chosen = this.preferred
+              owns = false
+            }
+          }
+        }
+      }
+      const adapter = chosen ?? this.makeAdapter()
+      this.ownsAdapter = owns
       this.unsubscribe = adapter.onEvent((event) => {
         switch (event.type) {
           case 'qr':
@@ -782,12 +907,18 @@ export class WhatsAppAuth {
     try {
       await this.adapter.initialize(this.adapterConfig as PlatformConfig)
     } catch (error) {
-      this.snapshot = {
-        phase: 'failed',
-        attempt: this.attempt,
-        error: error instanceof Error ? error.message : String(error),
+      // "already initialized" means the chosen worker is already up and
+      // pairing — keep going instead of reporting a failure.
+      if (error instanceof Error && /already initialized/i.test(error.message)) {
+        // fall through
+      } else {
+        this.snapshot = {
+          phase: 'failed',
+          attempt: this.attempt,
+          error: error instanceof Error ? error.message : String(error),
+        }
+        return this.snapshot
       }
-      return this.snapshot
     }
 
     // initialize() only starts the worker; the QR (or a crash) arrives on an
@@ -833,19 +964,30 @@ export class WhatsAppAuth {
   async cancel(): Promise<WeChatLikeState> {
     this.unsubscribe?.()
     this.unsubscribe = null
-    try {
-      await this.adapter?.destroy()
-    } catch {
-      // Destroying a half-started adapter is best-effort.
+    if (this.ownsAdapter && this.adapter) {
+      try {
+        await this.adapter.destroy()
+      } catch {
+        // Destroying a half-started adapter is best-effort.
+      }
+      this.adapter = null
     }
-    this.adapter = null
+    // The main adapter (when the flow reused it) stays alive: its worker keeps
+    // pairing in the background, so re-opening the page picks the same QR up
+    // instead of forcing a fresh attempt.
     this.snapshot = { phase: 'idle', attempt: this.attempt }
     return this.snapshot
   }
 }
 
-/** How long `start()` waits for the worker's first QR / failure signal. */
-const FIRST_SIGNAL_TIMEOUT_MS = 12_000
+/**
+ * How long `start()` waits for the worker's first QR / failure signal.
+ *
+ * Must stay well under the host relay's own 10 s ceiling
+ * (callPluginAction in server-core): when this wait outlived it, the page got
+ * an abortive timeout and showed “授权失败” while the pairing was still running.
+ */
+const FIRST_SIGNAL_TIMEOUT_MS = 6_000
 
 /** One snapshot shape, shared with the WeChat provider. */
 interface WeChatLikeState {
@@ -857,4 +999,92 @@ interface WeChatLikeState {
   error?: string
   attempt?: number
   credentials?: Record<string, unknown>
+}
+
+// ---------------------------------------------------------------------------
+// Sign-in surface for the plugin's own page (and host relays)
+// ---------------------------------------------------------------------------
+
+/**
+ * The auth options this process was started with, read from the same env the
+ * host gave serve.ts. Keeps the sign-in flow self-contained in this module.
+ */
+function readAuthOptions(): Record<string, unknown> {
+  const configPath = process.env.CRAFT_LISTENER_CONFIG
+  let config: Record<string, unknown> = {}
+  if (configPath) {
+    try {
+      config = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+    } catch {
+      // A missing or unreadable config is the just-installed state.
+    }
+  }
+  return { config, dataDir: process.env.CRAFT_LISTENER_DATA ?? '' }
+}
+
+let authSingleton: WhatsAppAuth | null = null
+
+function getAuth(): WhatsAppAuth {
+  if (!authSingleton) authSingleton = createAuth(readAuthOptions())
+  return authSingleton
+}
+
+/**
+ * Plugin-side action handler. Auth actions move the sign-in state machine and
+ * answer with its full state as JSON in `message`; send actions go through the
+ * main adapter. Anything else is an honest refusal.
+ */
+export function performAction(
+  action: string,
+  args: Record<string, unknown>,
+): Promise<{ ok: boolean; message?: string }> {
+  switch (action) {
+    case 'auth_start':
+      return getAuth()
+        .start()
+        .then((st) => ({ ok: true, message: JSON.stringify(st) }))
+    case 'auth_state': {
+      // The running main worker is the source of truth first: it may be
+      // connected, or holding a QR the page hasn't been shown yet.
+      if (mainAdapterRef?.isConnected()) {
+        return Promise.resolve({ ok: true, message: JSON.stringify({ phase: 'connected', detail: '已连接' }) })
+      }
+      const st = getAuth().state()
+      if (st.phase === 'idle' && latestMainQr && Date.now() - latestMainQr.at < 90_000) {
+        return Promise.resolve({
+          ok: true,
+          message: JSON.stringify({
+            phase: 'awaiting',
+            qr: latestMainQr.qr,
+            detail: '请用手机 WhatsApp 扫描二维码配对',
+          }),
+        })
+      }
+      return Promise.resolve({ ok: true, message: JSON.stringify(st) })
+    }
+    case 'auth_submit':
+      return getAuth()
+        .submit(typeof args.code === 'string' ? args.code : '')
+        .then((st) => ({ ok: true, message: JSON.stringify(st) }))
+    case 'auth_cancel':
+      return getAuth()
+        .cancel()
+        .then((st) => ({ ok: true, message: JSON.stringify(st) }))
+    case 'send_message':
+    case 'reply':
+      return Promise.resolve().then(async () => {
+        const text = typeof args.text === 'string' ? args.text.trim() : ''
+        const channelId = typeof args.channelId === 'string' ? args.channelId : ''
+        if (!text || !channelId) return { ok: false, message: 'text 与 channelId 必填' }
+        if (!mainAdapterRef) return { ok: false, message: '适配器未就绪' }
+        try {
+          await mainAdapterRef.sendText(channelId, text)
+          return { ok: true, message: `已发送到 ${channelId}` }
+        } catch (err) {
+          return { ok: false, message: err instanceof Error ? err.message : String(err) }
+        }
+      })
+    default:
+      return Promise.resolve({ ok: false, message: `插件不支持动作 ${action}` })
+  }
 }

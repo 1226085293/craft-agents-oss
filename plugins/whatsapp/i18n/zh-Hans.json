@@ -1,12 +1,16 @@
 {
   "apiType": "非官方 Web API",
+  "config.pairingMode.description": "配对方式：qr（二维码，默认）或 code（手机号码配对码）",
   "connected": "已连接到 WhatsApp",
   "connecting": "正在启动 WhatsApp 服务…",
   "desktopApprovalsOnly": "审批在桌面应用中进行",
   "disable": "Disable",
   "disconnected": "WhatsApp 已断开连接",
   "forget": "Disconnect",
+  "name": "WhatsApp",
+  "pluginDescription": "WhatsApp Business 会话。",
   "reconnect": "Reconnect",
+  "setup.0": "打开 WhatsApp 插件详情页，在内容区点「开始授权」，用手机 WhatsApp 扫描二维码完成配对。",
   "title": "WhatsApp",
   "unofficialApiShort": "使用非官方 API — 风险自负"
 }

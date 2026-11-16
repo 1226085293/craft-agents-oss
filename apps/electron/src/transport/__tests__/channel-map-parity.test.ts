@@ -28,6 +28,7 @@ type ApiToChannelMapKeys = Exclude<
   | 'transferSessionToWorkspace' // direct IPC to main process — orchestrated remote transfer
   | 'onTransferProgress' // direct IPC listener — chunk upload progress
   | 'changeLanguage' // direct IPC to main process — syncs i18n language
+  | 'onLanguageChanged' // direct IPC listener — main process broadcasts another window's switch
   | 'getFilePath' // renderer-local — webUtils.getPathForFile, no IPC round-trip
 > | BrowserPaneKeys
   | PageWindowKeys

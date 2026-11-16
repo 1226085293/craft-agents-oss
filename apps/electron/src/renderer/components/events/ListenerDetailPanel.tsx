@@ -17,7 +17,7 @@
  *      · 依赖 — one region, two sources: what Craft probed from the manifest
  *        (with install actions) and what the plugin reports through its own
  *        control service. Detection logic untouched, layout only.
- *      · 内容 / 接收地址 — setup steps and the ingest endpoint
+ *      · 内容 — setup steps and the plugin's own page
  *   4. 进程日志 tab — live log tail + process state (polled, probe-free)
  *
  * The status light is the detail page's reading (the plugin list draws none),
@@ -25,6 +25,7 @@
  */
 
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   AlertTriangle,
   Check,
@@ -32,6 +33,8 @@ import {
   ChevronRight,
   Copy,
   Download,
+  Eye,
+  EyeOff,
   FileText,
   Play,
   RefreshCw,
@@ -96,7 +99,65 @@ function Section({
   )
 }
 
+/**
+ * Text input for plugin config fields; when the schema marks the field
+ * `secret`, it renders as a password box with an eye toggle at the right edge
+ * (inside the field) to reveal/hide the plaintext — same interaction as the
+ * credential request cards. Plain fields keep the ordinary text input.
+ */
+function SecretInput({
+  id,
+  value,
+  onChange,
+  placeholder,
+  secret,
+}: {
+  id: string
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+  secret?: boolean
+}): React.ReactElement {
+  const [revealed, setRevealed] = React.useState(false)
+  const shared = 'h-8 min-w-0 flex-1 rounded-md border border-transparent bg-muted/50 px-2.5 font-mono text-[13px] focus:border-border focus:outline-none'
+  if (!secret) {
+    return (
+      <input
+        id={id}
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className={shared}
+      />
+    )
+  }
+  return (
+    <div className="relative flex min-w-0 flex-1">
+      <input
+        id={id}
+        type={revealed ? 'text' : 'password'}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        autoComplete="new-password"
+        className={`${shared} pr-9`}
+      />
+      <button
+        type="button"
+        onClick={() => setRevealed((prev) => !prev)}
+        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+        tabIndex={-1}
+        aria-label={revealed ? 'Hide value' : 'Show value'}
+      >
+        {revealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
+  )
+}
+
 function CopyButton({ value, label }: { value: string; label: string }): React.ReactElement {
+  const { t } = useTranslation()
   const [copied, setCopied] = React.useState(false)
   return (
     <button
@@ -110,7 +171,7 @@ function CopyButton({ value, label }: { value: string; label: string }): React.R
       className="h-8 shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:text-foreground"
     >
       {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-      {copied ? '已复制' : label}
+      {copied ? t('events.common.copied') : label}
     </button>
   )
 }
@@ -128,6 +189,7 @@ function DependencyRow({
   installing: boolean
   installingMcp: boolean
 }): React.ReactElement {
+  const { t } = useTranslation()
   const ok = dep.state === 'ok'
   const informational = dep.state === 'not_required'
 
@@ -140,11 +202,15 @@ function DependencyRow({
         {dep.requirement}
       </span>
       <span className={`flex-1 min-w-0 truncate ${ok ? 'text-primary' : informational ? 'text-muted-foreground' : 'text-destructive'}`}>
-        {ok && `✅ 已安装${dep.found ? ` ${dep.found}` : ''}`}
-        {dep.state === 'missing' && '❌ 未安装'}
-        {dep.state === 'mismatch' && `⚠️ 版本不满足${dep.found ? `（当前 ${dep.found}）` : ''}`}
-        {dep.state === 'unknown' && '⚠️ 无法检测'}
-        {informational && '➖ 已配置'}
+        {ok && (dep.found
+          ? t('events.listener.depInstalledVersion', { version: dep.found })
+          : t('events.listener.depInstalled'))}
+        {dep.state === 'missing' && t('events.listener.depMissing')}
+        {dep.state === 'mismatch' && (dep.found
+          ? t('events.listener.depMismatchCurrent', { version: dep.found })
+          : t('events.listener.depMismatch'))}
+        {dep.state === 'unknown' && t('events.listener.depUnknown')}
+        {informational && t('events.listener.depConfigured')}
       </span>
       {dep.kind === 'mcp' && dep.state === 'missing' && (
         <button
@@ -154,7 +220,7 @@ function DependencyRow({
           className="h-7 shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 text-[12.5px] hover:bg-accent disabled:opacity-50"
         >
           <Download className="h-3 w-3" />
-          {installingMcp ? '安装中…' : '安装'}
+          {installingMcp ? t('events.listener.installing') : t('events.listener.install')}
         </button>
       )}
       {dep.kind === 'package' && dep.installHint && (dep.state === 'missing' || dep.state === 'mismatch') && (
@@ -165,7 +231,7 @@ function DependencyRow({
           className="h-7 shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 text-[12.5px] hover:bg-accent disabled:opacity-50"
         >
           <Download className="h-3 w-3" />
-          {installing ? '安装中…' : '安装'}
+          {installing ? t('events.listener.installing') : t('events.listener.install')}
         </button>
       )}
     </div>
@@ -187,6 +253,7 @@ function ReportedDepsBody({
   listenerId: string
   initial: ListenerReportedDepsDto
 }): React.ReactElement {
+  const { t } = useTranslation()
   const [state, setState] = React.useState<ListenerReportedDepsDto>(initial)
   const [busyId, setBusyId] = React.useState<string | null>(null)
   const [refreshing, setRefreshing] = React.useState(false)
@@ -229,9 +296,9 @@ function ReportedDepsBody({
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-1.5">
-        <span className="text-[12.5px] font-medium text-foreground/70">插件上报</span>
+        <span className="text-[12.5px] font-medium text-foreground/70">{t('events.listener.reported')}</span>
         {state.control === false && state.reason && (
-          <span className="truncate text-[12.5px] text-muted-foreground">未提供（{state.reason}）</span>
+          <span className="truncate text-[12.5px] text-muted-foreground">{t('events.listener.reportedNone', { reason: state.reason })}</span>
         )}
         <button
           type="button"
@@ -241,7 +308,7 @@ function ReportedDepsBody({
             void refresh().finally(() => setRefreshing(false))
           }}
           className="ml-auto h-7 w-7 inline-flex items-center justify-center rounded-md border border-border text-muted-foreground hover:text-foreground disabled:opacity-50"
-          title="刷新"
+          title={t('events.listener.refresh')}
         >
           <RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />
         </button>
@@ -255,10 +322,12 @@ function ReportedDepsBody({
               </span>
               <span className={`flex-1 min-w-0 truncate ${dep.installed ? 'text-primary' : 'text-destructive'}`}>
                 {dep.installed
-                  ? `✅ 已安装${dep.version ? ` ${dep.version}` : ''}`
+                  ? (dep.version
+                      ? t('events.listener.depInstalledVersion', { version: dep.version })
+                      : t('events.listener.depInstalled'))
                   : dep.error
                     ? `❌ ${dep.error}`
-                    : '❌ 未安装'}
+                    : t('events.listener.depMissing')}
                 {dep.detail && <span className="text-muted-foreground"> · {dep.detail}</span>}
               </span>
               {dep.action && (
@@ -268,7 +337,7 @@ function ReportedDepsBody({
                   onClick={() => void trigger(dep)}
                   className="h-7 shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 text-[12.5px] hover:bg-accent disabled:opacity-50"
                 >
-                  {dep.action.running === true || busyId === dep.id ? '执行中…' : dep.action.label}
+                  {dep.action.running === true || busyId === dep.id ? t('events.listener.depRunning') : dep.action.label}
                 </button>
               )}
             </div>
@@ -276,10 +345,10 @@ function ReportedDepsBody({
         </div>
       )}
       {deps && deps.length === 0 && (
-        <p className="text-[12.5px] text-muted-foreground">插件未报告任何依赖。</p>
+        <p className="text-[12.5px] text-muted-foreground">{t('events.listener.depsNone')}</p>
       )}
       {state.control === false && !state.reason && (
-        <p className="text-[12.5px] text-muted-foreground">该插件未提供依赖状态服务。</p>
+        <p className="text-[12.5px] text-muted-foreground">{t('events.listener.depsNoService')}</p>
       )}
     </div>
   )
@@ -290,6 +359,7 @@ export function ListenerDetailPanel({
   listenerId,
   className,
 }: ListenerDetailPanelProps): React.ReactElement {
+  const { t, i18n } = useTranslation()
   const { isDark } = useTheme()
 
   const [listener, setListener] = React.useState<ListenerDto | null>(null)
@@ -342,7 +412,7 @@ export function ListenerDetailPanel({
   const load = React.useCallback(async () => {
     setError(null)
     try {
-      const result = await window.electronAPI.getEventListener(workspaceId, listenerId)
+      const result = await window.electronAPI.getEventListener(workspaceId, listenerId, i18n.resolvedLanguage ?? i18n.language)
       setListener(result)
       if (result) {
         // Seed the form from saved config, falling back to manifest
@@ -364,7 +434,7 @@ export function ListenerDetailPanel({
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
-  }, [workspaceId, listenerId])
+  }, [workspaceId, listenerId, i18n.resolvedLanguage, i18n.language])
 
   React.useEffect(() => {
     void load()
@@ -516,7 +586,7 @@ export function ListenerDetailPanel({
     return <div className={`p-4 text-sm text-destructive ${className ?? ''}`}>{error}</div>
   }
   if (!listener) {
-    return <div className={`p-4 text-sm text-muted-foreground ${className ?? ''}`}>加载中…</div>
+    return <div className={`p-4 text-sm text-muted-foreground ${className ?? ''}`}>{t('events.common.loading')}</div>
   }
 
   const schema = listener.configSchema
@@ -597,7 +667,7 @@ export function ListenerDetailPanel({
                   isRequired ? 'border-destructive/40 text-destructive' : 'border-border text-muted-foreground'
                 }`}
               >
-                {isRequired ? '必填' : '可选'}
+                {isRequired ? t('events.listener.required') : t('events.listener.optional')}
               </span>
               {prop.type === 'number' ? (
                 <input
@@ -635,19 +705,18 @@ export function ListenerDetailPanel({
                     }}
                     className="h-3.5 w-3.5 accent-[var(--primary)]"
                   />
-                  {draft[key] === true ? '开' : '关'}
+                  {draft[key] === true ? t('events.listener.on') : t('events.listener.off')}
                 </label>
               ) : (
-                <input
+                <SecretInput
                   id={`listener-config-${key}`}
-                  type={prop.secret ? 'password' : 'text'}
                   value={draft[key] === undefined || draft[key] === null ? '' : String(draft[key])}
-                  onChange={(e) => {
-                    setDraft((prev) => ({ ...prev, [key]: e.target.value }))
+                  onChange={(v) => {
+                    setDraft((prev) => ({ ...prev, [key]: v }))
                     setDirty(true)
                   }}
                   placeholder={prop.description ?? ''}
-                  className="h-8 min-w-0 flex-1 rounded-md border border-transparent bg-muted/50 px-2.5 font-mono text-[13px] focus:border-border focus:outline-none"
+                  secret={prop.secret}
                 />
               )}
             </div>
@@ -685,8 +754,8 @@ export function ListenerDetailPanel({
               {problemCount > 0 && (
                 <span className="text-[12.5px] leading-5 text-destructive">
                   {listener.errors.length > 0
-                    ? `${listener.errors.length} 个问题`
-                    : `${blocking} 项依赖未满足`}
+                    ? t('events.listener.issueCount', { count: listener.errors.length })
+                    : t('events.listener.blockingCount', { count: blocking })}
                 </span>
               )}
             </div>
@@ -702,7 +771,7 @@ export function ListenerDetailPanel({
             } disabled:opacity-40`}
           >
             {listener.enabled ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-            {listener.enabled ? '停用' : '启用'}
+            {listener.enabled ? t('events.listener.disable') : t('events.listener.enable')}
           </button>
         </div>
       </header>
@@ -713,10 +782,10 @@ export function ListenerDetailPanel({
         row and read as a segmented control for a toolbar, not as navigation between two
         readings of one object.
       */}
-      <div className="shrink-0 px-5 border-b border-border" role="tablist" aria-label="插件视图">
+      <div className="shrink-0 px-5 border-b border-border" role="tablist" aria-label={t('events.listener.views')}>
         {([
-          { id: 'details' as const, label: '详情', Icon: FileText },
-          { id: 'log' as const, label: '进程日志', Icon: ScrollText },
+          { id: 'details' as const, label: t('events.listener.tabDetails'), Icon: FileText },
+          { id: 'log' as const, label: t('events.listener.tabLog'), Icon: ScrollText },
         ]).map(({ id, label, Icon }) => (
           <button
             key={id}
@@ -764,7 +833,7 @@ export function ListenerDetailPanel({
         >
           {/* Problems lead: a broken plugin is why the page was opened. */}
           {listener.errors.length > 0 && (
-            <Section title="问题" tone="bad">
+            <Section title={t('events.listener.sectionProblems')} tone="bad">
               <ul className="space-y-2">
                 {listener.errors.map((message) => (
                   <li
@@ -788,7 +857,7 @@ export function ListenerDetailPanel({
               {listener.status.state === 'failed' && listener.startupErrorTail && (
                 <details className="mt-3">
                   <summary className="cursor-pointer select-none text-[12.5px] text-destructive">
-                    启动失败日志（尾部）
+                    {t('events.listener.startFailureLog')}
                   </summary>
                   <pre className="mt-2 max-h-52 overflow-auto rounded-[7px] bg-muted/50 p-3 font-mono text-[12px] leading-[1.65] whitespace-pre-wrap break-all">
                     {listener.startupErrorTail}
@@ -799,7 +868,7 @@ export function ListenerDetailPanel({
           )}
 
           {hasIntro && (
-            <Section title="介绍">
+            <Section title={t('events.listener.sectionAbout')}>
               <div className="space-y-3">
                 {listener.description && (
                   <p className="text-[13.5px] leading-[1.7] text-foreground/80">{listener.description}</p>
@@ -839,13 +908,13 @@ export function ListenerDetailPanel({
                   ) : (
                     <ChevronRight className="h-4 w-4" />
                   )}
-                  配置
+                  {t('events.listener.config')}
                 </button>
               }
               aside={
                 missingKeys.length > 0 ? (
                   <span className="shrink-0 rounded bg-destructive/10 px-1.5 py-0.5 text-[12px] text-destructive">
-                    {missingKeys.length} 项必填未填
+                    {t('events.listener.missingRequired', { count: missingKeys.length })}
                   </span>
                 ) : null
               }
@@ -854,7 +923,7 @@ export function ListenerDetailPanel({
                 <div className="space-y-3">
                   {nativeConfigFields}
                   {missingKeys.length > 0 && (
-                    <p className="text-[12.5px] text-destructive">还缺：{missingTitles.join('、')}</p>
+                    <p className="text-[12.5px] text-destructive">{t('events.listener.stillMissing', { titles: missingTitles.join('、') })}</p>
                   )}
                   {dirty && (
                     <div className="flex items-center gap-3">
@@ -864,10 +933,10 @@ export function ListenerDetailPanel({
                         onClick={() => void saveConfig()}
                         className="h-8 rounded-[7px] bg-primary px-3.5 text-[13px] font-medium text-primary-foreground disabled:opacity-50"
                       >
-                        保存配置
+                        {t('events.listener.saveConfig')}
                       </button>
                       {missingKeys.length > 0 && (
-                        <span className="text-[12.5px] text-destructive">先补齐必填项才能保存</span>
+                        <span className="text-[12.5px] text-destructive">{t('events.listener.fillRequiredFirst')}</span>
                       )}
                     </div>
                   )}
@@ -885,14 +954,14 @@ export function ListenerDetailPanel({
                   className="-ml-1.5 inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[14px] font-semibold text-foreground hover:text-foreground/80"
                 >
                   {depsOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                  依赖
+                  {t('events.listener.dependencies')}
                 </button>
               }
               aside={
                 listener.dependencies.length > 0 ? (
                   <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
-                    {listener.dependencies.length} 项
-                    {blocking > 0 && <span className="text-destructive"> · {blocking} 未满足</span>}
+                    {t('events.listener.depItems', { count: listener.dependencies.length })}
+                    {blocking > 0 && <span className="text-destructive">{t('events.listener.depUnmet', { count: blocking })}</span>}
                   </span>
                 ) : null
               }
@@ -902,7 +971,7 @@ export function ListenerDetailPanel({
                   {listener.dependencies.length > 0 && (
                     <div>
                       {reportedDeps.length > 0 && (
-                        <div className="mb-1.5 text-[12px] font-medium text-foreground/60">Craft 检测</div>
+                        <div className="mb-1.5 text-[12px] font-medium text-foreground/60">{t('events.listener.craftDetected')}</div>
                       )}
                       <div className="divide-y divide-border/60 rounded-[7px] border border-border/70">
                         {listener.dependencies.map((dep) => (
@@ -936,7 +1005,7 @@ export function ListenerDetailPanel({
           )}
 
           {hasContent && (
-            <Section title="内容 / 接收地址">
+            <Section title={t('events.listener.sectionContent')}>
               <div className="space-y-3">
                 {listener.setup.length > 0 && (
                   <ol className="list-decimal space-y-1.5 pl-5">
@@ -956,24 +1025,24 @@ export function ListenerDetailPanel({
                   <PluginPageFrame
                     html={uiDoc.html}
                     isDark={isDark}
+                    locale={i18n.language}
                     config={draft}
                     onAction={(action, args) => window.electronAPI.listenerPluginAction(workspaceId, listener.id, action, args)}
                   />
                 )}
                 {listener.ui && !uiDoc?.html && (
                   <p className="text-[12.5px] text-destructive">
-                    插件页面不可用（文件缺失或读取失败）。
+                    {t('events.listener.pageUnavailable')}
                   </p>
                 )}
                 <div className="flex items-center gap-2">
                   <code className="min-w-0 flex-1 truncate rounded-[7px] bg-muted/50 px-3 py-2 font-mono text-[12.5px] text-foreground/80">
                     {listener.id}
                   </code>
-                  <CopyButton value={listener.id} label="复制 id" />
+                  <CopyButton value={listener.id} label={t('events.common.copyId')} />
                 </div>
                 <p className="text-[12.5px] leading-[1.7] text-muted-foreground">
-                  启用后 Craft 会启动该插件，并把 <code className="font-mono">CRAFT_EVENTS_URL</code>/
-                  <code className="font-mono">CRAFT_EVENTS_TOKEN</code> 注入其环境变量，插件向该地址 POST 事件。
+                  {t('events.listener.enableHint')}
                 </p>
               </div>
             </Section>

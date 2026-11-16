@@ -192,21 +192,25 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
 
   // --- Listeners -----------------------------------------------------------
 
-  server.handle(RPC_CHANNELS.events.LIST_LISTENERS, async (_ctx, workspaceId: string, skipProbes?: boolean) => {
+  // `locale` is the renderer's resolved i18n language: the plugin's own
+  // `i18n/<locale>.json` renames the card in the reader's language, and the
+  // caller re-fetches when the language changes (hence a parameter rather
+  // than a server-side lookup).
+  server.handle(RPC_CHANNELS.events.LIST_LISTENERS, async (_ctx, workspaceId: string, skipProbes?: boolean, locale?: string) => {
     const workspace = requireWorkspace(workspaceId);
     const svc = await getEventService(workspaceId, workspace.rootPath, undefined);
     // The list call skips subprocess probes by default: cards render instantly
     // and the detail page pays for the probe.
-    return listListenersFor(svc, workspace.rootPath, skipProbes ?? true);
+    return listListenersFor(svc, workspace.rootPath, skipProbes ?? true, locale);
   });
 
   server.handle(
     RPC_CHANNELS.events.GET_LISTENER,
-    async (_ctx, workspaceId: string, id: string) => {
+    async (_ctx, workspaceId: string, id: string, locale?: string) => {
       if (!id) throw new Error('id is required');
       const workspace = requireWorkspace(workspaceId);
       const svc = await getEventService(workspaceId, workspace.rootPath, undefined);
-      return getListenerFor(svc, workspace.rootPath, id);
+      return getListenerFor(svc, workspace.rootPath, id, locale);
     },
   );
 

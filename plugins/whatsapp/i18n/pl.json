@@ -1,12 +1,16 @@
 {
   "apiType": "Nieoficjalne Web API",
+  "config.pairingMode.description": "Metoda parowania: qr (kod QR, domyślnie) lub code (kod parowania na numer telefonu)",
   "connected": "Połączono z WhatsApp",
   "connecting": "Starting WhatsApp service…",
   "desktopApprovalsOnly": "Zatwierdzenia odbywają się w aplikacji desktopowej",
   "disable": "Disable",
   "disconnected": "WhatsApp rozłączony",
   "forget": "Disconnect",
+  "name": "WhatsApp",
+  "pluginDescription": "Rozmowy WhatsApp Business.",
   "reconnect": "Reconnect",
+  "setup.0": "Otwórz stronę wtyczki WhatsApp i kliknij „Rozpocznij autoryzację” w sekcji Zawartość, a następnie zeskanuj kod w WhatsApp na telefonie, aby dokończyć parowanie.",
   "title": "WhatsApp",
   "unofficialApiShort": "Korzysta z nieoficjalnego API — na własne ryzyko"
 }

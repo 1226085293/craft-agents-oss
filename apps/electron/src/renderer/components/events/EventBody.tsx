@@ -11,6 +11,7 @@
  */
 
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import type { EventAttachmentDto } from '@craft-agent/shared/protocol/dto'
 
 type Segment =
@@ -63,6 +64,7 @@ export interface EventBodyProps {
 }
 
 export function EventBody({ workspaceId, eventId, body, attachments }: EventBodyProps): React.ReactElement {
+  const { t } = useTranslation()
   const inline = React.useMemo<InlineImage[]>(
     () =>
       attachments
@@ -119,14 +121,14 @@ export function EventBody({ workspaceId, eventId, body, attachments }: EventBody
         if (loaded === undefined) {
           return (
             <span key={i} className="block my-2 text-[12.5px] text-muted-foreground">
-              图片加载中…（{segment.name}）
+              {t('events.body.imageLoading', { name: segment.name })}
             </span>
           )
         }
         if (typeof loaded !== 'string') {
           return (
             <span key={i} className="block my-2 text-[12.5px] text-muted-foreground">
-              [图片无法显示：{segment.name}]
+              {t('events.body.imageFailed', { name: segment.name })}
             </span>
           )
         }

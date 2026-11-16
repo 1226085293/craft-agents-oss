@@ -127,6 +127,15 @@ export class WeChatQrLogin {
   }
 
   async start(): Promise<WeChatAuthState> {
+    // A live attempt already has a QR on screen: hand it back instead of
+    // restarting. state() reports an outlived attempt as `expired`, so a real
+    // restart still happens once the code is no longer usable — but a second
+    // click can no longer throw away a QR the person is about to scan.
+    const current = this.state()
+    if (current.phase === 'awaiting' || current.phase === 'scanned' || current.phase === 'need_code') {
+      return current
+    }
+
     this.cancelInternal()
     const generation = ++this.generation
     this.attempt += 1

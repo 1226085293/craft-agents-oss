@@ -55,7 +55,10 @@
         "secret": true,
         "default": ""
       }
-    }
+    },
+    "required": [
+      "token"
+    ]
   },
   "icon": "send",
   "commands": [

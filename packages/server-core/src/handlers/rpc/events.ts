@@ -22,14 +22,7 @@ import {
 import { loadListeners } from '../../events/listener-registry';
 import { runInstallCommand, type InstallResult } from '../../events/dependency-installer';
 import { installMcp, type McpInstallResult } from '../../events/mcp-registry';
-import { fetchReportedDeps, postDepAction } from '../../events/listener-control';
-import {
-  startPluginAuth,
-  readPluginAuth,
-  submitPluginAuthCode,
-  cancelPluginAuth,
-} from '../../events/plugin-auth';
-import { createAuthFinisher } from '../../events/plugin-auth-finish';
+import { fetchReportedDeps, postDepAction, callPluginAction } from '../../events/listener-control';
 import {
   loadSubscriptions,
   saveSubscriptions,
@@ -39,7 +32,6 @@ import {
 } from '@craft-agent/shared/events/subscriptions.ts';
 import type { EventFilter, EventMeta, EventRecord } from '@craft-agent/shared/events/event-store.ts';
 import type { EventAttachmentContentDto } from '@craft-agent/shared/protocol';
-import type { PluginAuthStateDto } from '@craft-agent/shared/protocol';
 import {
   readAttachmentContent,
   resolveAttachmentPath,
@@ -219,7 +211,7 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
   );
 
   /**
-   * The plugin's own HTML config UI. The renderer never touches the
+   * The plugin's own HTML page. The renderer never touches the
    * filesystem: the document is resolved and read here, confined to the
    * plugin directory (the manifest already validated the path shape).
    */
@@ -238,10 +230,10 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
       if (!listener) return { html: null };
       const ui = listener.manifest.ui;
       if (!ui) return { html: null };
-      if (ui.configHtml) {
+      if (ui.page) {
         // The manifest confines the path (relative, plain segments); resolve
         // is the belt-and-suspenders check before touching the filesystem.
-        const filePath = resolve(join(listener.dir, ui.configHtml));
+        const filePath = resolve(join(listener.dir, ui.page));
         const inside = filePath.startsWith(resolve(listener.dir) + sep);
         if (!inside || !existsSync(filePath)) return { html: null };
         try {
@@ -250,7 +242,7 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
           return { html: null };
         }
       }
-      return { html: ui.configHtmlInline ?? null, source: 'inline' };
+      return { html: ui.pageInline ?? null, source: 'inline' };
     },
   );
 
@@ -340,106 +332,23 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
     },
   );
 
-  // --- Plugin sign-in (QR / pairing code) ----------------------------------
-  //
-  // These four are relays. The plugin owns the platform protocol; Craft shapes
-  // the answer, broadcasts it, and — on `connected` — writes the credentials
-  // into the plugin's own config so the next start finds them in
-  // `<dataDir>/config.json`. Nothing here names a platform.
-
-  /** Broadcast one sign-in snapshot to the workspace's renderers. */
-  const pushAuthEvent = (workspaceId: string, state: PluginAuthStateDto) => {
-    pushTyped(
-      server,
-      RPC_CHANNELS.events.PLUGIN_AUTH_EVENT,
-      { to: 'workspace', workspaceId },
-      workspaceId,
-      state,
-    );
-  };
-
   /**
-   * Persist credentials the plugin handed back, then restart it.
-   *
-   * The config is merged rather than replaced: a plugin that wrote its own
-   * `token` during sign-in must not lose an unrelated field the person filled
-   * in earlier. `saveListenerConfig` restarts a running plugin with the old
-   * config as a fallback, which is exactly the transition we want — the plugin
-   * comes back up already holding the credential.
+   * The plugin's own HTML page calls home through here: one of the plugin's
+   * manifest-declared actions, relayed to its loopback control service. The
+   * host only enforces the whitelist — what the action does is the plugin's.
    */
-  const applyAuthCredentials = async (
-    workspaceId: string,
-    listenerId: string,
-    workspaceRoot: string,
-    credentials: Record<string, unknown>,
-  ): Promise<void> => {
-    const svc = await getEventService(workspaceId, workspaceRoot, undefined);
-    const current = loadListeners({ workspaceRoot, skipProbes: true }).find(
-      (entry) => entry.id === listenerId,
-    );
-    const merged = { ...(current?.config ?? {}), ...credentials };
-    await svc.saveListenerConfig(workspaceRoot, listenerId, merged);
-    pushListenerChanged(workspaceId, listenerId, 'config');
-  };
-
-  /**
-   * The shared tail of the four handlers.
-   *
-   * It must be `createAuthFinisher` and not a local copy: the ledger that keeps
-   * a repeated `connected` from writing the same credentials twice (and from
-   * broadcasting it twice) lives inside that factory. An inline tail here would
-   * leave the idempotence in the tests only — the poll and the action that
-   * started the flow both report `connected`, so the live path would merge the
-   * credentials twice and fire two `listenerChanged` pushes.
-   */
-  const finishAuth = createAuthFinisher({
-    pushAuthEvent: (workspaceId, _listenerId, state) => pushAuthEvent(workspaceId, state),
-    applyCredentials: applyAuthCredentials,
-  });
-
   server.handle(
-    RPC_CHANNELS.events.PLUGIN_AUTH_START,
-    async (_ctx, workspaceId: string, listenerId: string) => {
-      if (!listenerId) throw new Error('listenerId is required');
+    RPC_CHANNELS.events.LISTENER_PLUGIN_ACTION,
+    async (_ctx, workspaceId: string, id: string, action: string, args: Record<string, unknown>) => {
+      if (!id || !action) throw new Error('id and action are required');
       const workspace = requireWorkspace(workspaceId);
-      const dataDir = join(workspace.rootPath, 'events-data', listenerId);
-      const result = await startPluginAuth(listenerId, dataDir);
-      return finishAuth(workspaceId, listenerId, workspace.rootPath, result);
-    },
-  );
-
-  server.handle(
-    RPC_CHANNELS.events.PLUGIN_AUTH_STATE,
-    async (_ctx, workspaceId: string, listenerId: string) => {
-      if (!listenerId) throw new Error('listenerId is required');
-      const workspace = requireWorkspace(workspaceId);
-      const dataDir = join(workspace.rootPath, 'events-data', listenerId);
-      const result = await readPluginAuth(listenerId, dataDir);
-      // Reading is not inert: this poll is where a completed scan first becomes
-      // visible, so the same transition that persists credentials runs here.
-      return finishAuth(workspaceId, listenerId, workspace.rootPath, result);
-    },
-  );
-
-  server.handle(
-    RPC_CHANNELS.events.PLUGIN_AUTH_SUBMIT,
-    async (_ctx, workspaceId: string, listenerId: string, code: string) => {
-      if (!listenerId) throw new Error('listenerId is required');
-      const workspace = requireWorkspace(workspaceId);
-      const dataDir = join(workspace.rootPath, 'events-data', listenerId);
-      const result = await submitPluginAuthCode(listenerId, dataDir, code ?? '');
-      return finishAuth(workspaceId, listenerId, workspace.rootPath, result);
-    },
-  );
-
-  server.handle(
-    RPC_CHANNELS.events.PLUGIN_AUTH_CANCEL,
-    async (_ctx, workspaceId: string, listenerId: string) => {
-      if (!listenerId) throw new Error('listenerId is required');
-      const workspace = requireWorkspace(workspaceId);
-      const dataDir = join(workspace.rootPath, 'events-data', listenerId);
-      const result = await cancelPluginAuth(listenerId, dataDir);
-      return finishAuth(workspaceId, listenerId, workspace.rootPath, result);
+      const entry = loadListeners({ workspaceRoot: workspace.rootPath, skipProbes: true }).find(
+        (listener) => listener.id === id,
+      );
+      if (!entry) return { ok: false, message: `插件 ${id} 未安装` };
+      const declared = (entry.manifest.actions ?? []).find((a) => a.name === action);
+      if (!declared) return { ok: false, message: `插件 ${id} 没有声明动作 ${action}` };
+      return callPluginAction(entry.dataDir, { action, args: args ?? {} });
     },
   );
 

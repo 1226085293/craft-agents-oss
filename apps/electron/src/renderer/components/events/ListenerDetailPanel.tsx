@@ -44,16 +44,12 @@ import type {
   ListenerReportedDepDto,
   ListenerReportedDepsDto,
 } from '@craft-agent/shared/protocol/dto'
-import {
-  configSectionInitiallyOpen,
-  listenerLiveForSignIn,
-  missingRequiredConfigValues,
-} from '@craft-agent/shared/events/plugin-status'
+import { configSectionInitiallyOpen, missingRequiredConfigValues } from '@craft-agent/shared/events/plugin-status'
 import { useTheme } from '@/context/ThemeContext'
 import { PluginIcon } from './EventsListenersPanel'
 import { ListenerStatusLight } from './ListenerStatusLight'
-import { ListenerAuthButton } from './ListenerAuthDialog'
-import { PluginConfigUiFrame } from './PluginConfigUiFrame'
+import { PluginPageFrame } from './PluginPageFrame'
+import { ListenerLogView } from './ListenerLogView'
 
 export interface ListenerDetailPanelProps {
   workspaceId: string
@@ -62,27 +58,40 @@ export interface ListenerDetailPanelProps {
 }
 
 /**
- * The one section container every block uses: a title row (block title left,
- * optional aside right) over a padded body, separated by a border-b rhythm —
- * the same container across 介绍 / 配置 / 依赖 / 接收地址 so the page reads
- * as a stack of equal blocks, not ad-hoc divs.
+ * The one section container every block uses.
+ *
+ * Type scale is deliberate and shared: a 14px semibold heading over 13px body at 1.65 leading.
+ * The previous version printed headings at 12px and body at 11px, which is below the size at which
+ * Chinese text reads comfortably — the sections looked like annotations on the page rather than
+ * its structure, and that is why the layout was hard to scan no matter how it was arranged.
  */
 function Section({
   title,
   aside,
   children,
+  tone,
 }: {
   title: React.ReactNode
   aside?: React.ReactNode
   children?: React.ReactNode
+  /** `bad` tints the heading when the block is reporting a failure rather than a fact. */
+  tone?: 'bad'
 }): React.ReactElement {
   return (
     <section className="border-b border-border last:border-b-0">
-      <div className="flex items-center gap-2 px-4 pt-3 pb-2">
-        <div className="text-xs font-medium text-foreground/80 min-w-0 truncate">{title}</div>
-        {aside != null && <div className="ml-auto flex items-center gap-1.5 shrink-0 min-w-0">{aside}</div>}
+      <div className="flex items-center gap-2 px-5 pt-4 pb-2.5">
+        <div
+          className={`min-w-0 truncate text-[14px] font-semibold ${
+            tone === 'bad' ? 'text-destructive' : 'text-foreground'
+          }`}
+        >
+          {title}
+        </div>
+        {aside != null && (
+          <div className="ml-auto flex min-w-0 shrink-0 items-center gap-2">{aside}</div>
+        )}
       </div>
-      {children != null && <div className="px-4 pb-3">{children}</div>}
+      {children != null && <div className="px-5 pb-4">{children}</div>}
     </section>
   )
 }
@@ -98,7 +107,7 @@ function CopyButton({ value, label }: { value: string; label: string }): React.R
           setTimeout(() => setCopied(false), 1500)
         })
       }}
-      className="h-6 px-1.5 inline-flex items-center gap-1 text-[11px] rounded border border-border text-muted-foreground hover:text-foreground transition-colors shrink-0"
+      className="h-8 shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:text-foreground"
     >
       {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
       {copied ? '已复制' : label}
@@ -123,11 +132,11 @@ function DependencyRow({
   const informational = dep.state === 'not_required'
 
   return (
-    <div className="flex items-center gap-2 py-1 text-[11px]">
-      <span className="w-40 shrink-0 font-mono truncate" title={dep.label}>
+    <div className="flex items-center gap-2.5 px-3 py-2 text-[13px]">
+      <span className="w-44 shrink-0 truncate font-mono text-[12.5px]" title={dep.label}>
         {dep.label}
       </span>
-      <span className="w-24 shrink-0 text-muted-foreground truncate" title={dep.requirement}>
+      <span className="w-28 shrink-0 truncate text-[12.5px] text-muted-foreground" title={dep.requirement}>
         {dep.requirement}
       </span>
       <span className={`flex-1 min-w-0 truncate ${ok ? 'text-primary' : informational ? 'text-muted-foreground' : 'text-destructive'}`}>
@@ -142,7 +151,7 @@ function DependencyRow({
           type="button"
           disabled={installingMcp}
           onClick={() => onInstallMcp(dep)}
-          className="h-6 px-2 inline-flex items-center gap-1 rounded border border-border text-[11px] hover:bg-accent disabled:opacity-50 shrink-0"
+          className="h-7 shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 text-[12.5px] hover:bg-accent disabled:opacity-50"
         >
           <Download className="h-3 w-3" />
           {installingMcp ? '安装中…' : '安装'}
@@ -153,7 +162,7 @@ function DependencyRow({
           type="button"
           disabled={installing}
           onClick={() => onInstall(dep)}
-          className="h-6 px-2 inline-flex items-center gap-1 rounded border border-border text-[11px] hover:bg-accent disabled:opacity-50 shrink-0"
+          className="h-7 shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 text-[12.5px] hover:bg-accent disabled:opacity-50"
         >
           <Download className="h-3 w-3" />
           {installing ? '安装中…' : '安装'}
@@ -220,9 +229,9 @@ function ReportedDepsBody({
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-1.5">
-        <span className="text-[11px] text-foreground/70">插件上报</span>
+        <span className="text-[12.5px] font-medium text-foreground/70">插件上报</span>
         {state.control === false && state.reason && (
-          <span className="text-[11px] text-muted-foreground truncate">未提供（{state.reason}）</span>
+          <span className="truncate text-[12.5px] text-muted-foreground">未提供（{state.reason}）</span>
         )}
         <button
           type="button"
@@ -231,17 +240,17 @@ function ReportedDepsBody({
             setRefreshing(true)
             void refresh().finally(() => setRefreshing(false))
           }}
-          className="ml-auto h-5 px-1 inline-flex items-center rounded border border-border text-muted-foreground hover:text-foreground disabled:opacity-50"
+          className="ml-auto h-7 w-7 inline-flex items-center justify-center rounded-md border border-border text-muted-foreground hover:text-foreground disabled:opacity-50"
           title="刷新"
         >
           <RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />
         </button>
       </div>
       {deps && deps.length > 0 && (
-        <div className="divide-y divide-border/50">
+        <div className="divide-y divide-border/60 rounded-[7px] border border-border/70">
           {deps.map((dep) => (
-            <div key={dep.id} className="flex items-center gap-2 py-1 text-[11px]">
-              <span className="w-40 shrink-0 font-mono truncate" title={dep.name}>
+            <div key={dep.id} className="flex items-center gap-2.5 px-3 py-2 text-[13px]">
+              <span className="w-44 shrink-0 truncate font-mono text-[12.5px]" title={dep.name}>
                 {dep.name}
               </span>
               <span className={`flex-1 min-w-0 truncate ${dep.installed ? 'text-primary' : 'text-destructive'}`}>
@@ -257,7 +266,7 @@ function ReportedDepsBody({
                   type="button"
                   disabled={Boolean(busyId) || dep.action.running === true}
                   onClick={() => void trigger(dep)}
-                  className="h-6 px-2 inline-flex items-center gap-1 rounded border border-border text-[11px] hover:bg-accent disabled:opacity-50 shrink-0"
+                  className="h-7 shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 text-[12.5px] hover:bg-accent disabled:opacity-50"
                 >
                   {dep.action.running === true || busyId === dep.id ? '执行中…' : dep.action.label}
                 </button>
@@ -267,10 +276,10 @@ function ReportedDepsBody({
         </div>
       )}
       {deps && deps.length === 0 && (
-        <p className="text-[11px] text-muted-foreground">插件未报告任何依赖。</p>
+        <p className="text-[12.5px] text-muted-foreground">插件未报告任何依赖。</p>
       )}
       {state.control === false && !state.reason && (
-        <p className="text-[11px] text-muted-foreground">该插件未提供依赖状态服务。</p>
+        <p className="text-[12.5px] text-muted-foreground">该插件未提供依赖状态服务。</p>
       )}
     </div>
   )
@@ -300,7 +309,7 @@ export function ListenerDetailPanel({
     details: null,
     log: null,
   })
-  const onTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+  const onTabKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     const order: Array<'details' | 'log'> = ['details', 'log']
     const index = order.indexOf(tab)
     let next: 'details' | 'log' | null = null
@@ -428,9 +437,12 @@ export function ListenerDetailPanel({
   React.useEffect(() => {
     if (!onLogTab) return
     void pollLog()
+    // 1.5s rather than 3s: the manual refresh button is gone, so the only way this page can look
+    // live is by asking often enough that a burst of output shows up while it is still happening.
+    // The read is a file tail on the server — cheap, and only while this tab is open.
     const timer = setInterval(() => {
       void pollLog()
-    }, 3000)
+    }, 1500)
     return () => clearInterval(timer)
   }, [onLogTab, pollLog])
 
@@ -514,7 +526,31 @@ export function ListenerDetailPanel({
   // collapse, so the highlight and the open/closed state never disagree.
   const missingKeys = missingRequiredConfigValues(schema, draft)
   const blocking = listener.dependencies.filter((d) => d.state === 'missing' || d.state === 'mismatch').length
-  const hasConfigBlock = schemaEntries.length > 0 || Boolean(listener.ui)
+  const hasConfigBlock = schemaEntries.length > 0
+  /**
+   * What the plugin actually supplied.
+   *
+   * Every block used to render unconditionally, so a plugin that declared nothing produced a
+   * page of headings each followed by an apology — 「（无介绍）」, an empty dependency list, an
+   * ingest address for a plugin that only watches local files. A section is now evidence of a
+   * fact; no fact, no section.
+   */
+  const hasIntro =
+    Boolean(listener.description) ||
+    Boolean(listener.readme) ||
+    listener.errors.length > 0 ||
+    (listener.status.state === 'failed' && Boolean(listener.startupErrorTail))
+  /**
+   * A dependency section needs dependency rows, not a payload that happens to exist.
+   *
+   * `Boolean(controlDeps)` was true whenever the plugin answered its control endpoint at all —
+   * including `control: false` and an empty `deps` array — so a plugin that reports nothing still
+   * grew a 依赖 heading over an empty body. The section exists to list what is missing or what can
+   * be acted on; with neither, it is a heading over nothing.
+   */
+  const reportedDeps = listener.controlDeps?.control === true ? listener.controlDeps.deps ?? [] : []
+  const hasDependencies = listener.dependencies.length > 0 || reportedDeps.length > 0
+  const hasContent = listener.setup.length > 0 || Boolean(listener.ui)
   // Name the fields the user can see, not the schema keys.
   const missingTitles = missingKeys.map((key) => schema?.properties?.[key]?.title ?? key)
 
@@ -540,13 +576,13 @@ export function ListenerDetailPanel({
           return (
             <div
               key={key}
-              className={`flex items-center gap-2 px-2 py-1 rounded border ${
+              className={`flex items-center gap-2.5 rounded-md border px-2.5 py-1.5 ${
                 isMissing ? 'bg-destructive/5 border-destructive/40' : 'border-transparent'
               }`}
             >
               <label
                 htmlFor={`listener-config-${key}`}
-                className="w-28 shrink-0 text-[11px] text-muted-foreground truncate"
+                className="w-32 shrink-0 truncate text-[12.5px] text-muted-foreground"
                 title={prop.description}
               >
                 {prop.title ?? key}
@@ -557,7 +593,7 @@ export function ListenerDetailPanel({
                 )}
               </label>
               <span
-                className={`shrink-0 rounded border px-1 text-[10px] leading-4 ${
+                className={`shrink-0 rounded border px-1.5 text-[11.5px] leading-[18px] ${
                   isRequired ? 'border-destructive/40 text-destructive' : 'border-border text-muted-foreground'
                 }`}
               >
@@ -585,10 +621,10 @@ export function ListenerDetailPanel({
                     setDirty(true)
                   }}
                   placeholder={prop.description ?? ''}
-                  className="flex-1 min-w-0 h-7 px-2 text-xs font-mono bg-muted/50 rounded border border-transparent focus:border-border focus:outline-none"
+                  className="h-8 min-w-0 flex-1 rounded-md border border-transparent bg-muted/50 px-2.5 font-mono text-[13px] focus:border-border focus:outline-none"
                 />
               ) : prop.type === 'boolean' ? (
-                <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground cursor-pointer">
+                <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-muted-foreground">
                   <input
                     id={`listener-config-${key}`}
                     type="checkbox"
@@ -611,7 +647,7 @@ export function ListenerDetailPanel({
                     setDirty(true)
                   }}
                   placeholder={prop.description ?? ''}
-                  className="flex-1 min-w-0 h-7 px-2 text-xs font-mono bg-muted/50 rounded border border-transparent focus:border-border focus:outline-none"
+                  className="h-8 min-w-0 flex-1 rounded-md border border-transparent bg-muted/50 px-2.5 font-mono text-[13px] focus:border-border focus:outline-none"
                 />
               )}
             </div>
@@ -620,284 +656,295 @@ export function ListenerDetailPanel({
       </div>
     ) : null
 
+  const problemCount = listener.errors.length + (blocking > 0 ? blocking : 0)
+
   return (
     <div className={`flex flex-col h-full overflow-hidden ${className ?? ''}`}>
-      {/* Block 1 — title bar: icon + name, version right after it, then the
-          light; the enable/disable button owns the far right by itself. */}
-      <div className="px-4 py-3 border-b border-border flex items-center gap-2">
-        {/* The manifest's icon name, resolved the same way the list resolves it
-            — one mapping, so a plugin cannot look like two different plugins. */}
-        <PluginIcon name={listener.icon} className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <div className="flex items-center gap-2 min-w-0">
-          <h2 className="text-sm font-medium min-w-0 truncate">{listener.name}</h2>
-          <span className="text-[11px] font-mono text-muted-foreground shrink-0 tabular-nums">
-            v{listener.version}
-          </span>
-          <ListenerStatusLight listener={listener} size="md" showLabel />
+      {/*
+        ── Identity ────────────────────────────────────────────────────────────
+        Icon, name, version, state. Sized so that the plugin's name is unambiguously the page
+        title (18px against 13px body), because the previous layout printed it at the same
+        weight as the section headings below it and the page had no visual entry point.
+      */}
+      <header className="shrink-0 px-5 pt-4 pb-3.5 border-b border-border">
+        <div className="flex items-start gap-3.5">
+          <div className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] border border-border/70 bg-foreground/[0.04]">
+            <PluginIcon name={listener.icon} className="h-5 w-5 text-foreground/75" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+              <h1 className="text-[17px] leading-6 font-semibold tracking-[-0.01em] text-foreground truncate">
+                {listener.name}
+              </h1>
+              <span className="shrink-0 rounded bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[12px] leading-[18px] tabular-nums text-muted-foreground">
+                v{listener.version}
+              </span>
+            </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1">
+              <ListenerStatusLight listener={listener} size="md" showLabel />
+              {problemCount > 0 && (
+                <span className="text-[12.5px] leading-5 text-destructive">
+                  {listener.errors.length > 0
+                    ? `${listener.errors.length} 个问题`
+                    : `${blocking} 项依赖未满足`}
+                </span>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={busy || listener.errors.length > 0}
+            onClick={() => void toggleEnabled()}
+            className={`mt-0.5 h-8 px-3.5 shrink-0 inline-flex items-center gap-1.5 rounded-[7px] text-[13px] font-medium transition-colors ${
+              listener.enabled
+                ? 'border border-border text-foreground/85 hover:bg-foreground/[0.06]'
+                : 'bg-primary text-primary-foreground hover:opacity-90'
+            } disabled:opacity-40`}
+          >
+            {listener.enabled ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+            {listener.enabled ? '停用' : '启用'}
+          </button>
         </div>
-        {/* Sign-in sits next to the light (it is plugin state, like the light);
-            it hides itself for a plugin with no sign-in flow. */}
-        <ListenerAuthButton
-          workspaceId={workspaceId}
-          listenerId={listener.id}
-          signInReady={listenerLiveForSignIn(listener.status.state)}
-          onConnected={() => void load()}
-        />
-        <button
-          type="button"
-          disabled={busy || listener.errors.length > 0}
-          onClick={() => void toggleEnabled()}
-          className={`ml-auto h-7 px-2.5 shrink-0 inline-flex items-center gap-1.5 rounded-md text-xs transition-colors ${
-            listener.enabled
-              ? 'bg-muted text-foreground hover:bg-accent'
-              : 'bg-primary text-primary-foreground hover:opacity-90'
-          } disabled:opacity-50`}
-        >
-          {listener.enabled ? <Square className="h-3 w-3" /> : <Play className="h-3 w-3" />}
-          {listener.enabled ? '停用' : '启用'}
-        </button>
+      </header>
+
+      {/*
+        ── Tabs ────────────────────────────────────────────────────────────────
+        Underline grammar, at body size. The pill switch this replaced sat in its own bordered
+        row and read as a segmented control for a toolbar, not as navigation between two
+        readings of one object.
+      */}
+      <div className="shrink-0 px-5 border-b border-border" role="tablist" aria-label="插件视图">
+        {([
+          { id: 'details' as const, label: '详情', Icon: FileText },
+          { id: 'log' as const, label: '进程日志', Icon: ScrollText },
+        ]).map(({ id, label, Icon }) => (
+          <button
+            key={id}
+            ref={(node) => {
+              tabRefs.current[id] = node
+            }}
+            type="button"
+            role="tab"
+            id={`listener-tab-${id}`}
+            aria-controls={`listener-tabpanel-${id}`}
+            aria-selected={tab === id}
+            tabIndex={tab === id ? 0 : -1}
+            onClick={() => setTab(id)}
+            onKeyDown={onTabKeyDown}
+            className={`-mb-px mr-6 inline-flex items-center gap-2 border-b-2 h-10 text-[13.5px] font-medium transition-colors ${
+              tab === id
+                ? 'border-primary text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Icon className="h-4 w-4" />
+            {label}
+            {id === 'log' && problemCount > 0 && (
+              <span className="h-1.5 w-1.5 rounded-full bg-destructive" aria-hidden />
+            )}
+          </button>
+        ))}
       </div>
 
-      {/* Block 2 — segmented switch: 详情 / 进程日志. One control, real tab
-          semantics: each tab owns its panel (aria-controls) and ←/→/Home/End
-          move between them. */}
-      <div className="px-4 py-2 border-b border-border">
+      {tab === 'log' ? (
         <div
-          className="inline-flex items-center gap-0.5 rounded-md border border-border p-0.5"
-          role="tablist"
-          aria-label="详情视图"
-          onKeyDown={onTabKeyDown}
+          role="tabpanel"
+          id="listener-tabpanel-log"
+          aria-labelledby="listener-tab-log"
+          className="flex-1 min-h-0 focus:outline-none"
         >
-          <button
-            ref={(node) => {
-              tabRefs.current.details = node
-            }}
-            type="button"
-            role="tab"
-            id="listener-tab-details"
-            aria-controls="listener-tabpanel-details"
-            aria-selected={tab === 'details'}
-            tabIndex={tab === 'details' ? 0 : -1}
-            onClick={() => setTab('details')}
-            className={`h-6 px-2.5 inline-flex items-center gap-1.5 rounded text-[11px] transition-colors ${
-              tab === 'details' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <FileText className="h-3 w-3" />
-            详情
-          </button>
-          <button
-            ref={(node) => {
-              tabRefs.current.log = node
-            }}
-            type="button"
-            role="tab"
-            id="listener-tab-log"
-            aria-controls="listener-tabpanel-log"
-            aria-selected={tab === 'log'}
-            tabIndex={tab === 'log' ? 0 : -1}
-            onClick={() => setTab('log')}
-            className={`h-6 px-2.5 inline-flex items-center gap-1.5 rounded text-[11px] transition-colors ${
-              tab === 'log' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <ScrollText className="h-3 w-3" />
-            进程日志
-          </button>
+          <ListenerLogView logTail={logTail} status={listener.status} onRefresh={() => void pollLog()} />
         </div>
-      </div>
+      ) : (
+        <div
+          role="tabpanel"
+          id="listener-tabpanel-details"
+          aria-labelledby="listener-tab-details"
+          className="flex-1 min-h-0 overflow-y-auto focus:outline-none"
+        >
+          {/* Problems lead: a broken plugin is why the page was opened. */}
+          {listener.errors.length > 0 && (
+            <Section title="问题" tone="bad">
+              <ul className="space-y-2">
+                {listener.errors.map((message) => (
+                  <li
+                    key={message}
+                    className="flex items-start gap-2 rounded-[7px] border border-destructive/25 bg-destructive/[0.06] px-3 py-2 text-[13px] leading-5 text-destructive"
+                  >
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span className="min-w-0 break-words">{message}</span>
+                  </li>
+                ))}
+                {listener.warnings.map((message) => (
+                  <li
+                    key={message}
+                    className="flex items-start gap-2 rounded-[7px] border border-border/70 bg-foreground/[0.03] px-3 py-2 text-[13px] leading-5 text-foreground/70"
+                  >
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 opacity-60" />
+                    <span className="min-w-0 break-words">{message}</span>
+                  </li>
+                ))}
+              </ul>
+              {listener.status.state === 'failed' && listener.startupErrorTail && (
+                <details className="mt-3">
+                  <summary className="cursor-pointer select-none text-[12.5px] text-destructive">
+                    启动失败日志（尾部）
+                  </summary>
+                  <pre className="mt-2 max-h-52 overflow-auto rounded-[7px] bg-muted/50 p-3 font-mono text-[12px] leading-[1.65] whitespace-pre-wrap break-all">
+                    {listener.startupErrorTail}
+                  </pre>
+                </details>
+              )}
+            </Section>
+          )}
 
-      <div className="flex-1 overflow-y-auto">
-        {tab === 'details' ? (
-          <div
-            role="tabpanel"
-            id="listener-tabpanel-details"
-            aria-labelledby="listener-tab-details"
-            className="focus:outline-none"
-          >
-            {/* Block 3 — 介绍: description + README tail + errors */}
+          {hasIntro && (
             <Section title="介绍">
-              <div className="space-y-2">
-                <p className="text-[12px] leading-5 text-foreground/70">{listener.description ?? '（无介绍）'}</p>
+              <div className="space-y-3">
+                {listener.description && (
+                  <p className="text-[13.5px] leading-[1.7] text-foreground/80">{listener.description}</p>
+                )}
+                {listener.homepage && (
+                  <a
+                    href={listener.homepage}
+                    className="inline-block break-all text-[12.5px] text-primary hover:underline"
+                  >
+                    {listener.homepage}
+                  </a>
+                )}
                 {listener.readme && (
                   <details>
-                    <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground select-none">
+                    <summary className="cursor-pointer select-none text-[12.5px] text-muted-foreground hover:text-foreground">
                       README
                     </summary>
-                    <pre className="mt-1.5 text-[11px] leading-4 whitespace-pre-wrap break-words bg-muted/40 rounded p-2 max-h-64 overflow-auto text-foreground/75">
+                    <pre className="mt-2 max-h-72 overflow-auto rounded-[7px] bg-muted/50 p-3 text-[12.5px] leading-[1.7] whitespace-pre-wrap break-words text-foreground/80">
                       {listener.readme}
-                    </pre>
-                  </details>
-                )}
-                {listener.errors.length > 0 && (
-                  <div className="text-[11px] text-destructive space-y-0.5">
-                    {listener.errors.map((message) => (
-                      <div key={message} className="flex items-start gap-1">
-                        <AlertTriangle className="h-3 w-3 mt-px shrink-0" />
-                        <span>{message}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {listener.status.state === 'failed' && listener.startupErrorTail && (
-                  <details>
-                    <summary className="text-[11px] text-destructive cursor-pointer">
-                      启动失败日志（尾部）
-                    </summary>
-                    <pre className="mt-1 text-[11px] font-mono whitespace-pre-wrap break-all bg-muted/40 rounded p-2 max-h-48 overflow-auto">
-                      {listener.startupErrorTail}
                     </pre>
                   </details>
                 )}
               </div>
             </Section>
+          )}
 
-            {/* Block 4 — 配置: schema fields + required marks + optional HTML UI */}
-            {hasConfigBlock && (
-              <Section
-                title={
-                  <button
-                    type="button"
-                    onClick={() => setConfigOpen((v) => !(v ?? true))}
-                    className="flex items-center gap-1.5 -ml-1 px-1 py-0.5 rounded text-xs font-medium text-foreground/80 hover:text-foreground"
-                  >
-                    {configOpen !== false ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                    配置
-                  </button>
-                }
-                aside={
-                  missingKeys.length > 0 ? (
-                    <span className="text-[11px] text-destructive shrink-0">{missingKeys.length} 项必填未填</span>
-                  ) : null
-                }
-              >
-                {configOpen !== false && (
-                  <div className="space-y-2">
-                    {/* The plugin's own document is the surface when the
-                        manifest declares one (day/night + palette are injected
-                        by the frame). The schema fields stay reachable below
-                        it, folded — so a partial document never strands a key. */}
-                    {uiDoc?.html && (
-                      <PluginConfigUiFrame
-                        html={uiDoc.html}
-                        isDark={isDark}
-                        configSchema={schema}
-                        config={draft}
-                        onConfigUpdate={(patch) => {
-                          setDraft((prev) => ({ ...prev, ...patch }))
-                          setDirty(true)
-                        }}
-                      />
-                    )}
-                    {listener.ui && !uiDoc?.html && (
-                      <p className="text-[11px] text-destructive">自定义配置界面不可用（文件缺失或读取失败）。</p>
-                    )}
-                    {nativeConfigFields &&
-                      (uiDoc?.html ? (
-                        <details>
-                          <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground select-none">
-                            按字段编辑
-                          </summary>
-                          <div className="mt-1.5">{nativeConfigFields}</div>
-                        </details>
-                      ) : (
-                        nativeConfigFields
-                      ))}
-                    {missingKeys.length > 0 && (
-                      <p className="text-[11px] text-destructive">还缺：{missingTitles.join('、')}</p>
-                    )}
-                    {dirty && (
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          disabled={busy || missingKeys.length > 0}
-                          onClick={() => void saveConfig()}
-                          className="h-7 px-2.5 rounded-md bg-primary text-primary-foreground text-xs disabled:opacity-50"
-                        >
-                          保存配置
-                        </button>
-                        {missingKeys.length > 0 && (
-                          <span className="text-[11px] text-destructive">先补齐必填项才能保存</span>
-                        )}
+          {hasConfigBlock && (
+            <Section
+              title={
+                <button
+                  type="button"
+                  onClick={() => setConfigOpen((v) => !(v ?? true))}
+                  className="-ml-1.5 inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[14px] font-semibold text-foreground hover:text-foreground/80"
+                >
+                  {configOpen !== false ? (
+                    <ChevronDown className="h-4 w-4" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4" />
+                  )}
+                  配置
+                </button>
+              }
+              aside={
+                missingKeys.length > 0 ? (
+                  <span className="shrink-0 rounded bg-destructive/10 px-1.5 py-0.5 text-[12px] text-destructive">
+                    {missingKeys.length} 项必填未填
+                  </span>
+                ) : null
+              }
+            >
+              {configOpen !== false && (
+                <div className="space-y-3">
+                  {nativeConfigFields}
+                  {missingKeys.length > 0 && (
+                    <p className="text-[12.5px] text-destructive">还缺：{missingTitles.join('、')}</p>
+                  )}
+                  {dirty && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        disabled={busy || missingKeys.length > 0}
+                        onClick={() => void saveConfig()}
+                        className="h-8 rounded-[7px] bg-primary px-3.5 text-[13px] font-medium text-primary-foreground disabled:opacity-50"
+                      >
+                        保存配置
+                      </button>
+                      {missingKeys.length > 0 && (
+                        <span className="text-[12.5px] text-destructive">先补齐必填项才能保存</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </Section>
+          )}
+
+          {hasDependencies && (
+            <Section
+              title={
+                <button
+                  type="button"
+                  onClick={() => setDepsOpen((v) => !v)}
+                  className="-ml-1.5 inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[14px] font-semibold text-foreground hover:text-foreground/80"
+                >
+                  {depsOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                  依赖
+                </button>
+              }
+              aside={
+                listener.dependencies.length > 0 ? (
+                  <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">
+                    {listener.dependencies.length} 项
+                    {blocking > 0 && <span className="text-destructive"> · {blocking} 未满足</span>}
+                  </span>
+                ) : null
+              }
+            >
+              {depsOpen && (
+                <div className="space-y-3">
+                  {listener.dependencies.length > 0 && (
+                    <div>
+                      {reportedDeps.length > 0 && (
+                        <div className="mb-1.5 text-[12px] font-medium text-foreground/60">Craft 检测</div>
+                      )}
+                      <div className="divide-y divide-border/60 rounded-[7px] border border-border/70">
+                        {listener.dependencies.map((dep) => (
+                          <DependencyRow
+                            key={dep.label}
+                            dep={dep}
+                            installing={installingDep === dep.label}
+                            installingMcp={installingMcp === dep.label}
+                            onInstall={(target) => void install(target)}
+                            onInstallMcp={(target) => void installMcp(target)}
+                          />
+                        ))}
                       </div>
-                    )}
-                  </div>
-                )}
-              </Section>
-            )}
+                      {installLog && (
+                        <pre className="mt-2.5 max-h-40 overflow-auto rounded-[7px] bg-muted/50 p-3 font-mono text-[12px] leading-[1.6] whitespace-pre-wrap break-all">
+                          {installLog}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+                  {reportedDeps.length > 0 && (
+                    <ReportedDepsBody
+                      workspaceId={workspaceId}
+                      listenerId={listener.id}
+                      initial={listener.controlDeps!}
+                    />
+                  )}
+                </div>
+              )}
+            </Section>
+          )}
 
-            {/* Block 5 — 依赖: one region for both sources — what Craft probed
-                from the manifest (install actions) and what the plugin reports
-                through its own control service. Detection logic untouched. */}
-            {(listener.dependencies.length > 0 || Boolean(listener.controlDeps)) && (
-              <Section
-                title={
-                  <button
-                    type="button"
-                    onClick={() => setDepsOpen((v) => !v)}
-                    className="flex items-center gap-1.5 -ml-1 px-1 py-0.5 rounded text-xs font-medium text-foreground/80 hover:text-foreground"
-                  >
-                    {depsOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                    依赖
-                  </button>
-                }
-                aside={
-                  listener.dependencies.length > 0 ? (
-                    <span className="text-[11px] text-muted-foreground shrink-0">
-                      {listener.dependencies.length} 项
-                      {blocking > 0 && <span className="text-destructive"> · {blocking} 未满足</span>}
-                    </span>
-                  ) : null
-                }
-              >
-                {depsOpen && (
-                  <div className="space-y-2">
-                    {listener.dependencies.length > 0 && (
-                      <div>
-                        {listener.controlDeps && (
-                          <div className="text-[11px] text-foreground/70 mb-1">Craft 检测</div>
-                        )}
-                        <div className="divide-y divide-border/50">
-                          {listener.dependencies.map((dep) => (
-                            <DependencyRow
-                              key={dep.label}
-                              dep={dep}
-                              installing={installingDep === dep.label}
-                              installingMcp={installingMcp === dep.label}
-                              onInstall={(target) => void install(target)}
-                              onInstallMcp={(target) => void installMcp(target)}
-                            />
-                          ))}
-                        </div>
-                        {installLog && (
-                          <pre className="mt-2 text-[11px] font-mono whitespace-pre-wrap break-all bg-muted/40 rounded p-2 max-h-40 overflow-auto">
-                            {installLog}
-                          </pre>
-                        )}
-                      </div>
-                    )}
-                    {listener.controlDeps && (
-                      <ReportedDepsBody
-                        workspaceId={workspaceId}
-                        listenerId={listener.id}
-                        initial={listener.controlDeps}
-                      />
-                    )}
-                  </div>
-                )}
-              </Section>
-            )}
-
-            {/* 内容 / 接收地址 — setup steps + the ingest endpoint */}
+          {hasContent && (
             <Section title="内容 / 接收地址">
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {listener.setup.length > 0 && (
-                  <ol className="list-decimal list-inside space-y-0.5">
+                  <ol className="list-decimal space-y-1.5 pl-5">
                     {listener.setup.map((step) => (
-                      <li key={step.text} className="text-[11px] text-muted-foreground">
+                      <li key={step.text} className="text-[13px] leading-[1.65] text-foreground/75">
                         {step.text}
                         {step.link && (
-                          <a href={step.link} className="text-primary hover:underline ml-1 break-all">
+                          <a href={step.link} className="ml-1 break-all text-primary hover:underline">
                             {step.link}
                           </a>
                         )}
@@ -905,56 +952,34 @@ export function ListenerDetailPanel({
                     ))}
                   </ol>
                 )}
-                <div className="flex items-center gap-1.5">
-                  <code className="flex-1 min-w-0 text-[11px] font-mono bg-muted/40 rounded px-2 py-1 truncate">
-                    {`<CRAFT_EVENTS_URL>`} · 监听器 <code className="font-mono">{listener.id}</code>
+                {uiDoc?.html && (
+                  <PluginPageFrame
+                    html={uiDoc.html}
+                    isDark={isDark}
+                    config={draft}
+                    onAction={(action, args) => window.electronAPI.listenerPluginAction(workspaceId, listener.id, action, args)}
+                  />
+                )}
+                {listener.ui && !uiDoc?.html && (
+                  <p className="text-[12.5px] text-destructive">
+                    插件页面不可用（文件缺失或读取失败）。
+                  </p>
+                )}
+                <div className="flex items-center gap-2">
+                  <code className="min-w-0 flex-1 truncate rounded-[7px] bg-muted/50 px-3 py-2 font-mono text-[12.5px] text-foreground/80">
+                    {listener.id}
                   </code>
                   <CopyButton value={listener.id} label="复制 id" />
                 </div>
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-[12.5px] leading-[1.7] text-muted-foreground">
                   启用后 Craft 会启动该插件，并把 <code className="font-mono">CRAFT_EVENTS_URL</code>/
                   <code className="font-mono">CRAFT_EVENTS_TOKEN</code> 注入其环境变量，插件向该地址 POST 事件。
                 </p>
               </div>
             </Section>
-          </div>
-        ) : (
-          /* 进程日志 tab — live log tail + process state */
-          <div
-            role="tabpanel"
-            id="listener-tabpanel-log"
-            aria-labelledby="listener-tab-log"
-            className="focus:outline-none"
-          >
-            <Section
-              title="进程日志"
-              aside={
-                <button
-                  type="button"
-                  onClick={() => void pollLog()}
-                  className="h-6 px-1.5 inline-flex items-center gap-1 rounded border border-border text-[11px] text-muted-foreground hover:text-foreground shrink-0"
-                  title="刷新"
-                >
-                  <RefreshCw className="h-3 w-3" />
-                  刷新
-                </button>
-              }
-            >
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <ListenerStatusLight listener={listener} size="md" showLabel />
-                  <span className="text-[11px] text-muted-foreground tabular-nums">
-                    pid {listener.status.pid ?? '—'} · 重启 {listener.status.attempts} 次
-                  </span>
-                </div>
-                <pre className="text-[11px] font-mono whitespace-pre-wrap break-all bg-muted/40 rounded p-2 max-h-96 min-h-24 overflow-auto">
-                  {logTail && logTail.length > 0 ? logTail : '（暂无日志）'}
-                </pre>
-              </div>
-            </Section>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

@@ -473,6 +473,12 @@ export const RPC_CHANNELS = {
     LISTENER_DEPS: 'events:listenerDeps',
     /** Trigger one reported dependency's action (the install button). */
     LISTENER_DEPS_ACTION: 'events:listenerDepsAction',
+    /**
+     * Relay one manifest-declared plugin action from the renderer (the
+     * plugin's own HTML page) to the plugin's loopback control service.
+     * Generic: the manifest whitelist is checked, the plugin executes.
+     */
+    LISTENER_PLUGIN_ACTION: 'events:listenerPluginAction',
     /** Pushed when a listener process changes state. */
     LISTENER_STATUS: 'events:listenerStatus',
     /** Plugin-provided HTML config UI (file content or the inline document). */
@@ -484,22 +490,6 @@ export const RPC_CHANNELS = {
      * config, installed dependency), so list lights follow the detail page.
      */
     LISTENER_CHANGED: 'events:listenerChanged',
-
-    /**
-     * Plugin sign-in (QR / pairing code). The plugin owns the platform
-     * protocol; Craft only relays, so no platform vocabulary lives here.
-     *
-     * start  — begin an attempt (returns the first state snapshot)
-     * state  — read the current snapshot (for a UI that just opened)
-     * submit — hand back the short code the person read off their phone
-     * cancel — abandon the attempt and free the plugin's resources
-     */
-    PLUGIN_AUTH_START: 'events:pluginAuthStart',
-    PLUGIN_AUTH_STATE: 'events:pluginAuthState',
-    PLUGIN_AUTH_SUBMIT: 'events:pluginAuthSubmit',
-    PLUGIN_AUTH_CANCEL: 'events:pluginAuthCancel',
-    /** Pushed on every change of a plugin's sign-in flow. */
-    PLUGIN_AUTH_EVENT: 'events:pluginAuthEvent',
 
     /** This session's subscriptions. */
     LIST_SUBSCRIPTIONS: 'events:listSubscriptions',
@@ -570,14 +560,6 @@ export const RPC_CHANNELS = {
     GENERATE_SUPERGROUP_CODE: 'messaging:generateSupergroupCode',
     GET_SUPERGROUP: 'messaging:getSupergroup',
     UNBIND_SUPERGROUP: 'messaging:unbindSupergroup',
-    // UI ↔ Server — WeChat QR login flow
-    // WECHAT_START_CONNECT / WECHAT_SUBMIT_VERIFYCODE / WECHAT_UI_EVENT were
-    // removed with the messaging gateway. Plugin sign-in now goes through
-    // events.PLUGIN_AUTH_* in the events domain, which every plugin shares.
-
-    // UI ↔ Server — WhatsApp pairing/connection flow (Baileys subprocess adapter)
-    // WA_START_CONNECT / WA_SUBMIT_PHONE / WA_UI_EVENT were removed with the
-    // messaging gateway; see events.PLUGIN_AUTH_* above.
     // UI ↔ Server — Access control (per-platform owners + per-binding allow-list)
     GET_PLATFORM_OWNERS: 'messaging:access:getOwners',
     SET_PLATFORM_OWNERS: 'messaging:access:setOwners',

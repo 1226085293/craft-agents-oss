@@ -173,16 +173,18 @@ export interface ListenerManifest {
   locales?: string;
   setup?: Array<{ text: string; link?: string }>;
   /**
-   * Plugin-provided HTML config UI, rendered in a sandboxed iframe on the
-   * detail page. Either a file inside the plugin directory (`configHtml`)
-   * or an inline document (`configHtmlInline`) — never both. Absent means
-   * the host renders the config fields itself from `config`.
+   * Plugin-provided HTML page, rendered in a sandboxed iframe under the
+   * detail page's 内容 section. Either a file inside the plugin directory
+   * (`page`) or an inline document (`pageInline`) — never both. The page is
+   * the plugin's own surface: it may read the current config (handed over on
+   * init) and call back through the bridge to trigger one of the plugin's
+   * manifest-declared actions. Craft only relays — no platform vocabulary.
    */
   ui?: ListenerUi;
 }
 
 /**
- * Path budget for a plugin config UI file. The host resolves it against the
+ * Path budget for a plugin page file. The host resolves it against the
  * plugin directory and refuses to read outside it, so the manifest is the
  * first line of that confinement — relative segments only.
  */
@@ -192,9 +194,9 @@ export const LISTENER_UI_INLINE_MAX = 512 * 1024;
 
 export interface ListenerUi {
   /** Relative path to the HTML file, inside the plugin directory. */
-  configHtml?: string;
-  /** Inline HTML document (mutually exclusive with `configHtml`). */
-  configHtmlInline?: string;
+  page?: string;
+  /** Inline HTML document (mutually exclusive with `page`). */
+  pageInline?: string;
 }
 
 export interface ManifestParseResult {
@@ -575,32 +577,32 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
       errors.push('ui must be an object');
     } else {
       const uiObj = input.ui as Record<string, unknown>;
-      const configHtml = str(uiObj.configHtml);
-      const configHtmlInline = str(uiObj.configHtmlInline);
-      if (configHtml !== undefined && configHtmlInline !== undefined) {
-        errors.push('ui.configHtml and ui.configHtmlInline are mutually exclusive — pick one');
-      } else if (configHtml !== undefined) {
+      const page = str(uiObj.page);
+      const pageInline = str(uiObj.pageInline);
+      if (page !== undefined && pageInline !== undefined) {
+        errors.push('ui.page and ui.pageInline are mutually exclusive — pick one');
+      } else if (page !== undefined) {
         // Confined to the plugin directory: a relative path of plain
         // segments. Absolute paths, `..` and any other fs/shell syntax fail
         // here and at host resolve time.
-        const segments = configHtml.split('/');
+        const segments = page.split('/');
         const pathOk =
-          configHtml.length <= LISTENER_UI_PATH_MAX &&
-          !configHtml.startsWith('/') &&
+          page.length <= LISTENER_UI_PATH_MAX &&
+          !page.startsWith('/') &&
           !segments.includes('..') &&
           segments.every((seg) => /^[a-zA-Z0-9._-]{1,128}$/.test(seg));
         if (!pathOk) {
           errors.push(
-            'ui.configHtml must be a relative path inside the plugin directory (no "..", no absolute paths, ≤ 200 chars)',
+            'ui.page must be a relative path inside the plugin directory (no "..", no absolute paths, ≤ 200 chars)',
           );
         } else {
-          ui = { configHtml };
+          ui = { page };
         }
-      } else if (configHtmlInline !== undefined) {
-        if (configHtmlInline.length > LISTENER_UI_INLINE_MAX) {
-          errors.push(`ui.configHtmlInline is too large (max ${LISTENER_UI_INLINE_MAX} chars)`);
+      } else if (pageInline !== undefined) {
+        if (pageInline.length > LISTENER_UI_INLINE_MAX) {
+          errors.push(`ui.pageInline is too large (max ${LISTENER_UI_INLINE_MAX} chars)`);
         } else {
-          ui = { configHtmlInline };
+          ui = { pageInline };
         }
       }
     }

@@ -117,12 +117,6 @@ export function pluginStatusReading(input: PluginStatusInput): PluginStatusReadi
   if (state === 'starting') {
     return { tone: 'warn', label: '启动中', reason: 'starting' }
   }
-  // Up, serving, and waiting for the person to sign in. Deliberately not
-  // `degraded`: nothing is broken, and this reading is what keeps the sign-in
-  // entry reachable while there are no credentials yet.
-  if (state === 'needs_auth') {
-    return { tone: 'warn', label: '等待授权', reason: 'needs-auth' }
-  }
   if (state === 'degraded') {
     return { tone: 'warn', label: '已启动，但未上报健康', reason: 'degraded' }
   }
@@ -143,22 +137,6 @@ export function pluginStatusReading(input: PluginStatusInput): PluginStatusReadi
 
   // Green — running and ready (absent ready counts as ready).
   return { tone: 'ok', label: '运行中', reason: 'running' }
-}
-
-/**
- * Can the person be handed a sign-in right now?
- *
- * The entry used to require `state === 'running'`, which deadlocked the one
- * case it was most needed: with no credentials the plugin never reports
- * health, so it was never `running` — the button was disabled exactly when a
- * scan was the only way forward. "Process is up" is the real precondition,
- * because `/auth/*` is served by the process, not by a connected adapter.
- *
- * `needs_auth` is included precisely because that is the not-yet-signed-in
- * state; `degraded` is not, because nothing there has proven it can serve.
- */
-export function listenerLiveForSignIn(state: string | undefined): boolean {
-  return state === 'running' || state === 'needs_auth'
 }
 
 /**
@@ -215,46 +193,3 @@ export function configSectionInitiallyOpen(
   return missingRequiredConfigValues(schema, values).length > 0
 }
 
-/**
- * Clean a config update coming from a plugin's own HTML config UI.
- *
- * The plugin document runs in a sandboxed iframe and posts back plain values;
- * the host coerces them against the declared schema before anything reaches
- * the save path, so an HTML form can never write a key or a type the manifest
- * did not declare (and no object/array payload can smuggle in).
- */
-export function sanitizePluginConfigUpdate(
-  update: unknown,
-  schema: ListenerConfigSchemaLike | undefined,
-): Record<string, string | number | boolean> {
-  const out: Record<string, string | number | boolean> = {}
-  if (typeof update !== 'object' || update === null) return out
-  const props = schema?.properties ?? {}
-  const hasSchema = Object.keys(props).length > 0
-  for (const [key, raw] of Object.entries(update)) {
-    const prop = props[key]
-    if (!prop) {
-      // Unknown key: only accepted when the schema declares no properties at
-      // all (a plugin UI ahead of its manifest) — and then only primitives.
-      if (hasSchema) continue
-      if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
-        out[key] = raw
-      }
-      continue
-    }
-    if (prop.type === 'number') {
-      const n = Number(raw)
-      if (Number.isFinite(n)) out[key] = n
-    } else if (prop.type === 'boolean') {
-      if (typeof raw === 'boolean') out[key] = raw
-      else if (raw === 'true' || raw === 1 || raw === '1') out[key] = true
-      else if (raw === 'false' || raw === 0 || raw === '0') out[key] = false
-    } else {
-      // string: accept real strings and primitive coercions, nothing else.
-      if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
-        out[key] = String(raw)
-      }
-    }
-  }
-  return out
-}

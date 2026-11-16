@@ -1,20 +1,29 @@
 /**
- * Plugin-provided HTML config UI — sandboxed rendering + theme hand-off.
+ * Plugin-provided HTML page — sandboxed rendering + theme hand-off + action
+ * relay.
  *
- * The manifest declares `ui.configHtml` (a file inside the plugin directory)
- * or `ui.configHtmlInline`; the server ships the document over RPC and this
- * component renders it.
+ * The manifest declares `ui.page` (a file inside the plugin directory) or
+ * `ui.pageInline`; the server ships the document over RPC and this component
+ * renders it under the detail page's 内容 section.
+ *
+ * The page is the plugin's own surface: it shows what it wants (a QR code, a
+ * status table, a chart) and interacts with the user. When it needs the
+ * plugin to do something, it posts `{ type: 'action', action, args,
+ * requestId }`; the host relays that to the plugin's loopback control
+ * service as a manifest-declared action and answers with `action-result`.
+ * Craft knows nothing about what an action means — the manifest whitelist is
+ * the only gate.
  *
  * Security boundary:
  *   - sandbox="allow-scripts allow-forms": NO allow-same-origin, so the
  *     document runs on an opaque origin — it cannot read Craft's DOM,
  *     cookies, localStorage, or reach the Electron bridge. No allow-popups,
  *     no allow-top-navigation: it cannot open windows or navigate Craft.
- *     Scripts stay enabled because that is the point of a config UI.
+ *     Scripts stay enabled because that is the point of a plugin page.
  *   - Messages are only accepted from this exact iframe (event.source check)
  *     and only when they carry `source: "craft-plugin-ui"`.
- *   - Config updates are coerced against the manifest schema
- *     (sanitizePluginConfigUpdate, shared) before they reach the save path.
+ *   - Actions are only relayed when the manifest declares them; the result
+ *     of an undeclared action is a plain refusal, never an execution.
  *
  * Theme hand-off (day/night + palette), two layers:
  *   1. First paint: a `<style data-craft-theme>` block is injected into the
@@ -22,30 +31,26 @@
  *      properties — so the theme is right before the plugin's own scripts
  *      run.
  *   2. Live: on every theme switch, `{ type: 'theme', colorScheme, cssVars }`
- *      is posted so a plugin that keeps its form alive can re-skin without a
- *      reload (the frame is NOT re-created on theme change — plugin form
+ *      is posted so a plugin that keeps its page alive can re-skin without a
+ *      reload (the frame is NOT re-created on theme change — plugin page
  *      state survives day/night flips). Craft's values are a baseline; the
  *      plugin's own styles may still override them.
  *
  * Bridge protocol (all messages carry source: 'craft-plugin-ui'):
  *   parent → iframe: { type: 'init', colorScheme, cssVars, config }
  *                    { type: 'theme', colorScheme, cssVars }
- *                    { type: 'config', config }
+ *                    { type: 'action-result', requestId, ok, message }
  *   iframe → parent: { type: 'ready' }
- *                    { type: 'config-update', config }
  *                    { type: 'resize', height }
+ *                    { type: 'action', action, args, requestId }
  */
 
 import * as React from 'react'
-import {
-  sanitizePluginConfigUpdate,
-  type ListenerConfigSchemaLike,
-} from '@craft-agent/shared/events/plugin-status'
 
 /**
- * The tokens a plugin config form is most likely to style against. Craft's
- * palette is theme-driven (light/dark sets in index.css); passing the raw
- * variable values means the plugin document tracks Craft's current theme.
+ * The tokens a plugin page is most likely to style against. Craft's palette
+ * is theme-driven (light/dark sets in index.css); passing the raw variable
+ * values means the plugin document tracks Craft's current theme.
  */
 const THEME_VARS = [
   '--background',
@@ -94,42 +99,43 @@ function buildSrcDoc(html: string, colorScheme: 'light' | 'dark', cssVars: Recor
   return `${style}\n${html}`
 }
 
-export interface PluginConfigUiFrameProps {
+export interface PluginPageFrameProps {
   /** The plugin's HTML document (fetched by the server, never by the renderer). */
   html: string
   /** Whether Craft is currently in dark mode — drives color-scheme + variables. */
   isDark: boolean
-  /** The manifest config schema: the contract the plugin's updates are checked against. */
-  configSchema?: ListenerConfigSchemaLike
   /**
-   * Current draft values; pushed to the frame when it signals ready. May
-   * hold native number/boolean values — the plugin form is the only thing
-   * that reads them back.
+   * The listener's saved config, handed to the page on init so it can show
+   * its own state (read-only from the page's side; writing goes through the
+   * plugin's actions or Craft's config form).
    */
   config: Record<string, unknown>
-  /** Called with a schema-sanitized patch; the parent decides merging/saving. */
-  onConfigUpdate: (patch: Record<string, string | number | boolean>) => void
+  /**
+   * Relay a page action to the plugin's control service. The manifest
+   * whitelist is enforced server-side; the parent just resolves with the
+   * plugin's own answer.
+   */
+  onAction: (action: string, args: Record<string, unknown>) => Promise<{ ok: boolean; message: string }>
   className?: string
 }
 
 const MIN_HEIGHT = 120
-const MAX_HEIGHT = 900
+const MAX_HEIGHT = 1600
 const DEFAULT_HEIGHT = 320
 
-export function PluginConfigUiFrame({
+export function PluginPageFrame({
   html,
   isDark,
-  configSchema,
   config,
-  onConfigUpdate,
+  onAction,
   className,
-}: PluginConfigUiFrameProps): React.ReactElement {
+}: PluginPageFrameProps): React.ReactElement {
   const iframeRef = React.useRef<HTMLIFrameElement | null>(null)
   const [height, setHeight] = React.useState(DEFAULT_HEIGHT)
 
   // Snapshot taken at mount: the theme block is baked into srcDoc once, so a
   // later theme flip reaches the frame through the live 'theme' post below,
-  // not through a document reload (which would reset the plugin's form).
+  // not through a document reload (which would reset the plugin's page).
   const [mountCssVars] = React.useState<Record<string, string>>(() => collectThemeVars())
   const mountSchemeRef = React.useRef<'light' | 'dark'>(isDark ? 'dark' : 'light')
   const srcDoc = React.useMemo(
@@ -141,10 +147,8 @@ export function PluginConfigUiFrame({
   // Live refs so the message handler never works from a stale closure.
   const configRef = React.useRef(config)
   configRef.current = config
-  const onConfigUpdateRef = React.useRef(onConfigUpdate)
-  onConfigUpdateRef.current = onConfigUpdate
-  const configSchemaRef = React.useRef(configSchema)
-  configSchemaRef.current = configSchema
+  const onActionRef = React.useRef(onAction)
+  onActionRef.current = onAction
   const isDarkRef = React.useRef(isDark)
   isDarkRef.current = isDark
 
@@ -186,15 +190,30 @@ export function PluginConfigUiFrame({
       // A sandboxed (no same-origin) frame reports origin "null"; the
       // contentWindow identity check is the real boundary.
       if (!frame || event.source !== frame.contentWindow) return
-      const data = event.data as { source?: string; type?: string; config?: unknown; height?: unknown } | null
+      const data = event.data as {
+        source?: string
+        type?: string
+        action?: string
+        args?: unknown
+        requestId?: unknown
+        height?: unknown
+      } | null
       if (!data || data.source !== 'craft-plugin-ui' || typeof data.type !== 'string') return
 
       if (data.type === 'ready') {
-        post({ type: 'config', config: configRef.current })
+        post({ type: 'init', config: configRef.current })
       }
-      if (data.type === 'config-update') {
-        const clean = sanitizePluginConfigUpdate(data.config, configSchemaRef.current)
-        if (Object.keys(clean).length > 0) onConfigUpdateRef.current(clean)
+      if (data.type === 'action' && typeof data.action === 'string') {
+        const requestId = typeof data.requestId === 'string' || typeof data.requestId === 'number'
+          ? data.requestId
+          : null
+        const args =
+          data.args !== null && typeof data.args === 'object' && !Array.isArray(data.args)
+            ? (data.args as Record<string, unknown>)
+            : {}
+        void onActionRef.current(data.action, args).then((result) => {
+          post({ type: 'action-result', requestId, ok: result.ok, message: result.message })
+        })
       }
       if (data.type === 'resize' && typeof data.height === 'number' && Number.isFinite(data.height)) {
         setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.round(data.height))))
@@ -207,7 +226,7 @@ export function PluginConfigUiFrame({
   return (
     <iframe
       ref={iframeRef}
-      title="插件自定义配置界面"
+      title="插件自定义页面"
       sandbox="allow-scripts allow-forms"
       srcDoc={srcDoc}
       style={{ height }}

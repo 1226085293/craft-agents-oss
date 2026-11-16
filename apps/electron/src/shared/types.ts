@@ -860,6 +860,13 @@ export interface ElectronAPI {
     listenerId: string,
     depId: string
   ): Promise<{ ok: boolean; conflict?: boolean; error?: string }>
+  /** Relay one manifest-declared plugin action from the plugin's own HTML page. */
+  listenerPluginAction(
+    workspaceId: string,
+    listenerId: string,
+    action: string,
+    args: Record<string, unknown>
+  ): Promise<{ ok: boolean; message: string }>
   onEventListenerStatus(
     callback: (workspaceId: string, status: import('@craft-agent/shared/protocol/dto').ListenerStatusDto) => void
   ): () => void
@@ -868,38 +875,6 @@ export interface ElectronAPI {
     callback: (
       workspaceId: string,
       changed: { listenerId: string; reason: 'enabled' | 'config' | 'dependency' },
-    ) => void
-  ): () => void
-  /**
-   * Plugin sign-in (QR / pairing code).
-   *
-   * The plugin owns the platform protocol; these four calls only relay to its
-   * control service, so a new platform needs no change here. Every call resolves
-   * with a snapshot: `ok:false` carries a machine-readable `code` that the UI
-   * maps to a sentence (see PluginAuthErrorCode).
-   */
-  startPluginAuth(
-    workspaceId: string,
-    listenerId: string
-  ): Promise<{ ok: boolean; state?: import('@craft-agent/shared/protocol/dto').PluginAuthStateDto; code?: import('@craft-agent/shared/protocol/dto').PluginAuthErrorCode; error?: string }>
-  getPluginAuthState(
-    workspaceId: string,
-    listenerId: string
-  ): Promise<{ ok: boolean; state?: import('@craft-agent/shared/protocol/dto').PluginAuthStateDto; code?: import('@craft-agent/shared/protocol/dto').PluginAuthErrorCode; error?: string }>
-  submitPluginAuthCode(
-    workspaceId: string,
-    listenerId: string,
-    code: string
-  ): Promise<{ ok: boolean; state?: import('@craft-agent/shared/protocol/dto').PluginAuthStateDto; code?: import('@craft-agent/shared/protocol/dto').PluginAuthErrorCode; error?: string }>
-  cancelPluginAuth(
-    workspaceId: string,
-    listenerId: string
-  ): Promise<{ ok: boolean; state?: import('@craft-agent/shared/protocol/dto').PluginAuthStateDto; code?: import('@craft-agent/shared/protocol/dto').PluginAuthErrorCode; error?: string }>
-  /** Pushed on every change of a plugin's sign-in flow. */
-  onPluginAuthEvent(
-    callback: (
-      workspaceId: string,
-      state: import('@craft-agent/shared/protocol/dto').PluginAuthStateDto,
     ) => void
   ): () => void
   listEventSubscriptions(

@@ -19,8 +19,6 @@ import type {
   LlmGatewayStatusPayload,
   EventMetaDto,
   ListenerStatusDto,
-  PluginAuthErrorCode,
-  PluginAuthStateDto,
 } from './dto'
 
 export interface BroadcastEventMap {
@@ -47,49 +45,6 @@ export interface BroadcastEventMap {
     workspaceId: string,
     changed: { listenerId: string; reason: 'enabled' | 'config' | 'dependency' },
   ]
-  // Plugin sign-in: three calls relay to the plugin, one broadcast comes back.
-  [RPC_CHANNELS.events.PLUGIN_AUTH_START]: [
-    workspaceId: string,
-    listenerId: string,
-    result: {
-      ok: boolean
-      state?: PluginAuthStateDto
-      code?: PluginAuthErrorCode
-      error?: string
-    },
-  ]
-  [RPC_CHANNELS.events.PLUGIN_AUTH_STATE]: [
-    workspaceId: string,
-    listenerId: string,
-    result: {
-      ok: boolean
-      state?: PluginAuthStateDto
-      code?: PluginAuthErrorCode
-      error?: string
-    },
-  ]
-  [RPC_CHANNELS.events.PLUGIN_AUTH_SUBMIT]: [
-    workspaceId: string,
-    listenerId: string,
-    code: string,
-    result: {
-      ok: boolean
-      state?: PluginAuthStateDto
-      code?: PluginAuthErrorCode
-      error?: string
-    },
-  ]
-  [RPC_CHANNELS.events.PLUGIN_AUTH_CANCEL]: [
-    workspaceId: string,
-    listenerId: string,
-    result: {
-      ok: boolean
-      state?: PluginAuthStateDto
-      code?: PluginAuthErrorCode
-      error?: string
-    },
-  ]
-  [RPC_CHANNELS.events.PLUGIN_AUTH_EVENT]: [workspaceId: string, state: PluginAuthStateDto]
   [RPC_CHANNELS.llmConnections.CHANGED]: []
   [RPC_CHANNELS.llmGateway.STATUS]: [status: LlmGatewayStatusPayload]
   [RPC_CHANNELS.permissions.DEFAULTS_CHANGED]: [value: null]

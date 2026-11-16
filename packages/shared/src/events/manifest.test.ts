@@ -209,34 +209,34 @@ describe('parseManifest', () => {
 })
 
 describe('parseManifest — ui (plugin-provided HTML config UI)', () => {
-  it('accepts a relative configHtml file path', () => {
-    const result = parseManifest(base({ ui: { configHtml: 'ui/config.html' } }))
+  it('accepts a relative page file path', () => {
+    const result = parseManifest(base({ ui: { page: 'ui/config.html' } }))
     expect(result.ok).toBe(true)
-    expect(result.manifest?.ui?.configHtml).toBe('ui/config.html')
+    expect(result.manifest?.ui?.page).toBe('ui/config.html')
   })
 
   it('accepts an inline document', () => {
-    const result = parseManifest(base({ ui: { configHtmlInline: '<div>form</div>' } }))
+    const result = parseManifest(base({ ui: { pageInline: '<div>form</div>' } }))
     expect(result.ok).toBe(true)
-    expect(result.manifest?.ui?.configHtmlInline).toBe('<div>form</div>')
+    expect(result.manifest?.ui?.pageInline).toBe('<div>form</div>')
   })
 
-  it('rejects when both configHtml and configHtmlInline are given', () => {
-    const result = parseManifest(base({ ui: { configHtml: 'ui/a.html', configHtmlInline: '<i/>' } }))
+  it('rejects when both page and pageInline are given', () => {
+    const result = parseManifest(base({ ui: { page: 'ui/a.html', pageInline: '<i/>' } }))
     expect(result.ok).toBe(false)
     expect(result.errors.join(' ')).toContain('mutually exclusive')
   })
 
   it('rejects paths that escape the plugin directory', () => {
     for (const bad of ['../outside.html', '/abs/path.html', 'a/../../b.html']) {
-      const result = parseManifest(base({ ui: { configHtml: bad } }))
+      const result = parseManifest(base({ ui: { page: bad } }))
       expect(result.ok, bad).toBe(false)
     }
   })
 
   it('rejects a non-object ui and an oversized inline document', () => {
     expect(parseManifest(base({ ui: 'ui/a.html' })).ok).toBe(false)
-    expect(parseManifest(base({ ui: { configHtmlInline: 'x'.repeat(512 * 1024 + 1) } })).ok).toBe(false)
+    expect(parseManifest(base({ ui: { pageInline: 'x'.repeat(512 * 1024 + 1) } })).ok).toBe(false)
   })
 
   it('leaves ui absent when the manifest declares none', () => {

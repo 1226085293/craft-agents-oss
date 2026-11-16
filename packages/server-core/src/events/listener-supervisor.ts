@@ -54,7 +54,7 @@ const DEFAULT_MAX_ATTEMPTS = 5;
 const LOG_MAX_BYTES = 5 * 1024 * 1024;
 const STOP_GRACE_MS = 3000;
 
-export type ListenerProcessState = 'stopped' | 'starting' | 'running' | 'needs_auth' | 'degraded' | 'failed';
+export type ListenerProcessState = 'stopped' | 'starting' | 'running' | 'degraded' | 'failed';
 
 export interface ListenerRuntimeStatus {
   id: string
@@ -83,18 +83,6 @@ export interface SupervisorOptions {
   envFor: (listenerId: string) => Record<string, string>
   /** Called whenever a status changes, for the renderer. */
   onStatus?: (status: ListenerRuntimeStatus) => void
-  /**
-   * Ask the plugin what it is waiting for, once its readiness window expires.
-   *
-   * A plugin that started but never reported healthy is in one of two very
-   * different situations, and the supervisor cannot tell them apart from the
-   * outside: it is broken, or it is alive and waiting for the person to sign
-   * in. Calling the second one `degraded` is what made the sign-in entry
-   * unreachable — the entry is gated on a live process, so a plugin that most
-   * needs a scan was the one that could not be given one. Returning true here
-   * marks it `needs_auth` instead.
-   */
-  awaitingAuth?: (listener: LoadedListener) => Promise<boolean>
 }
 
 function rotateIfNeeded(logPath: string): void {
@@ -260,27 +248,6 @@ export class ListenerSupervisor {
         // outlive a health report, and a narrowed local would hide that.
         if (this.getStatus(listener.id).state === 'running') return;
 
-        // Before calling it degraded, ask the plugin. "Alive but waiting for
-        // sign-in" is not a fault and must not be reported as one: the whole
-        // point of `needs_auth` is that this process is up and can be handed a
-        // scan right now.
-        let awaitingAuth = false;
-        try {
-          awaitingAuth = (await this.options.awaitingAuth?.(listener)) === true;
-        } catch {
-          // A plugin that cannot answer is not proof of anything; fall through
-          // to degraded, which is the honest reading of "did not report health".
-        }
-        if (this.running.get(listener.id) !== entry || entry.stopping) return;
-        if (this.getStatus(listener.id).state === 'running') return;
-
-        if (awaitingAuth) {
-          entry.status = { ...entry.status, state: 'needs_auth', lastError: null };
-          this.setStatus(entry.status);
-          log.info(`[events] listener ${listener.id} is up and waiting for sign-in`);
-          return;
-        }
-
         entry.status = { ...entry.status, state: 'degraded' };
         this.setStatus(entry.status);
         log.warn(`[events] listener ${listener.id} started but did not report healthy`);
@@ -368,17 +335,13 @@ export class ListenerSupervisor {
   /**
    * Resolve true once the listener is up, false when the wait expires.
    *
-   * `needs_auth` counts as up: the process is serving its control port and the
-   * reason it has not reported health is that it is waiting for credentials.
-   * Treating it as "not ready" made `restartWithFallback` read a successful
-   * restart as a failure and roll the just-saved credentials back.
    */
   private waitForHealthy(id: string, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     return new Promise((resolve) => {
       const poll = () => {
         const state = this.getStatus(id).state;
-        if (state === 'running' || state === 'needs_auth') return resolve(true);
+        if (state === 'running') return resolve(true);
         if (state === 'failed' || state === 'stopped') return resolve(false);
         if (Date.now() >= deadline) return resolve(false);
         setTimeout(poll, 200);

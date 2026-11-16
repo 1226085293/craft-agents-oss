@@ -61,7 +61,11 @@
         "secret": true,
         "default": ""
       }
-    }
+    },
+    "required": [
+      "appId",
+      "appSecret"
+    ]
   },
   "icon": "messages-square",
   "commands": [

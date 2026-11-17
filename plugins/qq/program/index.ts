@@ -38,7 +38,7 @@ import type {
   SentMessage,
   SendOptions,
   MessagingLogger,
-} from '@craft-agent/messaging-gateway/types'
+} from './types.ts'
 
 /**
  * Hard cap for downloaded/uploaded attachment size. Matches Telegram's

@@ -20,7 +20,7 @@ import type {
   InlineButton,
   ButtonPress,
   MessagingLogger,
-} from '@craft-agent/messaging-gateway/types'
+} from './types.ts'
 import { formatForTelegram, TELEGRAM_MAX_CAPTION_LENGTH, TELEGRAM_MAX_MESSAGE_LENGTH, TELEGRAM_PARSE_MODE, type TelegramParseMode } from './format'
 
 /**

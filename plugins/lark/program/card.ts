@@ -12,7 +12,7 @@
  *   - Button labels truncated to 30 chars (Lark's display threshold)
  */
 
-import type { InlineButton } from '@craft-agent/messaging-gateway/types'
+import type { InlineButton } from './types.ts'
 
 const MAX_BUTTONS = 10
 const MAX_LABEL_LENGTH = 30

@@ -12,7 +12,7 @@ import {
   LARK_MAX_BUTTONS,
   LARK_MAX_LABEL_LENGTH,
 } from '../card'
-import type { InlineButton } from '@craft-agent/messaging-gateway/types'
+import type { InlineButton } from '../types.ts'
 
 describe('buildLarkCard', () => {
   const messageId = 'msg-abc-123'

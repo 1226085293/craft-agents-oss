@@ -39,7 +39,7 @@ import type {
   SentMessage,
   InlineButton,
   MessagingLogger,
-} from '@craft-agent/messaging-gateway/types'
+} from './types.ts'
 
 const NOOP_LOGGER: MessagingLogger = {
   info: () => {},

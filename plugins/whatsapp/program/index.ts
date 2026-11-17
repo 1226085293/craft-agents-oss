@@ -40,7 +40,7 @@ import type {
   ButtonPress,
   ReadReceipt,
   MessagingLogger,
-} from '@craft-agent/messaging-gateway/types'
+} from './types.ts'
 
 const NOOP_LOGGER: MessagingLogger = {
   info: () => {},

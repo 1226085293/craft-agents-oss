@@ -112,14 +112,14 @@ describe('host slash command menu registration', () => {
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     const setMyCommands = mock(async () => true as const)
     const count = await registerHostSlashCommands({ setMyCommands } as unknown as TelegramCommandApi)
 
     expect(count).toBe(2)
     expect(setMyCommands).toHaveBeenCalledTimes(1)
-    expect(setMyCommands.mock.calls[0]?.[0]).toEqual([
+    expect((setMyCommands.mock as unknown as { calls: unknown[][] }).calls[0]?.[0]).toEqual([
       { command: 'stop', description: 'Stop the current run' },
       { command: 'help', description: 'List available commands' },
     ])
@@ -137,7 +137,7 @@ describe('host slash command menu registration', () => {
         }),
         { status: 200 },
       ),
-    ) as typeof fetch
+    ) as unknown as typeof fetch
 
     const setMyCommands = mock(async () => true as const)
     const commands = setMyCommands.mock as unknown as { calls: unknown[][] }
@@ -152,13 +152,13 @@ describe('host slash command menu registration', () => {
     originalFetch = globalThis.fetch
     globalThis.fetch = mock(async () => {
       throw new Error('connection refused')
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     const setMyCommands = mock(async () => true as const)
     const count = await registerHostSlashCommands({ setMyCommands } as unknown as TelegramCommandApi)
 
     expect(count).toBe(0)
-    expect(setMyCommands.mock.calls[0]?.[0]).toEqual([])
+    expect((setMyCommands.mock as unknown as { calls: unknown[][] }).calls[0]?.[0]).toEqual([])
   })
 
   it('prefers CRAFT_HOST_URL over the per-listener events URL', async () => {
@@ -173,13 +173,13 @@ describe('host slash command menu registration', () => {
         JSON.stringify({ ok: true, result: [{ name: 'stop', description: 'Stop the current run' }] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     const setMyCommands = mock(async () => true as const)
     const count = await registerHostSlashCommands({ setMyCommands } as unknown as TelegramCommandApi)
 
     expect(count).toBe(1)
-    expect(setMyCommands.mock.calls[0]?.[0]).toEqual([{ command: 'stop', description: 'Stop the current run' }])
+    expect((setMyCommands.mock as unknown as { calls: unknown[][] }).calls[0]?.[0]).toEqual([{ command: 'stop', description: 'Stop the current run' }])
   })
 
   it('derives the host root from a per-listener events URL when CRAFT_HOST_URL is unset', async () => {
@@ -195,26 +195,26 @@ describe('host slash command menu registration', () => {
         JSON.stringify({ ok: true, result: [] }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       )
-    }) as typeof fetch
+    }) as unknown as typeof fetch
 
     const setMyCommands = mock(async () => true as const)
     const count = await registerHostSlashCommands({ setMyCommands } as unknown as TelegramCommandApi)
 
     expect(count).toBe(0)
-    expect(setMyCommands.mock.calls[0]?.[0]).toEqual([])
+    expect((setMyCommands.mock as unknown as { calls: unknown[][] }).calls[0]?.[0]).toEqual([])
   })
 
   it('registers an empty menu when the host answers non-ok', async () => {
     process.env.CRAFT_EVENTS_URL = 'http://127.0.0.1:9999'
     process.env.CRAFT_EVENTS_TOKEN = 'wrong'
     originalFetch = globalThis.fetch
-    globalThis.fetch = mock(async () => new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 })) as typeof fetch
+    globalThis.fetch = mock(async () => new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 })) as unknown as typeof fetch
 
     const setMyCommands = mock(async () => true as const)
     const count = await registerHostSlashCommands({ setMyCommands } as unknown as TelegramCommandApi)
 
     expect(count).toBe(0)
-    expect(setMyCommands.mock.calls[0]?.[0]).toEqual([])
+    expect((setMyCommands.mock as unknown as { calls: unknown[][] }).calls[0]?.[0]).toEqual([])
   })
 
   it('registers an empty menu without host credentials', async () => {

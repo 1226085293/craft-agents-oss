@@ -26,7 +26,7 @@ import type {
   ButtonPress,
   MessagingLogger,
   SendOptions,
-} from '@craft-agent/messaging-gateway/types'
+} from './types.ts'
 import {
   formatForLarkPost,
   wrapAsTrivialPost,

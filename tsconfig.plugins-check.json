@@ -7,7 +7,15 @@
     "noEmit": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
-    "types": ["bun"]
+    "types": [
+      "bun"
+    ]
   },
-  "include": ["plugins/wechat/program/*.ts", "plugins/whatsapp/program/*.ts"]
+  "include": [
+    "plugins/wechat/program/**/*.ts",
+    "plugins/whatsapp/program/**/*.ts",
+    "plugins/telegram/program/**/*.ts",
+    "plugins/lark/program/**/*.ts",
+    "plugins/qq/program/**/*.ts"
+  ]
 }

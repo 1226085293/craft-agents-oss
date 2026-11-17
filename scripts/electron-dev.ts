@@ -13,16 +13,11 @@ const ROOT_DIR = join(import.meta.dir, "..");
 const ELECTRON_DIR = join(ROOT_DIR, "apps/electron");
 const DIST_DIR = join(ELECTRON_DIR, "dist");
 
-// Replace grammY's bundled polyfills (node-fetch@2 + abort-controller@3) with
-// native Node globals. esbuild otherwise renames the polyfill's `class
-// AbortSignal` to `_AbortSignal` to dodge collision with the global, which
-// breaks node-fetch@2's `constructor.name === 'AbortSignal'` check and fails
-// every Telegram API call with a TypeError. Kept in sync with
-// `apps/electron/package.json` build:main and `scripts/electron-build-main.ts`.
-const MAIN_PROCESS_ALIAS: Record<string, string> = {
-  "node-fetch": join(ROOT_DIR, "apps/electron/src/main/shims/node-fetch.cjs"),
-  "abort-controller": join(ROOT_DIR, "apps/electron/src/main/shims/abort-controller.cjs"),
-};
+// No process-level alias overrides. The grammY shims that motivated the old
+// `node-fetch`/`abort-controller` remaps went away with the gateway; the
+// remaining node-fetch consumer (gaxios, via the OAuth libraries) resolves
+// the real package from node_modules, so nothing needs to be aliased.
+const MAIN_PROCESS_ALIAS: Record<string, string> = {};
 
 // MCP server paths
 const SESSION_SERVER_DIR = join(ROOT_DIR, "packages/session-mcp-server");

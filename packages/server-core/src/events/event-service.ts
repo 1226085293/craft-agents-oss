@@ -347,19 +347,6 @@ export class EventService {
     }
   }
 
-  ingestExternalEvent(event: CraftEventEnvelope): { id: string; duplicate: boolean } | null {
-    try {
-      const result = this.store.insert(event);
-      if (!result.duplicate) this.publish(event);
-      return result;
-    } catch (error) {
-      eventLog.warn(
-        `[events] external event rejected: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return null;
-    }
-  }
-
   /**
    * Execute a catalogue slash command that arrived as an event.
    *

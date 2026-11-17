@@ -11,7 +11,7 @@ import { LOCALE_REGISTRY, type LanguageCode } from '../i18n/registry.ts';
  * - A channel (`message://<platform>/<chatId>`) is NOT paired by default.
  * - While unpaired, its messages never become events: the host answers with
  *   a pairing prompt (rate-limited) and handles `/pair <code>` redemption.
- * - A code is generated in the app (task detail page), is single-use and
+ * - A code is generated in the app (the plugin's detail page), is single-use and
  *   expires after a minute. Redeeming it from a chat pairs that chat.
  *
  * Pairing state is plain JSON beside the other workspace state
@@ -76,8 +76,17 @@ function pruneCodes(file: PairingsFile, now: number): PairingsFile {
   };
 }
 
+/**
+ * A channel is paired only when an entry was created by a real pairing
+ * (markChannelPaired / redeemPairingCode — `pairedAt > 0`). The same file
+ * also holds prompt-cooldown records (`recordPairingPrompt` writes
+ * `pairedAt: 0`), and those must NOT open the gate: otherwise the first
+ * pairing prompt would let every later message through as an event.
+ */
 export function isChannelPaired(workspaceRoot: string, channelKey: string): boolean {
-  return loadPairings(workspaceRoot).channels.some((entry) => entry.channelKey === channelKey);
+  return loadPairings(workspaceRoot).channels.some(
+    (entry) => entry.channelKey === channelKey && entry.pairedAt > 0,
+  );
 }
 
 export function listPairedChannels(workspaceRoot: string): PairedChannelRecord[] {
@@ -109,7 +118,7 @@ const CODE_LENGTH = 8;
 
 /**
  * Generate a single-use pairing code valid for `ttlMs` (default 60s — the
- * task detail page shows a one-minute countdown for a reason: a code left
+ * plugin detail page shows a one-minute countdown for a reason: a code left
  * sitting on screen is a credential).
  */
 export function generatePairingCode(

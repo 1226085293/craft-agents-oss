@@ -1122,6 +1122,9 @@ export interface ListenerDto {
     /** Inline HTML document. */
     pageInline?: string
   }
+  /** Derived from manifest: true for messaging plugins (an action with
+   * `repliesToOrigin`), which gates the pairing section in the UI. */
+  channels?: boolean
   setup: Array<{ text: string; link?: string }>
   logTail?: string
   /**

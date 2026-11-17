@@ -124,6 +124,19 @@ describe('prompt cooldown', () => {
     markChannelPaired(root, CHANNEL);
     expect(isChannelPaired(root, CHANNEL)).toBe(true);
   });
+
+  it('a prompt-cooldown record does not pair the channel (gate must keep holding)', () => {
+    recordPairingPrompt(root, CHANNEL, 2_000_000);
+    expect(isChannelPaired(root, CHANNEL)).toBe(false);
+  });
+
+  it('pairing flips the gate open and unpairing closes it again', () => {
+    expect(isChannelPaired(root, CHANNEL)).toBe(false);
+    markChannelPaired(root, CHANNEL, 2_000_000);
+    expect(isChannelPaired(root, CHANNEL)).toBe(true);
+    unpairChannel(root, CHANNEL);
+    expect(isChannelPaired(root, CHANNEL)).toBe(false);
+  });
 });
 
 describe('pairingTexts', () => {

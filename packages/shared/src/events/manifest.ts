@@ -184,6 +184,20 @@ export interface ListenerManifest {
 }
 
 /**
+ * A messaging listener can receive platform messages AND answer the one
+ * that produced the current event — the manifest's `reply` action carries
+ * `repliesToOrigin: true`, and that flag only makes sense on a chat
+ * platform (收件人由事件本身决定). Every platform plugin (telegram /
+ * wechat / whatsapp / lark / qq) already declares it, so the host gets
+ * one shared predicate for everything pairing-related — no per-plugin
+ * flag, and any future platform that declares a reply action the same way
+ * is recognized without adapter code.
+ */
+export function isMessagingListener(manifest: ListenerManifest): boolean {
+  return (manifest.actions ?? []).some((action) => action.repliesToOrigin === true)
+}
+
+/**
  * Path budget for a plugin page file. The host resolves it against the
  * plugin directory and refuses to read outside it, so the manifest is the
  * first line of that confinement — relative segments only.

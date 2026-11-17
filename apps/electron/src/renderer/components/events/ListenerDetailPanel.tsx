@@ -53,6 +53,7 @@ import { PluginIcon } from './EventsListenersPanel'
 import { ListenerStatusLight } from './ListenerStatusLight'
 import { PluginPageFrame } from './PluginPageFrame'
 import { ListenerLogView } from './ListenerLogView'
+import { ListenerPairingSection } from './ListenerPairingSection'
 
 export interface ListenerDetailPanelProps {
   workspaceId: string
@@ -892,6 +893,16 @@ export function ListenerDetailPanel({
                   </details>
                 )}
               </div>
+            </Section>
+          )}
+
+          {/* Manifest `channels` (derived from isMessagingListener: an
+            * action with repliesToOrigin): the pairing block for chat channels.
+            * Only platform plugins (telegram / wechat / whatsapp / lark / qq)
+            * satisfy the predicate, so the section never shows elsewhere. */}
+          {listener.channels && (
+            <Section title={t('events.listener.pairing.title')}>
+              <ListenerPairingSection workspaceId={workspaceId} listenerId={listenerId} />
             </Section>
           )}
 

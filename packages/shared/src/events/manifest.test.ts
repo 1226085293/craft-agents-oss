@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { parseManifest, satisfiesRange } from './manifest.ts'
+import { parseManifest, satisfiesRange, isMessagingListener } from './manifest.ts'
 
 function base(overrides: Record<string, unknown> = {}) {
   return {
@@ -318,5 +318,60 @@ describe('parseManifest — number bounds (min/max/step)', () => {
     expect(result.manifest?.config?.properties.email?.title).toBe('邮箱')
     expect(result.manifest?.config?.properties.email?.min).toBeUndefined()
     expect(result.manifest?.config?.required).toEqual(['email'])
+  })
+})
+
+describe('isMessagingListener', () => {
+  it('is true when an action carries repliesToOrigin (the reply loop)', () => {
+    const result = parseManifest(
+      base({
+        actions: [
+          { name: 'send_message', description: 'send', input: { properties: {} } },
+          {
+            name: 'reply',
+            description: 'answer the message that produced the event',
+            repliesToOrigin: true,
+            input: { properties: {} },
+          },
+        ],
+      }),
+    )
+    expect(result.ok).toBe(true)
+    expect(isMessagingListener(result.manifest!)).toBe(true)
+  })
+
+  it('is false for outbound-only actions (send without reply)', () => {
+    const result = parseManifest(
+      base({
+        actions: [
+          { name: 'send_message', description: 'send', input: { properties: {} } },
+        ],
+      }),
+    )
+    expect(result.ok).toBe(true)
+    expect(isMessagingListener(result.manifest!)).toBe(false)
+  })
+
+  it('is false when the plugin declares no actions at all', () => {
+    const result = parseManifest(base({}))
+    expect(result.ok).toBe(true)
+    expect(isMessagingListener(result.manifest!)).toBe(false)
+  })
+
+  it('ignores repliesToOrigin that is not exactly true (parse keeps false)', () => {
+    const result = parseManifest(
+      base({
+        actions: [
+          {
+            name: 'reply',
+            description: 'answer',
+            repliesToOrigin: false,
+            input: { properties: {} },
+          },
+        ],
+      }),
+    )
+    expect(result.ok).toBe(true)
+    expect(isMessagingListener(result.manifest!)).toBe(false)
   })
 })

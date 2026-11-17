@@ -35,6 +35,7 @@ import {
 import { loadSubscriptions } from '@craft-agent/shared/events/subscriptions.ts';
 import { deriveThreadKey, findThreadOwner } from '@craft-agent/shared/events/thread-bindings.ts';
 import type { ListenerConfigSchema, ListenerUi } from '@craft-agent/shared/events/manifest.ts';
+import { isMessagingListener } from '@craft-agent/shared/events/manifest.ts';
 import { parseSlashCommand } from '@craft-agent/shared/events/slash-commands.ts';
 import {
   isChannelPaired,
@@ -309,8 +310,8 @@ export class EventService {
   /**
    * The sink wrapper — channel pairing lives HERE, before the store.
    *
-   * A channel that has not been paired (pairing code redeemed from the task
-   * detail page) is not a source of events at all: its messages never reach
+   * A channel that has not been paired (pairing code redeemed from the
+   * plugin's detail page) is not a source of events at all: its messages never reach
    * the store, the dispatcher, or the inbox. The host answers them instead —
    * a rate-limited pairing prompt, or the /pair <code> redemption itself.
    * Events without a channel (no message:// link) are not gated.
@@ -786,6 +787,8 @@ export interface ListenerView extends LoadedListener {
   startupErrorTail?: string
   /** Plugin-provided HTML config UI (manifest `ui`), when declared. */
   ui?: ListenerUi
+  /** Manifest-derived: messaging plugins (an action with repliesToOrigin). */
+  channels?: boolean
   /** Tail of the plugin's README.md — detail view only, never on list rows. */
   readme?: string
 }
@@ -844,6 +847,7 @@ function toListenerView(
     homepage: m.homepage,
     configSchema: localizeConfigSchema(m.config, prefix, strings),
     ui: m.ui,
+    channels: isMessagingListener(m) || undefined,
     // Steps are the plugin's own instructions, so they localise by position:
     // `setup.0`, `setup.1`, … A plugin that ships no translations keeps the
     // manifest wording, which is already readable.

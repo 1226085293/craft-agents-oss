@@ -104,7 +104,14 @@ export function formatMergedNudge(events: EventMeta[]): string {
   const rest = events.length - shown.length;
   const lines = [
     `[event] ${events.length} 条新事件 · ${source}`,
-    ...shown.map((event) => `· ${event.title}（${event.type}）`),
+    // Who / where per event, indented under its line: an agent acting on a
+    // merged batch must be able to tell the channels apart without a
+    // get_event round-trip.
+    ...shown.flatMap((event) => {
+      const line = `· ${event.title}（${event.type}）`;
+      const origin = eventOriginLine(event.meta);
+      return origin ? [line, `  ${origin}`] : [line];
+    }),
     ...(rest > 0 ? [`…还有 ${rest} 条`] : []),
     `用 list_events({ source: "${source}" }) 查看`,
   ];

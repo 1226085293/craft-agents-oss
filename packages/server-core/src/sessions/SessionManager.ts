@@ -9311,7 +9311,14 @@ ${request.prompt}`;
       sendToSession: (sessionId, text) => this.sendSystemMessage(sessionId, text),
       bindThread: ({ eventId, sessionId }) => {
         const managed = this.sessions.get(sessionId)
-        if (managed) this.bindEventThread(managed, eventId)
+        if (!managed) return
+        // Same origin tracking as the direct-delivery path: the supervisor lane
+        // has no binding of its own, so the event it was drained from is the
+        // only place its reply may go. Without this, a drained group event
+        // leaves the stale origin in place and the reply lands in the last
+        // channel the session answered on.
+        this.rememberEventOrigin(sessionId, eventId)
+        this.bindEventThread(managed, eventId)
       },
       claimRun: (taskId, sessionId, scope) => this.claimTaskRun(workspaceId, taskId, sessionId, scope),
       logDispatch: (message) => sessionLog.info(`[dispatch] ${message}`),

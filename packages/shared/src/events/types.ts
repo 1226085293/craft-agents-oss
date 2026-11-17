@@ -355,7 +355,10 @@ export function eventOriginLine(meta?: Record<string, string>): string | undefin
     meta.channel,
     meta.channelId ? `id ${meta.channelId}` : undefined,
   ].filter(Boolean);
-  const senderBits = [meta.sender, meta.senderId ? `(id ${meta.senderId})` : undefined].filter(Boolean);
+  const senderBits = [
+    meta.sender,
+    meta.senderId && meta.senderId !== meta.channelId ? `(id ${meta.senderId})` : undefined,
+  ].filter(Boolean);
   const parts = [
     channelBits.length ? `渠道 ${channelBits.join(' ')}` : undefined,
     senderBits.length ? `发信人 ${senderBits.join(' ')}` : undefined,

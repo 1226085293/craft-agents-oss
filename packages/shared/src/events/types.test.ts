@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import {
   EVENT_LIMITS,
   bigramText,
+  eventOriginLine,
   normalizeEventInput,
   type CraftEventEnvelope,
 } from './types.ts';
@@ -183,5 +184,36 @@ describe('normalizeEventInput: meta', () => {
   it('ignores non-object meta entirely', () => {
     const event = ok(normalizeEventInput({ type: 'tg.message', title: 'hi', meta: 'nope' }, identity));
     expect(event.meta).toBeUndefined();
+  });
+});
+
+describe('eventOriginLine', () => {
+  it('renders channel kind, name, id and sender in one line', () => {
+    expect(
+      eventOriginLine({ channelKind: 'group', channel: 'Ops 群', channelId: '123', sender: '张三' }),
+    ).toBe('渠道 群组 Ops 群 id 123，发信人 张三');
+  });
+
+  it('omits the sender id when it duplicates the channel id (private chats)', () => {
+    expect(
+      eventOriginLine({
+        channelKind: 'private',
+        channelId: '8362946740',
+        sender: 'Mark (@mk2077)',
+        senderId: '8362946740',
+      }),
+    ).toBe('渠道 私聊 id 8362946740，发信人 Mark (@mk2077)');
+  });
+
+  it('keeps the sender id when it differs from the channel id (groups)', () => {
+    expect(
+      eventOriginLine({ channelKind: 'group', channel: 'Ops 群', channelId: '123', sender: '张三', senderId: '456' }),
+    ).toBe('渠道 群组 Ops 群 id 123，发信人 张三 (id 456)');
+  });
+
+  it('falls back to compact JSON for unknown keys only, undefined when empty', () => {
+    expect(eventOriginLine({ threadId: '7' })).toBe('meta {"threadId":"7"}');
+    expect(eventOriginLine({})).toBeUndefined();
+    expect(eventOriginLine(undefined)).toBeUndefined();
   });
 });

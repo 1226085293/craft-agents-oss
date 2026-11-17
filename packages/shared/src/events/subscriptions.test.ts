@@ -92,6 +92,21 @@ describe('nudge formatting', () => {
     expect(text).toContain('还有 2 条')
     expect(text).toContain('list_events')
   })
+
+  it('indents the origin line under each event that carries meta', () => {
+    const events = [
+      event({ id: 'evt_a', title: '甲', meta: { channelKind: 'group', channel: 'Ops 群', channelId: '1', sender: '张三' } }),
+      event({ id: 'evt_b', title: '乙', meta: { channelKind: 'private', channelId: '2', sender: '李四', senderId: '2' } }),
+      event({ id: 'evt_c', title: '丙' }),
+    ]
+    const text = formatMergedNudge(events)
+    expect(text).toContain('· 甲（mail.received）\n  渠道 群组 Ops 群 id 1，发信人 张三')
+    // private: sender id == channel id, deduped
+    expect(text).toContain('· 乙（mail.received）\n  渠道 私聊 id 2，发信人 李四')
+    // no meta: no origin line
+    expect(text).toContain('· 丙（mail.received）\n')
+    expect(text).not.toContain('· 丙（mail.received）\n  ')
+  })
 })
 
 describe('quota', () => {

@@ -13,11 +13,6 @@ const ROOT_DIR = join(import.meta.dir, "..");
 const ELECTRON_DIR = join(ROOT_DIR, "apps/electron");
 const DIST_DIR = join(ELECTRON_DIR, "dist");
 
-// No process-level alias overrides. The grammY shims that motivated the old
-// `node-fetch`/`abort-controller` remaps went away with the gateway; the
-// remaining node-fetch consumer (gaxios, via the OAuth libraries) resolves
-// the real package from node_modules, so nothing needs to be aliased.
-const MAIN_PROCESS_ALIAS: Record<string, string> = {};
 
 // MCP server paths
 const SESSION_SERVER_DIR = join(ROOT_DIR, "packages/session-mcp-server");
@@ -427,8 +422,7 @@ async function main(): Promise<void> {
     runEsbuild(
       "apps/electron/src/main/index.ts",
       "apps/electron/dist/main.cjs",
-      oauthDefines,
-      { alias: MAIN_PROCESS_ALIAS }
+      oauthDefines
     ),
     runEsbuild(
       "apps/electron/src/preload/bootstrap.ts",
@@ -524,7 +518,6 @@ async function main(): Promise<void> {
     format: "cjs",
     outfile: join(ROOT_DIR, "apps/electron/dist/main.cjs"),
     external: MAIN_BUNDLE_EXTERNALS,
-    alias: MAIN_PROCESS_ALIAS,
     define: oauthDefines,
     logLevel: "info",
   });

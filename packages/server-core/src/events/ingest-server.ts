@@ -156,14 +156,17 @@ export class EventIngestServer {
    * argv-style tools read the flag, everything else reads the env.
    */
   listenerEnv(listenerId: string): Record<string, string> {
-    if (!this.address) throw new Error('event ingest server is not running');
+    // `baseUrl` is `string | null`; null means the server is not running, so
+    // narrow once and reuse the concrete root for both surfaces.
+    const root = this.baseUrl;
+    if (!root) throw new Error('event ingest server is not running');
     return {
-      CRAFT_EVENTS_URL: `${this.baseUrl}/events/${listenerId}`,
+      CRAFT_EVENTS_URL: `${root}/events/${listenerId}`,
       // `/host/<command>` is served from the server *root*, not under the
       // per-listener prefix. The two must not be confused: deriving the root
       // from the event URL works today, but the address belongs in its own
       // variable so plugins never have to reverse-engineer the prefix.
-      CRAFT_HOST_URL: this.baseUrl,
+      CRAFT_HOST_URL: root,
       CRAFT_EVENTS_TOKEN: this.token,
       CRAFT_LISTENER_ID: listenerId,
     };

@@ -94,7 +94,13 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
       void _deps.sessionManager?.routeUnclaimedEvent?.(workspaceId, event).catch(() => {
         // Routing an event must never take the ingest path down.
       });
-    });
+    }, _deps.sessionManager
+      ? {
+          // The host slash command /stop stops the bound session's turn. Only
+          // the session manager can do that, so it is injected here.
+          stop: (sessionId: string) => _deps.sessionManager!.cancelProcessing(sessionId),
+        }
+      : undefined);
   };
 
   const broadcastStatus = (workspaceId: string, status: import('../../events/listener-supervisor').ListenerRuntimeStatus) => {

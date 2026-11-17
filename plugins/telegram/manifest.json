@@ -61,30 +61,6 @@
     ]
   },
   "icon": "send",
-  "commands": [
-    {
-      "name": "new",
-      "description": "开一个新会话并绑定到这个聊天",
-      "usage": "[name]"
-    },
-    {
-      "name": "bind",
-      "description": "绑定到已有会话"
-    },
-    {
-      "name": "pair",
-      "description": "用 App 里的配对码绑定",
-      "usage": "<code>"
-    },
-    {
-      "name": "unbind",
-      "description": "解除这个聊天的绑定"
-    },
-    {
-      "name": "compact",
-      "description": "压缩当前会话的上下文"
-    }
-  ],
   "locales": "i18n",
   "runtime": {
     "kind": "script",

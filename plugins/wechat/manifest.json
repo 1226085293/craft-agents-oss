@@ -98,13 +98,6 @@
       "text": "打开微信插件详情页，在内容区点「开始授权」，用手机微信扫码完成配对；若平台要求验证码，把手机上显示的数字输入到页面里。"
     }
   ],
-  "commands": [
-    {
-      "name": "new",
-      "description": "开一个新会话并绑定到这个聊天",
-      "usage": "[name]"
-    }
-  ],
   "locales": "i18n",
   "runtime": {
     "kind": "script",

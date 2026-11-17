@@ -34,6 +34,8 @@ import {
 import { loadSubscriptions } from '@craft-agent/shared/events/subscriptions.ts';
 import { deriveThreadKey, findThreadOwner } from '@craft-agent/shared/events/thread-bindings.ts';
 import type { ListenerConfigSchema, ListenerUi } from '@craft-agent/shared/events/manifest.ts';
+import { parseSlashCommand } from '@craft-agent/shared/events/slash-commands.ts';
+import { executeSlashCommand, slashCommandCatalogue } from './slash-command.ts';
 import type { CraftEventEnvelope } from '@craft-agent/shared/events/types.ts';
 import type { ListenerReportedDepsDto } from '@craft-agent/shared/protocol/dto';
 
@@ -132,7 +134,17 @@ export class EventService {
         // 'starting' (and clear the ready-timeout) on the supervisor side.
         this.supervisor.markHealthy(listenerId);
       },
-      onInserted: (event) => this.publish(event),
+      onInserted: (event) => {
+        // Host-owned slash commands: Craft owns the meaning, so a command event
+        // is consumed here (marked handled, answered, recorded in the routing
+        // trail) and never dispatched to a session. Everything else publishes
+        // exactly as before.
+        if (parseSlashCommand(event.body)) {
+          void this.consumeSlashCommand(event, event.id);
+        } else {
+          this.publish(event);
+        }
+      },
       hostCommands: buildHostCommands(options.hostActions),
     });
 
@@ -275,6 +287,44 @@ export class EventService {
         `[events] external event rejected: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
+    }
+  }
+
+  /**
+   * Execute a catalogue slash command that arrived as an event.
+   *
+   * The plugin forwarded the text; the host decides what it does. On success
+   * the event is marked handled by `host` and recorded in the routing trail,
+   * and any queued reply is flushed through the outbox dispatcher now.
+   */
+  private async consumeSlashCommand(event: CraftEventEnvelope, id: string): Promise<void> {
+    try {
+      const consumed = await executeSlashCommand(event, {
+        workspaceRoot: this.options.workspaceRoot,
+        stopSession: this.options.hostActions?.stop
+          ? (sessionId) => this.options.hostActions!.stop!(sessionId)
+          : undefined,
+      });
+      if (!consumed) {
+        // Defensive: a parsed command the executor declined is routed like
+        // any other text rather than vanishing.
+        this.publish(event);
+        return;
+      }
+      this.store.markHandled(id, 'host', Date.now());
+      const name = parseSlashCommand(event.body)?.name ?? '';
+      this.store.recordRouting(id, {
+        via: 'command',
+        target: name,
+        outcome: `host executed /${name}`,
+        at: Date.now(),
+      });
+      // Replies are outbox records; flush so they leave within this tick.
+      void this.outboxTick();
+    } catch (error) {
+      eventLog.warn(
+        `[events] slash command execution failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -887,8 +937,18 @@ export function resetEventServicesForTest(): void {
  * a contract, and it deliberately contains no platform vocabulary.
  */
 function buildHostCommands(actions: HostActions | undefined): HostCommand[] {
-  if (!actions) return [];
-  const commands: HostCommand[] = [];
+  // Always published: the catalogue is data, not a capability that needs a
+  // host action. Platform plugins fetch it to build their command menu, so
+  // adding a command never requires a per-plugin change.
+  const commands: HostCommand[] = [
+    {
+      name: 'slash_commands',
+      summary: 'The host slash command catalogue — register these in the platform menu',
+      params: [],
+      run: async () => slashCommandCatalogue(),
+    },
+  ];
+  if (!actions) return commands;
   const sessionParam = {
     name: 'sessionId',
     type: 'string' as const,

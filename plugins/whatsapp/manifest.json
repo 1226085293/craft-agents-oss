@@ -104,13 +104,6 @@
       "text": "打开 WhatsApp 插件详情页，在内容区点「开始授权」，用手机 WhatsApp 扫描二维码完成配对。"
     }
   ],
-  "commands": [
-    {
-      "name": "new",
-      "description": "开一个新会话并绑定到这个聊天",
-      "usage": "[name]"
-    }
-  ],
   "locales": "i18n",
   "runtime": {
     "kind": "script",

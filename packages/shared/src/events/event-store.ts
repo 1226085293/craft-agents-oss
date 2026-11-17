@@ -62,8 +62,8 @@ export interface EventDelivery {
  * session ever received the event.
  */
 export interface EventRouting {
-  /** Which tier handled it. */
-  via: 'subscription' | 'rule' | 'task' | 'supervisor' | 'dropped';
+  /** Which tier handled it. `command` = the host executed it as a slash command. */
+  via: 'subscription' | 'rule' | 'task' | 'supervisor' | 'command' | 'dropped';
   /** Rule name, task id or session id, depending on the tier. */
   target?: string;
   /** One line describing the outcome, for the audit trail. */

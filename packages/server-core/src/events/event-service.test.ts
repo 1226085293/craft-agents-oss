@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { getEventService, resetEventServicesForTest } from './event-service.ts';
+import { loadOutbox } from '@craft-agent/shared/events/outbox.ts';
+import { bindThread } from '@craft-agent/shared/events/thread-bindings.ts';
 import { existsSync } from 'node:fs';
 import type { EventMeta, EventRecord } from '@craft-agent/shared/events/event-store.ts';
 
@@ -202,5 +204,114 @@ describe('enabling a catalog listener', () => {
       if (previousCatalog === undefined) delete process.env.CRAFT_PLUGIN_CATALOG;
       else process.env.CRAFT_PLUGIN_CATALOG = previousCatalog;
     }
+  });
+});
+
+/**
+ * Host-owned slash commands: the plugin forwards the text, Craft decides the
+ * meaning. /help answers from the catalogue, /stop stops the bound session.
+ * Neither reaches the dispatcher (no onUnclaimed) and both are marked
+ * handled by `host` with a routing trail entry.
+ */
+async function tickUntil(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('tickUntil timed out');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+describe('host slash commands', () => {
+  async function postCommand(service: Awaited<ReturnType<typeof getEventService>>, body: string): Promise<void> {
+    // `telegram` is the posting listener id, so the ingested event's source
+    // (and any outbox reply's listenerId) is `telegram`.
+    const env = service.listenerEnv('telegram');
+    const response = await postJson(env.CRAFT_EVENTS_URL!, env.CRAFT_EVENTS_TOKEN!, {
+      type: 'telegram.message',
+      title: body,
+      body,
+      links: [{ rel: 'reply', url: 'message://telegram/42/7' }],
+    });
+    expect(response.status).toBe(200);
+  }
+
+  it('/help queues a catalogue reply and does not dispatch', async () => {
+    const root = makeRoot();
+    const unclaimed: unknown[] = [];
+    const service = await getEventService(
+      'ws-slash-help',
+      root,
+      undefined,
+      undefined,
+      (event) => unclaimed.push(event),
+    );
+
+    await postCommand(service, '/help');
+    await tickUntil(() => loadOutbox(root).length > 0);
+
+    const records = loadOutbox(root);
+    expect(records).toHaveLength(1);
+    expect(records[0].action).toBe('send_message');
+    expect(records[0].listenerId).toBe('telegram');
+    expect(records[0].args).toEqual({
+      channelId: '42',
+      text: expect.stringContaining('/stop'),
+    });
+    expect(records[0].status).toBe('pending');
+    expect(unclaimed).toHaveLength(0);
+  });
+
+  it('/stop stops the thread-bound session and confirms', async () => {
+    const root = makeRoot();
+    bindThread(root, { threadKey: 'message://telegram/42', sessionId: 'sess-1' });
+    const stopped: string[] = [];
+    const service = await getEventService(
+      'ws-slash-stop',
+      root,
+      undefined,
+      undefined,
+      undefined,
+      { stop: async (sessionId: string) => { stopped.push(sessionId); } },
+    );
+
+    await postCommand(service, '/stop');
+    await tickUntil(() => stopped.length > 0);
+
+    expect(stopped).toEqual(['sess-1']);
+    const records = loadOutbox(root);
+    expect(records).toHaveLength(1);
+    expect(records[0].args).toEqual({ channelId: '42', text: 'Stopped.' });
+  });
+
+  it('/stop without a binding reports idle', async () => {
+    const root = makeRoot();
+    const service = await getEventService('ws-slash-idle', root);
+
+    await postCommand(service, '/stop');
+    await tickUntil(() => loadOutbox(root).length > 0);
+
+    const records = loadOutbox(root);
+    expect(records).toHaveLength(1);
+    expect(records[0].args).toEqual({ channelId: '42', text: 'Nothing is running here.' });
+  });
+
+  it('plain text is not a command and keeps the normal path', async () => {
+    const root = makeRoot();
+    const unclaimed: unknown[] = [];
+    // A dispatch target is required for the dispatcher (and with it the
+    // onUnclaimed hook) to exist at all.
+    const service = await getEventService(
+      'ws-slash-plain',
+      root,
+      undefined,
+      { deliver: async () => true },
+      (event) => unclaimed.push(event),
+    );
+
+    await postCommand(service, 'hello there');
+    await tickUntil(() => unclaimed.length > 0);
+
+    expect(unclaimed).toHaveLength(1);
+    expect(loadOutbox(root)).toHaveLength(0);
   });
 });

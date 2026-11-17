@@ -72,18 +72,59 @@ const MIME_EXT_FALLBACK: Record<string, string> = {
   'video/quicktime': '.mov',
 }
 
-type TelegramBotCommand = Parameters<Api['setMyCommands']>[0][number]
-
-export const TELEGRAM_BOT_COMMANDS = [
-  // Intentionally empty: the bot menu shows no slash commands. The
-  // registration mechanism below is kept on purpose — add an entry here
-  // (and the matching handler) to expose commands again.
-] as const satisfies readonly TelegramBotCommand[]
-
+/**
+ * Slash commands are host-owned: which commands exist and what they do live
+ * in Craft (shared/events/slash-commands.ts + the EventService executor),
+ * not in this plugin. The plugin's whole duty is to register Craft's
+ * catalogue in Telegram's menu — so adding a command is a host-side change
+ * that never touches platform code. The registration mechanism below is
+ * kept on purpose: it actively clears/refreshes the menu each boot.
+ */
 export type TelegramCommandApi = Pick<Api, 'setMyCommands'>
 
-export async function registerTelegramBotCommands(api: TelegramCommandApi): Promise<void> {
-  await api.setMyCommands(TELEGRAM_BOT_COMMANDS)
+const HOST_SLASH_COMMAND_PATH = '/host/slash_commands'
+/** Bot API hard limit for menu descriptions. */
+const TG_MENU_DESCRIPTION_MAX = 25
+
+/** Fetch the host's slash command catalogue as Telegram menu entries. */
+export async function fetchHostSlashCommands(
+  timeoutMs = 4_000,
+): Promise<Array<{ command: string; description: string }>> {
+  const base = (process.env.CRAFT_EVENTS_URL ?? '').replace(/\/+$/, '')
+  const token = process.env.CRAFT_EVENTS_TOKEN ?? ''
+  if (!base || !token) return []
+  try {
+    const res = await fetch(`${base}${HOST_SLASH_COMMAND_PATH}`, {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    const data = (await res.json()) as { ok?: boolean; result?: unknown }
+    if (!res.ok || !data || data.ok !== true || !Array.isArray(data.result)) return []
+    return data.result
+      .filter(
+        (entry): entry is { name: string; description: string } =>
+          !!entry && typeof entry.name === 'string' && typeof entry.description === 'string',
+      )
+      .map((entry) => ({ command: entry.name, description: entry.description }))
+  } catch {
+    // Menu commands are a convenience: an unreachable host must not break
+    // polling. An empty menu is the honest state.
+    return []
+  }
+}
+
+/** Register the host's slash command catalogue in Telegram's menu. */
+export async function registerHostSlashCommands(api: TelegramCommandApi): Promise<number> {
+  const commands = await fetchHostSlashCommands()
+  await api.setMyCommands(
+    commands.map((entry) => ({
+      command: entry.command,
+      description: entry.description.slice(0, TG_MENU_DESCRIPTION_MAX),
+    })),
+  )
+  return commands.length
 }
 
 const NOOP_LOGGER: MessagingLogger = {
@@ -392,18 +433,10 @@ export class TelegramAdapter implements PlatformAdapter {
     })
 
     // Handle incoming text messages.
-    //
-    // Narrow exception to `isAcceptedChat`: `/pair <code>` is allowed from
-    // *any* chat, even if the workspace hasn't paired this chat yet. This is
-    // the bootstrap mechanism that registers a supergroup — without this
-    // exception, `/pair` typed in a fresh supergroup is silently dropped
-    // (chicken-and-egg). Codes are workspace-scoped, single-use, 5-min TTL,
-    // and rate-limited per-sender, so the exception is bounded.
     this.bot.on('message:text', async (ctx: Context) => {
       if (!this.messageHandler || !ctx.message || !ctx.chat) return
       const text = ctx.message.text ?? ''
-      const isPairAttempt = /^\/pair(\s|$|@)/i.test(text)
-      if (!isAcceptedChat(ctx, this.supergroupChatId) && !isPairAttempt) {
+      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
         this.logRejectedChat('message:text', ctx)
         return
       }
@@ -659,14 +692,14 @@ export class TelegramAdapter implements PlatformAdapter {
     }
 
     try {
-      await withTimeout(
-        registerTelegramBotCommands(this.bot.api),
+      const registered = await withTimeout(
+        registerHostSlashCommands(this.bot.api),
         10_000,
         'setMyCommands',
       )
-      this.log.info('[telegram] setMyCommands ok', {
+      this.log.info('[telegram] host slash menu registered', {
         event: 'telegram_commands_registered',
-        commands: TELEGRAM_BOT_COMMANDS.map((command) => command.command),
+        commands: registered,
       })
     } catch (err) {
       this.log.warn('[telegram] setMyCommands failed (non-fatal):', describeError(err))

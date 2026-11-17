@@ -81,11 +81,17 @@ const TG_MENU_DESCRIPTION_MAX = 25
 export async function fetchHostSlashCommands(
   timeoutMs = 4_000,
 ): Promise<Array<{ command: string; description: string }>> {
-  const base = (process.env.CRAFT_EVENTS_URL ?? '').replace(/\/+$/, '')
+  // `/host` commands are served from the root of the ingest server, not
+  // under the per-listener event URL. Prefer the dedicated CRAFT_HOST_URL
+  // and fall back to stripping the /events/<listener> prefix.
+  const root = (
+    process.env.CRAFT_HOST_URL ??
+    (process.env.CRAFT_EVENTS_URL ?? '').replace(/\/events\/[^/]+$/, '')
+  ).replace(/\/+$/, '')
   const token = process.env.CRAFT_EVENTS_TOKEN ?? ''
-  if (!base || !token) return []
+  if (!root || !token) return []
   try {
-    const res = await fetch(`${base}${HOST_SLASH_COMMAND_PATH}`, {
+    const res = await fetch(`${root}${HOST_SLASH_COMMAND_PATH}`, {
       method: 'POST',
       body: '{}',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },

@@ -159,6 +159,11 @@ export class EventIngestServer {
     if (!this.address) throw new Error('event ingest server is not running');
     return {
       CRAFT_EVENTS_URL: `${this.baseUrl}/events/${listenerId}`,
+      // `/host/<command>` is served from the server *root*, not under the
+      // per-listener prefix. The two must not be confused: deriving the root
+      // from the event URL works today, but the address belongs in its own
+      // variable so plugins never have to reverse-engineer the prefix.
+      CRAFT_HOST_URL: this.baseUrl,
       CRAFT_EVENTS_TOKEN: this.token,
       CRAFT_LISTENER_ID: listenerId,
     };

@@ -228,6 +228,9 @@ describe('EventIngestServer failure handling', () => {
   it('exposes the listener env with URL and token', async () => {
     const env = server.listenerEnv('github-watch');
     expect(env.CRAFT_EVENTS_URL).toBe(`http://127.0.0.1:${port}/events/github-watch`);
+    // `/host` commands are served from the server root, so the plugin needs
+    // the root address as its own variable rather than deriving it.
+    expect(env.CRAFT_HOST_URL).toBe(`http://127.0.0.1:${port}`);
     expect(env.CRAFT_EVENTS_TOKEN).toBe(TOKEN);
     expect(env.CRAFT_LISTENER_ID).toBe('github-watch');
   });

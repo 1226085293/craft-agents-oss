@@ -82,6 +82,7 @@ describe('TelegramAdapter inbound dispatch', () => {
 describe('host slash command menu registration', () => {
   const savedUrl = process.env.CRAFT_EVENTS_URL
   const savedToken = process.env.CRAFT_EVENTS_TOKEN
+  const savedHostUrl = process.env.CRAFT_HOST_URL
   let originalFetch: typeof fetch
 
   afterEach(() => {
@@ -89,6 +90,8 @@ describe('host slash command menu registration', () => {
     else process.env.CRAFT_EVENTS_URL = savedUrl
     if (savedToken === undefined) delete process.env.CRAFT_EVENTS_TOKEN
     else process.env.CRAFT_EVENTS_TOKEN = savedToken
+    if (savedHostUrl === undefined) delete process.env.CRAFT_HOST_URL
+    else process.env.CRAFT_HOST_URL = savedHostUrl
     globalThis.fetch = originalFetch
   })
 
@@ -149,6 +152,49 @@ describe('host slash command menu registration', () => {
     originalFetch = globalThis.fetch
     globalThis.fetch = mock(async () => {
       throw new Error('connection refused')
+    }) as typeof fetch
+
+    const setMyCommands = mock(async () => true as const)
+    const count = await registerHostSlashCommands({ setMyCommands } as unknown as TelegramCommandApi)
+
+    expect(count).toBe(0)
+    expect(setMyCommands.mock.calls[0]?.[0]).toEqual([])
+  })
+
+  it('prefers CRAFT_HOST_URL over the per-listener events URL', async () => {
+    process.env.CRAFT_HOST_URL = 'http://127.0.0.1:7777'
+    process.env.CRAFT_EVENTS_URL = 'http://127.0.0.1:9999/events/telegram'
+    process.env.CRAFT_EVENTS_TOKEN = 'test-token'
+    originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(url)).toBe('http://127.0.0.1:7777/host/slash_commands')
+      expect((init?.headers as Record<string, string>)?.authorization).toBe('Bearer test-token')
+      return new Response(
+        JSON.stringify({ ok: true, result: [{ name: 'stop', description: 'Stop the current run' }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }) as typeof fetch
+
+    const setMyCommands = mock(async () => true as const)
+    const count = await registerHostSlashCommands({ setMyCommands } as unknown as TelegramCommandApi)
+
+    expect(count).toBe(1)
+    expect(setMyCommands.mock.calls[0]?.[0]).toEqual([{ command: 'stop', description: 'Stop the current run' }])
+  })
+
+  it('derives the host root from a per-listener events URL when CRAFT_HOST_URL is unset', async () => {
+    delete process.env.CRAFT_HOST_URL
+    process.env.CRAFT_EVENTS_URL = 'http://127.0.0.1:9999/events/telegram'
+    process.env.CRAFT_EVENTS_TOKEN = 'test-token'
+    originalFetch = globalThis.fetch
+    globalThis.fetch = mock(async (url: RequestInfo | URL) => {
+      // Regression: the events URL must be stripped to the server root, or the
+      // /host route (served at the root) is never found and the menu stays empty.
+      expect(String(url)).toBe('http://127.0.0.1:9999/host/slash_commands')
+      return new Response(
+        JSON.stringify({ ok: true, result: [] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
     }) as typeof fetch
 
     const setMyCommands = mock(async () => true as const)

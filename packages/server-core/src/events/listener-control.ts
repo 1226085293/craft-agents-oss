@@ -8,6 +8,10 @@
  *
  * Contract (`craft-plugin/1`) extends the same service with actions:
  *   POST /action             -> 200 {"ok":bool,"message":string}
+ *   POST /channel_labels     -> 200 {"labels": Record<channelKey, label>}
+ *                               (optional endpoint — a 404 or absence means
+ *                               the plugin has no display names, and Craft
+ *                               falls back to the raw channel key)
  *
  * Actions are why a plugin can ship its own program: the manifest says what may
  * be called, the plugin does the work, and the host keeps no knowledge of any
@@ -135,6 +139,54 @@ export async function postDepAction(
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Ask the plugin for display names of channel keys (`POST /channel_labels`).
+ *
+ * This is the whole point of the endpoint: the host knows nothing about
+ * platform vocabulary. It hands the plugin the channel keys it is rendering
+ * and the plugin answers with whatever the platform calls them (a chat
+ * title, a contact name, a handle). Missing keys are simply absent from the
+ * result — the caller renders the raw key. Returns `null` when the plugin
+ * offers no service at all (no control.json, process down, old build
+ * without the endpoint) so callers have one branch for "no labels".
+ */
+export async function fetchChannelLabels(
+  dataDir: string,
+  channelKeys: string[],
+  timeoutMs = 3000,
+): Promise<Record<string, string> | null> {
+  const info = readControlInfo(dataDir)
+  if (!info) return null
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${info.port}/channel_labels`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${info.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ channelKeys }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    // 404 = an older plugin without the endpoint — a legitimate "no labels".
+    if (response.status === 404 || !response.ok) return null
+
+    const body = (await response.json()) as { labels?: unknown }
+    if (!body || typeof body.labels !== 'object' || body.labels === null || Array.isArray(body.labels)) {
+      return null
+    }
+    const out: Record<string, string> = {}
+    for (const [key, value] of Object.entries(body.labels)) {
+      if (typeof key === 'string' && typeof value === 'string' && value.trim()) {
+        out[key] = value.trim().slice(0, 120)
+      }
+    }
+    return out
+  } catch {
+    return null // ECONNREFUSED / timeout: the plugin is not running
   }
 }
 

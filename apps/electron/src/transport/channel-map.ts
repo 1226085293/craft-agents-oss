@@ -478,6 +478,7 @@ export const CHANNEL_MAP = {
   pairingGenerate: invoke(RPC_CHANNELS.events.PAIRING_GENERATE),
   pairingList: invoke(RPC_CHANNELS.events.PAIRING_LIST),
   pairingUnpair: invoke(RPC_CHANNELS.events.PAIRING_UNPAIR),
+  channelLabels: invoke(RPC_CHANNELS.events.CHANNEL_LABELS),
 
   // Pages
   getPages: invoke(RPC_CHANNELS.pages.GET),

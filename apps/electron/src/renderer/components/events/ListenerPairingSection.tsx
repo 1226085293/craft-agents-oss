@@ -31,17 +31,33 @@ export function ListenerPairingSection({
   const [channels, setChannels] = React.useState<Array<{ channelKey: string; pairedAt: number }>>([])
   const [code, setCode] = React.useState<{ value: string; expiresAt: number } | null>(null)
   const [now, setNow] = React.useState(0)
+  /** Display names the plugin itself resolves for its channel keys. */
+  const [labels, setLabels] = React.useState<Record<string, string>>({})
 
   // Pairing happens in-chat (`/pair <code>`), not on this page — so the
   // list must keep refreshing like the outbox does: five-second poll,
-  // the same cadence the dispatcher uses.
+  // the same cadence the dispatcher uses. Channel display names come from
+  // the plugin's control service in the same pass — the host never learns
+  // platform vocabulary, it just renders what the plugin answers.
   React.useEffect(() => {
     let cancelled = false
     const load = () => {
       window.electronAPI
         .pairingList(workspaceId)
         .then((rows) => {
-          if (!cancelled) setChannels(rows)
+          if (cancelled) return
+          setChannels(rows)
+          const keys = rows
+            .filter((row) => row.pairedAt > 0 && row.channelKey.startsWith(`message://${listenerId}/`))
+            .map((row) => row.channelKey)
+          if (keys.length === 0) {
+            setLabels({})
+            return
+          }
+          window.electronAPI
+            .channelLabels(workspaceId, listenerId, keys)
+            .then(setLabels)
+            .catch(() => setLabels({}))
         })
         .catch(() => undefined)
     }
@@ -51,7 +67,7 @@ export function ListenerPairingSection({
       cancelled = true
       clearInterval(timer)
     }
-  }, [workspaceId])
+  }, [workspaceId, listenerId])
 
   React.useEffect(() => {
     if (!code) return
@@ -122,9 +138,18 @@ export function ListenerPairingSection({
           <ul className="space-y-1.5">
             {ownChannels.map((row) => (
               <li key={row.channelKey} className="flex min-w-0 items-center gap-2 text-[13px] leading-5">
-                <span className="min-w-0 truncate font-mono text-foreground/90" title={row.channelKey}>
-                  {row.channelKey}
-                </span>
+                {labels[row.channelKey] ? (
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-foreground" title={row.channelKey}>
+                      {labels[row.channelKey]}
+                    </div>
+                    <div className="truncate font-mono text-[11px] text-muted-foreground/70">{row.channelKey}</div>
+                  </div>
+                ) : (
+                  <span className="min-w-0 flex-1 truncate font-mono text-foreground/90" title={row.channelKey}>
+                    {row.channelKey}
+                  </span>
+                )}
                 <button
                   type="button"
                   onClick={() => unpair(row.channelKey)}

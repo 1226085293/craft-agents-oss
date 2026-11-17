@@ -48,6 +48,52 @@ const DATA_DIR = process.env.CRAFT_LISTENER_DATA ?? ''
  */
 const CONTROL_TOKEN = randomBytes(32).toString('hex')
 
+/**
+ * Channel display labels — what THIS platform calls each chat. The host has
+ * no platform vocabulary: it asks the plugin "what is this channel named?"
+ * (POST /channel_labels) and renders the answer on the pairing page. The
+ * plugin learns names from the messages it observes (group titles, sender
+ * names) and persists them beside control.json so restarts remember them.
+ */
+const labelsPath = DATA_DIR ? join(DATA_DIR, 'channel-labels.json') : ''
+let channelLabels: Record<string, string> = {}
+if (labelsPath) {
+  try {
+    const raw = JSON.parse(readFileSync(labelsPath, 'utf8')) as Record<string, unknown>
+    for (const [key, value] of Object.entries(raw)) {
+      if (typeof key === 'string' && typeof value === 'string' && value.trim() && key.length <= 128) {
+        channelLabels[key] = value.trim().slice(0, 120)
+      }
+    }
+  } catch {
+    // No file or corrupt: start with an empty cache.
+  }
+}
+
+function noteChannelLabel(msg: IncomingLike): void {
+  const key = msg.channelId
+  if (!key || key.length > 128) return
+  const group = msg.isGroup === true || (msg as { chatKind?: string }).chatKind === 'group'
+  const name = group
+    ? (msg.channelName ?? msg.senderName)
+    : msg.senderName
+      ? msg.senderUsername
+        ? `${msg.senderName} (@${msg.senderUsername})`
+        : msg.senderName
+      : msg.channelName
+  if (!name || !name.trim()) return
+  const clean = name.trim().slice(0, 120)
+  if (channelLabels[key] === clean) return
+  channelLabels[key] = clean
+  if (labelsPath) {
+    try {
+      writeFileSync(labelsPath, JSON.stringify(channelLabels, null, 2), { encoding: 'utf8', mode: 0o600 })
+    } catch {
+      // The cache is best-effort; a disk problem must not kill the plugin.
+    }
+  }
+}
+
 interface IncomingLike {
   channelId?: string
   channelName?: string
@@ -55,6 +101,7 @@ interface IncomingLike {
   text?: string
   senderName?: string
   senderId?: string
+  senderUsername?: string
   messageId?: string
   isGroup?: boolean
   mentionsBot?: boolean
@@ -204,6 +251,31 @@ const server = createServer((req, res) => {
       return
     }
 
+    // Optional label endpoint: the host asks "what are these channels called?"
+    // and renders the answers (a group title, a contact name). Keys the
+    // plugin has not seen come back absent; the host then falls back to the
+    // raw key. Same Bearer gate as /action — it drives the plugin, after all.
+    if (req.url === '/channel_labels' && req.method === 'POST') {
+      const presented = req.headers.authorization ?? ''
+      if (presented !== `Bearer ${CONTROL_TOKEN}`) {
+        send(401, { error: 'unauthorized' })
+        return
+      }
+      const body = (await readJson(req)) as { channelKeys?: unknown } | null
+      const keys = Array.isArray(body?.channelKeys)
+        ? body.channelKeys.filter((key): key is string => typeof key === 'string').slice(0, 100)
+        : []
+      const prefix = `message://${PLUGIN_ID}/`
+      const labels: Record<string, string> = {}
+      for (const key of keys) {
+        if (!key.startsWith(prefix)) continue
+        const label = channelLabels[decodeURIComponent(key.slice(prefix.length))]
+        if (label) labels[key] = label
+      }
+      send(200, { labels })
+      return
+    }
+
     if (req.url !== '/action' || req.method !== 'POST') {
       send(404, { error: 'not_found' })
       return
@@ -302,6 +374,7 @@ server.listen(PORT, '127.0.0.1', () => {
 let connected = false
 if (adapter) {
   adapter.onMessage?.(async (msg) => {
+    noteChannelLabel(msg)
     const event = toEvent(msg)
     if (event) await publish(event)
   })

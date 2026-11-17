@@ -341,6 +341,7 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.events.PAIRING_GENERATE,
   RPC_CHANNELS.events.PAIRING_LIST,
   RPC_CHANNELS.events.PAIRING_UNPAIR,
+  RPC_CHANNELS.events.CHANNEL_LABELS,
   // taskboard — tasks are workspace state, not renderer state
   RPC_CHANNELS.taskboard.RUN,
   RPC_CHANNELS.taskboard.DELETE,

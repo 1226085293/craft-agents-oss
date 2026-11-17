@@ -836,6 +836,12 @@ export interface ElectronAPI {
   ): Promise<Array<{ channelKey: string; pairedAt: number }>>
   /** Unpair a channel; its next message gets the pairing prompt again. */
   pairingUnpair(workspaceId: string, channelKey: string): Promise<{ success: boolean }>
+  /**
+   * Display names for channel keys, resolved by the plugin's own control
+   * service. Keys the plugin does not know are absent from the map; an
+   * empty map (plugin stopped / endpoint unknown) means "show the raw key".
+   */
+  channelLabels(workspaceId: string, listenerId: string, channelKeys: string[]): Promise<Record<string, string>>
   listEventListeners(
     workspaceId: string,
     skipProbes?: boolean,

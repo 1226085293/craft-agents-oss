@@ -515,6 +515,13 @@ export const RPC_CHANNELS = {
     PAIRING_LIST: 'events:pairingList',
     PAIRING_UNPAIR: 'events:pairingUnpair',
 
+    /**
+     * Display names for channel keys, resolved by the plugin itself through
+     * its control service (`POST /channel_labels`). Craft renders whatever
+     * the plugin says a channel is called; an empty map means "use the key".
+     */
+    CHANNEL_LABELS: 'events:channelLabels',
+
     /** This session's subscriptions. */
     LIST_SUBSCRIPTIONS: 'events:listSubscriptions',
     SUBSCRIBE: 'events:subscribe',

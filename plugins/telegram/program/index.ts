@@ -414,6 +414,9 @@ export class TelegramAdapter implements PlatformAdapter {
         ...(isGroup
           ? {
               chatKind: 'group' as const,
+              // The host renders whatever the plugin names a channel — so
+              // groups carry their title for the pairing list's labels.
+              ...(ctx.chat.title ? { channelName: ctx.chat.title } : {}),
               mentionKind: isBotMentioned(ctx, this.bot?.botInfo?.username) ? ('at' as const) : ('none' as const),
             }
           : { chatKind: 'private' as const }),

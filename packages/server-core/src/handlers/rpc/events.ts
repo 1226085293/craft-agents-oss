@@ -22,7 +22,7 @@ import {
 import { loadListeners } from '../../events/listener-registry';
 import { runInstallCommand, type InstallResult } from '../../events/dependency-installer';
 import { installMcp, type McpInstallResult } from '../../events/mcp-registry';
-import { fetchReportedDeps, postDepAction, callPluginAction } from '../../events/listener-control';
+import { fetchReportedDeps, postDepAction, callPluginAction, fetchChannelLabels } from '../../events/listener-control';
 import { recordOutboxCall } from '@craft-agent/shared/events/outbox.ts';
 import { generatePairingCode, listPairedChannels, unpairChannel } from '@craft-agent/shared/events/pairings.ts';
 import {
@@ -339,6 +339,26 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
     const workspace = requireWorkspace(workspaceId);
     return fetchReportedDeps(join(workspace.rootPath, 'events-data', id));
   });
+
+  /**
+   * Display names for channel keys, resolved by the plugin itself. Craft
+   * never learns platform vocabulary: the plugin answers with whatever it
+   * knows (a chat title, a contact name) and renders; unknown keys come
+   * back absent and the caller keeps the raw key. `null` → `{}` keeps the
+   * renderer's contract "always a map" so a dead control service cannot
+   * take the pairing list down with it.
+   */
+  server.handle(
+    RPC_CHANNELS.events.CHANNEL_LABELS,
+    async (_ctx, workspaceId: string, id: string, channelKeys?: string[]) => {
+      if (!id) throw new Error('id is required');
+      const workspace = requireWorkspace(workspaceId);
+      const keys = (Array.isArray(channelKeys) ? channelKeys : [])
+        .filter((key): key is string => typeof key === 'string' && key.length > 0)
+        .slice(0, 100);
+      return fetchChannelLabels(join(workspace.rootPath, 'events-data', id), keys) ?? {};
+    },
+  );
 
   server.handle(
     RPC_CHANNELS.events.LISTENER_DEPS_ACTION,

@@ -38,6 +38,7 @@
     "./events/plugin-status": "./src/events/plugin-status.ts",
     "./events/plugin-tools": "./src/events/plugin-tools.ts",
     "./events/startup-report": "./src/events/startup-report.ts",
+    "./events/types": "./src/events/types.ts",
     "./feature-flags": "./src/feature-flags.ts",
     "./i18n": "./src/i18n/index.ts",
     "./icons": "./src/icons/index.ts",

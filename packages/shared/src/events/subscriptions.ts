@@ -13,6 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { EventMeta } from './event-store.ts';
+import { eventOriginLine } from './types.ts';
 
 export interface SubscriptionFilter {
   sources?: string[];
@@ -82,9 +83,13 @@ export function subscribersFor(event: EventMeta, subscriptions: EventSubscriptio
 
 /** The text a session receives. Kept short: it is injected into a live turn. */
 export function formatEventNudge(event: EventMeta): string {
+  const origin = eventOriginLine(event.meta);
   const lines = [
     `[event] ${event.type} · ${event.source}`,
     event.title,
+    // Who sent it and where — the agent must be able to tell a private chat
+    // from a group without guessing (the meta record is listener-owned).
+    ...(origin ? [origin] : []),
     `${new Date(event.occurredAt ?? event.receivedAt).toLocaleString()}${event.summary ? ` · ${event.summary}` : ''}`,
     `全文: get_event("${event.id}")`,
   ];

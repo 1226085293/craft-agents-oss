@@ -306,3 +306,25 @@ describe('EventStore.recordRouting', () => {
     store.close();
   });
 });
+
+describe('EventStore meta', () => {
+  it('round-trips the listener-owned provenance record through insert and list', () => {
+    const meta = { channel: 'Ops 群', channelKind: 'group', channelId: '123', sender: '张三' };
+    store.insert(makeEvent({ id: 'evt_m', meta }));
+    const loaded = store.get('evt_m');
+    expect(loaded?.meta).toEqual(meta);
+    // list() (the EventMeta projection the dispatcher feeds agents) carries it too.
+    expect(store.list().find((e) => e.id === 'evt_m')?.meta).toEqual(meta);
+  });
+
+  it('omits meta for events that do not carry one', () => {
+    store.insert(makeEvent({ id: 'evt_plain' }));
+    const loaded = store.get('evt_plain');
+    expect(loaded?.meta).toBeUndefined();
+  });
+
+  it('makes provenance facts searchable in the inbox', () => {
+    store.insert(makeEvent({ id: 'evt_s', meta: { sender: '白泽' } }));
+    expect(store.list({ search: '白泽' }).map((e) => e.id)).toContain('evt_s');
+  });
+});

@@ -138,3 +138,50 @@ describe('bigramText', () => {
     expect(bigramText('メール')).toBe('メ ー ル');
   });
 });
+
+describe('normalizeEventInput: meta', () => {
+  it('passes through string provenance records verbatim', () => {
+    const event = ok(
+      normalizeEventInput(
+        { type: 'tg.message', title: 'hi', meta: { channel: 'Ops 群', channelKind: 'group', sender: '张三' } },
+        identity,
+      ),
+    );
+    expect(event.meta).toEqual({ channel: 'Ops 群', channelKind: 'group', sender: '张三' });
+  });
+
+  it('coerces numbers and booleans, JSON-stringifies objects', () => {
+    const event = ok(
+      normalizeEventInput(
+        { type: 'tg.message', title: 'hi', meta: { threadId: 7, mentionsBot: true, raw: { a: 1 } } },
+        identity,
+      ),
+    );
+    expect(event.meta).toEqual({ threadId: '7', mentionsBot: 'true', raw: '{"a":1}' });
+  });
+
+  it('caps entry count and value length', () => {
+    const many: Record<string, string> = {};
+    for (let i = 0; i < 40; i++) many[`k${i}`] = 'v';
+    const event = ok(
+      normalizeEventInput(
+        { type: 'tg.message', title: 'hi', meta: { long: 'x'.repeat(500), ...many } },
+        identity,
+      ),
+    );
+    expect(Object.keys(event.meta!).length).toBe(EVENT_LIMITS.metaEntries);
+    expect(event.meta!.long!.length).toBe(EVENT_LIMITS.metaValueLength);
+  });
+
+  it('drops malformed entries without rejecting the event', () => {
+    const event = ok(
+      normalizeEventInput({ type: 'tg.message', title: 'hi', meta: { 'bad key!': 'x', ok_key: 'y' } }, identity),
+    );
+    expect(event.meta).toEqual({ ok_key: 'y' });
+  });
+
+  it('ignores non-object meta entirely', () => {
+    const event = ok(normalizeEventInput({ type: 'tg.message', title: 'hi', meta: 'nope' }, identity));
+    expect(event.meta).toBeUndefined();
+  });
+});

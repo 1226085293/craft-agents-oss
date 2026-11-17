@@ -18,6 +18,7 @@ import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { ExternalLink, Paperclip, Inbox, Send } from 'lucide-react'
 import type { EventRecordDto } from '@craft-agent/shared/protocol/dto'
+import { eventOriginLine } from '@craft-agent/shared/events/types'
 import { EventAttachments } from './EventAttachments'
 import { EventBody } from './EventBody'
 
@@ -134,6 +135,18 @@ export function EventDetailPanel({
 
   // Only rows with content render — the block collapses around what exists.
   const extraRows: Array<{ label: string; node: React.ReactNode } | null> = [
+    // Who / where it came from — the listener's provenance record, rendered
+    // by the shared pure function so host and renderer read it identically.
+    event.meta && Object.keys(event.meta).length > 0
+      ? {
+          label: t('events.detail.origin', { defaultValue: '来源' }),
+          node: (
+            <span className="text-[13px] break-all">
+              {eventOriginLine(event.meta) || JSON.stringify(event.meta)}
+            </span>
+          ),
+        }
+      : null,
     event.occurredAt !== undefined
       ? { label: t('events.detail.occurredAt'), node: new Date(event.occurredAt).toLocaleString() }
       : null,
@@ -236,7 +249,7 @@ export function EventDetailPanel({
         {/* Secondary metadata stays available without shouting: behind a
             disclosure unless links/attachments demand visibility. */}
         {details.length > 0 && (
-          <details className="mt-2 group" open={Boolean(event.links.length || event.payloadRef || deliveries.length)}>
+          <details className="mt-2 group" open={Boolean(event.links.length || event.payloadRef || deliveries.length || event.meta)}>
             <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors select-none">
               {t('events.detail.details', { count: details.length })}
             </summary>

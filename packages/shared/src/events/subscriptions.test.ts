@@ -154,3 +154,18 @@ describe('subscription persistence', () => {
     }
   })
 })
+
+describe('formatEventNudge origin line', () => {
+  it('renders who/where from the listener-owned meta record', () => {
+    const text = formatEventNudge(
+      event({ meta: { channelKind: 'group', channel: 'Ops 群', channelId: '123', sender: '张三' } }),
+    )
+    expect(text).toContain('渠道 群组 Ops 群 id 123，发信人 张三')
+  })
+
+  it('has no origin line when the event carries no meta', () => {
+    const text = formatEventNudge(event({}))
+    expect(text).not.toContain('渠道')
+  })
+})
+

@@ -129,6 +129,7 @@ interface EventRow {
   handled_at: number | null;
   deliveries: string | null;
   routing: string | null;
+  meta: string | null;
 }
 
 function parseJsonArray<T>(value: string | null): T[] {
@@ -141,6 +142,18 @@ function parseJsonArray<T>(value: string | null): T[] {
   }
 }
 
+function parseJsonObject(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function toEvent(row: EventRow, includeBody: boolean): EventRecord {
   const payloadRef: CraftEventPayloadRef | undefined = row.payload_path
     ? {
@@ -148,6 +161,15 @@ function toEvent(row: EventRow, includeBody: boolean): EventRecord {
         path: row.payload_path,
         ...(row.payload_size !== null ? { size: row.payload_size } : {}),
       }
+    : undefined;
+
+  // The stored record is string-valued by construction (ingest validation
+  // coerces every entry); keep the type honest and drop anything odd.
+  const rawMeta = parseJsonObject(row.meta);
+  const meta: Record<string, string> | undefined = rawMeta
+    ? Object.fromEntries(
+        Object.entries(rawMeta).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+      )
     : undefined;
 
   return {
@@ -168,12 +190,13 @@ function toEvent(row: EventRow, includeBody: boolean): EventRecord {
     ...(includeBody && row.body !== null ? { body: row.body } : {}),
     ...(payloadRef ? { payloadRef } : {}),
     ...(row.handled_at !== null ? { handledAt: row.handled_at } : {}),
+    ...(meta && Object.keys(meta).length ? { meta } : {}),
   };
 }
 
 const META_COLUMNS = `e.id, e.source, e.type, e.received_at, e.occurred_at, e.title, e.summary, e.routing,
   e.recipients, e.links, e.attachments, e.payload_kind, e.payload_path, e.payload_size,
-  e.dedupe_key, e.handled_at, e.deliveries`;
+  e.dedupe_key, e.handled_at, e.deliveries, e.meta`;
 
 export class EventStore {
   private readonly db: SqliteDatabase;
@@ -213,7 +236,8 @@ export class EventStore {
         payload_path TEXT,
         payload_size INTEGER,
         dedupe_key   TEXT,
-        handled_at   INTEGER
+        handled_at   INTEGER,
+        meta         TEXT
       );
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe
@@ -266,6 +290,10 @@ export class EventStore {
     if (!columns.some((column) => column.name === 'routing')) {
       this.db.exec('ALTER TABLE events ADD COLUMN routing TEXT');
     }
+    // Opaque provenance record attached by the listener (sender / channel facts).
+    if (!columns.some((column) => column.name === 'meta')) {
+      this.db.exec('ALTER TABLE events ADD COLUMN meta TEXT');
+    }
     /**
      * Indexed after the column exists.
      *
@@ -291,14 +319,23 @@ export class EventStore {
     }
 
     const searchText = bigramText(
-      [event.title, event.summary, event.body?.slice(0, BODY_HEAD_CHARS)].filter(Boolean).join('\n'),
+      [
+        event.title,
+        event.summary,
+        event.body?.slice(0, BODY_HEAD_CHARS),
+        // Provenance facts are searchable too: the inbox search finds a sender
+        // name or a channel title the same way it finds body text.
+        ...(event.meta ? Object.values(event.meta) : []),
+      ]
+        .filter(Boolean)
+        .join('\n'),
     );
 
     const insert = this.db.prepare(`
       INSERT INTO events (
         id, source, type, received_at, occurred_at, title, summary, recipients,
-        links, attachments, body, search_text, payload_kind, payload_path, payload_size, dedupe_key, handled_at, deliveries
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+        links, attachments, body, search_text, payload_kind, payload_path, payload_size, dedupe_key, handled_at, deliveries, meta
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
     `);
 
     this.db.exec('BEGIN');
@@ -320,6 +357,7 @@ export class EventStore {
         event.payloadRef?.path ?? null,
         event.payloadRef?.size ?? null,
         event.dedupeKey ?? null,
+        event.meta ? JSON.stringify(event.meta) : null,
       );
       this.db
         .prepare('INSERT INTO events_fts (event_id, search_text) VALUES (?, ?)')

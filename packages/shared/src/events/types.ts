@@ -26,6 +26,10 @@ export const EVENT_LIMITS = {
   attachments: 20,
   attachmentName: 200,
   attachmentPath: 1024,
+  /** Opaque provenance record (`meta`) the listener attached. */
+  metaEntries: 16,
+  metaKeyLength: 64,
+  metaValueLength: 200,
   /** `occurredAt` may not be further than this ahead of `receivedAt`. */
   clockSkewMs: 5 * 60 * 1000,
 } as const;
@@ -86,6 +90,14 @@ export interface CraftEventEnvelope {
   body?: string;
   payloadRef?: CraftEventPayloadRef;
   /**
+   * Opaque provenance record owned by the listener: WHO sent this and WHERE
+   * it came from (a chat title, a sender name, a channel kind). The host
+   * passes it through, stores it verbatim, and renders the well-known keys
+   * below — it holds no platform vocabulary of its own, so every listener
+   * can enrich events without a host release.
+   */
+  meta?: Record<string, string>;
+  /**
    * When a receiving session finished the run this event started.
    *
    * A `delivered: boolean` used to sit here, set as soon as any subscribed session had been handed
@@ -109,6 +121,8 @@ export interface EventInput {
   attachments?: CraftEventAttachment[];
   body?: unknown;
   payloadRef?: CraftEventPayloadRef;
+  /** Opaque provenance record. Entries are validated, never fatal. */
+  meta?: unknown;
 }
 
 export type EventValidationError =
@@ -205,6 +219,32 @@ export function normalizeEventInput(
     return fail('dedupeKey', `at most ${EVENT_LIMITS.dedupeKey} characters`);
   }
 
+  // Opaque plugin data: validated per entry, never fatal — a sloppy entry is
+  // dropped, the event itself still lands with whatever provenance survived.
+  let meta: Record<string, string> | undefined;
+  if (input.meta !== undefined && input.meta !== null) {
+    if (typeof input.meta === 'object' && !Array.isArray(input.meta)) {
+      const clean: Record<string, string> = {};
+      for (const [key, value] of Object.entries(input.meta as Record<string, unknown>).slice(
+        0,
+        EVENT_LIMITS.metaEntries,
+      )) {
+        if (key.length > EVENT_LIMITS.metaKeyLength || !/^[a-z0-9_.]+$/i.test(key)) continue;
+        let text: string;
+        if (typeof value === 'string') text = value;
+        else if (typeof value === 'number' || typeof value === 'boolean') text = String(value);
+        else try {
+          text = JSON.stringify(value) ?? '';
+        } catch {
+          continue;
+        }
+        if (!text.trim()) continue;
+        clean[key] = text.slice(0, EVENT_LIMITS.metaValueLength);
+      }
+      if (Object.keys(clean).length) meta = clean;
+    }
+  }
+
   const occurredAt = parseTimestamp(input.occurredAt);
   if (occurredAt === 'invalid') return fail('occurredAt', 'must be an ISO timestamp or epoch ms');
   if (occurredAt !== undefined && occurredAt > identity.receivedAt + EVENT_LIMITS.clockSkewMs) {
@@ -284,8 +324,48 @@ export function normalizeEventInput(
       attachments,
       ...(body !== undefined ? { body } : {}),
       ...(payloadRef ? { payloadRef } : {}),
+      ...(meta ? { meta } : {}),
     },
   };
+}
+
+/**
+ * The well-known `meta` keys a listener uses to say WHO sent an event and
+ * WHERE it came from — roles, not platform vocabulary. `channelKind` is the
+ * listener's own category (`private` / `group` / `channel` or whatever it
+ * distinguishes); the host only translates the common ones to display words.
+ */
+export const EVENT_META_ORIGIN_KEYS = ['channelKind', 'channel', 'channelId', 'sender', 'senderId'] as const;
+
+const META_KIND_LABELS: Record<string, string> = {
+  private: '私聊',
+  group: '群组',
+  channel: '频道',
+};
+
+/**
+ * One human-readable line answering 「who / where did this come from」, built
+ * only from the well-known keys. `undefined` when the event carries no
+ * origin information at all. Pure — safe in renderer and host alike.
+ */
+export function eventOriginLine(meta?: Record<string, string>): string | undefined {
+  if (!meta) return undefined;
+  const channelBits = [
+    meta.channelKind ? (META_KIND_LABELS[meta.channelKind] ?? meta.channelKind) : undefined,
+    meta.channel,
+    meta.channelId ? `id ${meta.channelId}` : undefined,
+  ].filter(Boolean);
+  const senderBits = [meta.sender, meta.senderId ? `(id ${meta.senderId})` : undefined].filter(Boolean);
+  const parts = [
+    channelBits.length ? `渠道 ${channelBits.join(' ')}` : undefined,
+    senderBits.length ? `发信人 ${senderBits.join(' ')}` : undefined,
+  ].filter(Boolean);
+  if (parts.length) return parts.join('，');
+  // Non-standard keys only: keep the facts compact instead of dropping them.
+  const rest = Object.entries(meta).filter(
+    ([key]) => !(EVENT_META_ORIGIN_KEYS as readonly string[]).includes(key),
+  );
+  return rest.length ? `meta ${JSON.stringify(Object.fromEntries(rest))}` : undefined;
 }
 
 /** True for CJK ideographs and kana — scripts FTS5's unicode61 cannot split. */

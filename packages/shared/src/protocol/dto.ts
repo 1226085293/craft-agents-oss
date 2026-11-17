@@ -989,6 +989,11 @@ export interface EventMetaDto {
   handledAt?: number
   /** Which sessions received this event, and when. Latest per session. */
   deliveries: EventDeliveryDto[]
+  /**
+   * Opaque provenance record the listener attached (sender / channel facts).
+   * Absent on events that predate the field or came from non-messaging sources.
+   */
+  meta?: Record<string, string>
 }
 
 /** One file that arrived with the event. Content is read on demand. */

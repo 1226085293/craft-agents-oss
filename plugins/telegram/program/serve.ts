@@ -146,6 +146,14 @@ function toEvent(msg: IncomingLike): Record<string, unknown> | null {
   if (!text) return null
 
   const channelId = msg.channelId ?? ''
+  // Chat shape, when the adapter told us: 'group' / 'private' / undefined
+  // (platform does not distinguish). The host renders it verbatim.
+  const chatKind =
+    msg.isGroup === true || (msg as { chatKind?: string }).chatKind === 'group'
+      ? 'group'
+      : msg.isGroup === false || (msg as { chatKind?: string }).chatKind === 'private'
+        ? 'private'
+        : undefined
   const event: Record<string, unknown> = {
     type: `${PLUGIN_ID}.message`,
     title: text.length > 80 ? `${text.slice(0, 77)}…` : text,
@@ -161,14 +169,20 @@ function toEvent(msg: IncomingLike): Record<string, unknown> | null {
     // Same platform message must never wake two turns, even if the adapter
     // reconnects and replays a short history window.
     ...(msg.messageId ? { dedupeKey: `${PLUGIN_ID}:${channelId}:${msg.messageId}` } : {}),
+    // Well-known provenance keys (shared/events/types.ts EVENT_META_ORIGIN_KEYS):
+    // who sent it, where, and the chat shape. The host renders these, holds
+    // no platform vocabulary; every listener can enrich events this way
+    // without a host release.
     meta: {
       channelId,
-      ...(msg.channelName ? { channelName: msg.channelName } : {}),
-      ...(msg.threadId !== undefined ? { threadId: msg.threadId } : {}),
-      ...(msg.senderName ? { senderName: msg.senderName } : {}),
+      ...(msg.channelName ? { channel: msg.channelName } : {}),
+      ...(chatKind ? { channelKind: chatKind } : {}),
+      ...(msg.senderName
+        ? { sender: msg.senderUsername ? `${msg.senderName} (@${msg.senderUsername})` : msg.senderName }
+        : {}),
       ...(msg.senderId ? { senderId: msg.senderId } : {}),
-      ...(msg.isGroup !== undefined ? { isGroup: msg.isGroup } : {}),
-      ...(msg.mentionsBot !== undefined ? { mentionsBot: msg.mentionsBot } : {}),
+      ...(msg.threadId !== undefined ? { threadId: String(msg.threadId) } : {}),
+      ...(msg.mentionsBot === true ? { mentionsBot: 'true' } : {}),
     },
   }
   return event

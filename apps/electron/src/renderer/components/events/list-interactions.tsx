@@ -139,19 +139,36 @@ export function RowDeleteMenu({
   const left = Math.min(position.x, window.innerWidth - 170)
   const top = Math.min(position.y, window.innerHeight - 50)
 
+  // `onClose` is a fresh closure on every render of the owning list; a ref
+  // lets the window listeners stay registered through those re-renders
+  // (the outbox polls every five seconds) instead of churning on each one.
+  const onCloseRef = React.useRef(onClose)
   React.useEffect(() => {
-    const close = () => onClose()
-    window.addEventListener('click', close)
-    window.addEventListener('contextmenu', close)
-    window.addEventListener('scroll', close, true)
-    window.addEventListener('resize', close)
+    onCloseRef.current = onClose
+  })
+
+  React.useEffect(() => {
+    const close = () => onCloseRef.current()
+    // Defer one task: the same contextmenu event that mounts this menu is
+    // still propagating up to window at that point (React flushes discrete-
+    // event renders synchronously), so registering immediately would let the
+    // very click that opens the menu close it again — the menu mounted and
+    // unmounted within 3 ms. Every LATER click / right-click / scroll /
+    // resize closes it as before.
+    const timer = window.setTimeout(() => {
+      window.addEventListener('click', close)
+      window.addEventListener('contextmenu', close)
+      window.addEventListener('scroll', close, true)
+      window.addEventListener('resize', close)
+    }, 0)
     return () => {
+      window.clearTimeout(timer)
       window.removeEventListener('click', close)
       window.removeEventListener('contextmenu', close)
       window.removeEventListener('scroll', close, true)
       window.removeEventListener('resize', close)
     }
-  }, [onClose])
+  }, [])
 
   return createPortal(
     <div

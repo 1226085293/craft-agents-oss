@@ -15,7 +15,7 @@
 
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
-import { Search, Inbox, RotateCw, Trash2, Check, Clock, X } from 'lucide-react'
+import { Search, Inbox, RotateCw, Check, Clock, X } from 'lucide-react'
 import type { OutboxRecordDto } from '@craft-agent/shared/protocol/dto'
 import { FilterMenu, SortMenu, type SortOrder, formatTime } from './EventsListPanel'
 import { useExplorerSelection, RowDeleteMenu, RecordDeleteConfirm } from './list-interactions'
@@ -153,16 +153,6 @@ export function OutboxListPanel({
     }
   }
 
-  const purge = async () => {
-    setBusy(true)
-    try {
-      await window.electronAPI.purgeOutbox(workspaceId)
-      await load()
-    } finally {
-      setBusy(false)
-    }
-  }
-
   // ------------------------------------------------------------------
   // Bulk selection + right-click delete (shared Explorer grammar).
   // ------------------------------------------------------------------
@@ -190,7 +180,6 @@ export function OutboxListPanel({
     }
   }, [selected, workspaceId, dropIds, onDeleted])
 
-  const hasResolved = records.some((record) => record.status !== 'pending')
   const pendingCount = records.filter((record) => record.status === 'pending').length
 
   return (
@@ -238,17 +227,6 @@ export function OutboxListPanel({
             }}
           />
           <SortMenu value={sortOrder} onChange={setSortOrder} />
-          {hasResolved && (
-            <button
-              type="button"
-              onClick={() => void purge()}
-              disabled={busy}
-              className="ml-auto inline-flex items-center gap-1 text-[12px] text-muted-foreground hover:text-foreground disabled:opacity-50"
-            >
-              <Trash2 className="h-3 w-3" />
-              {t('events.outbox.purge', { defaultValue: '清除已处理' })}
-            </button>
-          )}
         </div>
       </div>
 

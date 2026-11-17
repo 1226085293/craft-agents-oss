@@ -17,11 +17,34 @@ export interface OutboxDetailPanelProps {
   className?: string
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
+/** Small muted metadata chip in the header strip. */
+function Chip({ label, value }: { label: string; value: string }): React.ReactElement {
   return (
-    <div className="min-w-0">
-      <div className="text-[11.5px] uppercase tracking-wide text-muted-foreground/70 mb-1">{label}</div>
-      <div className="text-[13.5px] text-foreground break-words min-h-[1.4em]">{children}</div>
+    <span className="inline-flex items-center gap-1 min-w-0 text-[12px] leading-5 text-muted-foreground">
+      <span className="opacity-70 shrink-0">{label}</span>
+      <span className="text-foreground/75 truncate" title={value}>
+        {value}
+      </span>
+    </span>
+  )
+}
+
+/** Metadata row — same label column as the inbox detail (4-char labels need ~56px). */
+function Row({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
+  return (
+    <div className="flex gap-3 text-[13.5px] leading-6">
+      <span className="w-20 shrink-0 text-muted-foreground">{label}</span>
+      <span className="min-w-0 flex-1 break-words">{children}</span>
+    </div>
+  )
+}
+
+/** Section separator: a small caps label with a hairline, not a heavy box. */
+function SectionLabel({ children }: { children: React.ReactNode }): React.ReactElement {
+  return (
+    <div className="flex items-center gap-2 mb-2">
+      <span className="text-[12px] font-medium tracking-wide text-muted-foreground">{children}</span>
+      <span className="flex-1 h-px bg-border" />
     </div>
   )
 }
@@ -76,7 +99,7 @@ export function OutboxDetailPanel({
 
   if (!loaded) {
     return (
-      <div className={`px-4 py-3 text-[13px] text-muted-foreground/60 ${className ?? ''}`}>
+      <div className={`px-5 py-4 text-sm text-muted-foreground ${className ?? ''}`}>
         {t('events.outbox.loading', { defaultValue: '加载中…' })}
       </div>
     )
@@ -84,65 +107,78 @@ export function OutboxDetailPanel({
 
   if (!record) {
     return (
-      <div className={`px-4 py-3 text-[13px] text-muted-foreground ${className ?? ''}`}>
+      <div className={`px-5 py-4 text-sm text-muted-foreground ${className ?? ''}`}>
         {t('events.outbox.detail.notFound', { defaultValue: '该记录不存在或已被删除' })}
       </div>
     )
   }
 
   const payload = previewOf(record)
+  const targetText =
+    typeof record.args?.channelId === 'string' && record.args.channelId
+      ? `${record.listenerId} · ${record.args.channelId}`
+      : record.listenerId
+  const statusLabel =
+    record.status === 'sent'
+      ? t('events.outbox.sent', { defaultValue: '已发送' })
+      : record.status === 'pending'
+        ? t('events.outbox.pending', { defaultValue: '待发送' })
+        : t('events.outbox.failed', { defaultValue: '发送失败' })
 
   return (
-    <div className={className ? `px-5 py-4 overflow-y-auto ${className}` : 'px-5 py-4 overflow-y-auto'}>
-      <div className="flex items-center gap-2.5 mb-5">
-        <span className="text-[15px] font-medium text-foreground truncate flex-1">
+    <div className={`flex flex-col h-full ${className ?? ''}`}>
+      {/* Header: identity → muted status strip — the same grammar as the inbox detail. */}
+      <div className="px-5 py-4 border-b border-border">
+        <h2 className="text-[16px] font-medium leading-7 break-words">
           {record.listenerId} · {record.action}
-        </span>
-        <OutboxStatusBadge status={record.status} />
-        {record.status === 'failed' && (
-          <button
-            type="button"
-            onClick={() => void retry()}
-            disabled={busy}
-            className="inline-flex items-center gap-1.5 text-[12.5px] text-foreground hover:underline disabled:opacity-50"
-          >
-            <RotateCw className="h-3 w-3" />
-            {t('events.outbox.retry', { defaultValue: '重试' })}
-          </button>
-        )}
+        </h2>
+
+        <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1.5 mt-3 text-[12px]">
+          <OutboxStatusBadge status={record.status} />
+          <span className="h-3 w-px bg-border" aria-hidden />
+          <Chip label={t('events.outbox.detail.target')} value={targetText} />
+          <span className="h-3 w-px bg-border" aria-hidden />
+          <Chip label={t('events.outbox.detail.createdAt')} value={formatTime(record.createdAt)} />
+        </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-x-6 gap-y-4">
-        <Field label={t('events.outbox.detail.target', { defaultValue: '目标' })}>
-          {record.listenerId}
-          {typeof record.args?.channelId === 'string' && record.args.channelId
-            ? ` · ${record.args.channelId}`
-            : ''}
-        </Field>
-        <Field label={t('events.outbox.detail.action', { defaultValue: '动作' })}>{record.action}</Field>
-        <Field label={t('events.outbox.detail.payload', { defaultValue: '内容' })}>
-          <span className="whitespace-pre-wrap break-all">{payload}</span>
-        </Field>
-        <Field label={t('events.outbox.detail.status', { defaultValue: '状态' })}>
-          {record.status}
-          {record.attempts > 0 ? ` · ${t('events.outbox.attempts', { defaultValue: '重试' })} ${record.attempts}` : ''}
-        </Field>
-        {record.status === 'pending' && record.nextAttemptAt ? (
-          <Field label={t('events.outbox.nextRetry', { defaultValue: '下次重试' })}>
-            {formatTime(record.nextAttemptAt)}
-          </Field>
-        ) : null}
-        {record.lastError && record.status !== 'sent' ? (
-          <Field label={t('events.outbox.detail.lastError', { defaultValue: '最近错误' })}>
-            <span className="text-red-500/90">{record.lastError}</span>
-          </Field>
-        ) : null}
-        <Field label={t('events.outbox.detail.createdAt', { defaultValue: '创建时间' })}>
-          {formatTime(record.createdAt)}
-        </Field>
-        <Field label={t('events.outbox.detail.updatedAt', { defaultValue: '更新时间' })}>
-          {formatTime(record.updatedAt)}
-        </Field>
+      {/* Body: the payload first, delivery facts after — same layout as the inbox body. */}
+      <div className="flex-1 overflow-auto px-5 py-4">
+        <SectionLabel>{t('events.outbox.detail.payload')}</SectionLabel>
+        <p className="text-[13.5px] whitespace-pre-wrap break-all mb-4">{payload}</p>
+
+        <div className="space-y-1.5">
+          <Row label={t('events.outbox.detail.status')}>
+            <span className="inline-flex items-center gap-2">
+              {statusLabel}
+              {record.attempts > 0
+                ? ` · ${t('events.outbox.attempts', { defaultValue: '重试' })} ${record.attempts}`
+                : ''}
+              {record.status === 'failed' && (
+                <button
+                  type="button"
+                  onClick={() => void retry()}
+                  disabled={busy}
+                  className="inline-flex items-center gap-1 text-[12.5px] text-foreground hover:underline disabled:opacity-50"
+                >
+                  <RotateCw className="h-3 w-3" />
+                  {t('events.outbox.retry', { defaultValue: '重试' })}
+                </button>
+              )}
+            </span>
+          </Row>
+          {record.status === 'pending' && record.nextAttemptAt ? (
+            <Row label={t('events.outbox.nextRetry', { defaultValue: '下次重试' })}>
+              {formatTime(record.nextAttemptAt)}
+            </Row>
+          ) : null}
+          {record.lastError && record.status !== 'sent' ? (
+            <Row label={t('events.outbox.detail.lastError')}>
+              <span className="text-red-500/90 break-all">{record.lastError}</span>
+            </Row>
+          ) : null}
+          <Row label={t('events.outbox.detail.updatedAt')}>{formatTime(record.updatedAt)}</Row>
+        </div>
       </div>
     </div>
   )

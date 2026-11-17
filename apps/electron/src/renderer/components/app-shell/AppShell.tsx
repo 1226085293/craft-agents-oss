@@ -1545,10 +1545,6 @@ function AppShellContent({
   }, [])
 
   // Events navigator: two sections sharing one entry.
-  const handleEventsClick = useCallback(() => {
-    navigate(routes.view.events())
-  }, [])
-
   const handleEventListenersClick = useCallback(() => {
     navigate(routes.view.eventListeners())
   }, [])
@@ -2548,17 +2544,15 @@ function AppShellContent({
                       onClick: () => navigate(routes.view.tasks()),
                     },
                     {
-                      // One click, one destination: the list. The listener
-                      // panel used to hide behind a disclosure triangle, which
-                      // made the common case ("what came in?") a two-step.
-                      // 收件箱 / 发件箱 nest one level UNDER 事件 (the two
-                      // queues of the event loop), like the source filters do
-                      // under 资源.
+                      // 事件 is a pure parent: one click folds/unfolds its
+                      // two queues (收件箱 / 发件箱), exactly like the folder
+                      // tree. It navigates nowhere — the queues themselves
+                      // are the destinations.
                       id: "nav:events",
                       title: t("sidebar.events"),
                       icon: Radio,
                       variant: isEventListNavigation(navState) ? "default" : "ghost",
-                      onClick: handleEventsClick,
+                      clickTogglesExpand: true,
                       expandable: true,
                       expanded: isExpanded("nav:events"),
                       onToggle: () => toggleExpanded("nav:events"),

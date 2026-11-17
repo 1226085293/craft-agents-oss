@@ -141,8 +141,7 @@ import { SourcesListPanel } from "./SourcesListPanel"
 import { TasksListPanel } from '@/components/tasks/TasksPanel'
 import { EventsListPanel } from "../events/EventsListPanel"
 import { EventsListenersPanel } from "../events/EventsListenersPanel"
-import { InboxPanel } from "../events/InboxPanel"
-import { OutboxPanel } from "../events/OutboxPanel"
+import { OutboxListPanel } from "../events/OutboxListPanel"
 import { SkillsListPanel } from "./SkillsListPanel"
 import { ProjectsListPanel } from "./ProjectsListPanel"
 import { useProjects } from "@/hooks/useProjects"
@@ -1564,9 +1563,53 @@ function AppShellContent({
     navigate(routes.view.outbox())
   }, [])
 
-  const handleEventSelect = useCallback((eventId: string) => {
-    navigate(routes.view.events(eventId))
+  // Drill into one outbox record; re-entering the outbox section without an
+  // id (handleOutboxClick) clears the detail, as the route has no level for it.
+  const handleOutboxSelect = useCallback((outboxId: string) => {
+    navigate(routes.view.outbox(outboxId))
   }, [])
+
+  // Event selection is section-aware: in the inbox the detail route stays
+  // under 收件箱, in the log it stays under 事件. `section` only exists on the
+  // events member of the navigation union, so narrow by navigator first.
+  const handleEventSelect = useCallback(
+    (eventId: string) => {
+      navigate(
+        navState.navigator === 'events' && navState.section === 'inbox'
+          ? routes.view.inbox(eventId)
+          : routes.view.events(eventId),
+      )
+    },
+    [navState, navigate],
+  )
+
+  // Bulk-delete callbacks: drop the detail only when it pointed at a row
+  // that just disappeared.
+  const handleEventsDeleted = useCallback(
+    (ids: string[]) => {
+      if (
+        navState.navigator === 'events' &&
+        navState.details?.type === 'event' &&
+        ids.includes(navState.details.eventId)
+      ) {
+        navigate(navState.section === 'inbox' ? routes.view.inbox() : routes.view.events())
+      }
+    },
+    [navState, navigate],
+  )
+
+  const handleOutboxDeleted = useCallback(
+    (ids: string[]) => {
+      if (
+        navState.navigator === 'events' &&
+        navState.details?.type === 'outbox' &&
+        ids.includes(navState.details.outboxId)
+      ) {
+        navigate(routes.view.outbox())
+      }
+    },
+    [navState, navigate],
+  )
 
   const handleListenerSelect = useCallback((listenerId: string) => {
     navigate(routes.view.eventListeners(listenerId))
@@ -2508,26 +2551,34 @@ function AppShellContent({
                       // One click, one destination: the list. The listener
                       // panel used to hide behind a disclosure triangle, which
                       // made the common case ("what came in?") a two-step.
+                      // 收件箱 / 发件箱 nest one level UNDER 事件 (the two
+                      // queues of the event loop), like the source filters do
+                      // under 资源.
                       id: "nav:events",
                       title: t("sidebar.events"),
                       icon: Radio,
                       variant: isEventListNavigation(navState) ? "default" : "ghost",
                       onClick: handleEventsClick,
-                    },
-                    {
-                      // 事件下面的两条队列：进来的还没处理的，和发出去的没发成功的。
-                      id: "nav:inbox",
-                      title: t("sidebar.inbox", { defaultValue: "收件箱" }),
-                      icon: Inbox,
-                      variant: isEventInboxNavigation(navState) ? "default" : "ghost",
-                      onClick: handleInboxClick,
-                    },
-                    {
-                      id: "nav:outbox",
-                      title: t("sidebar.outbox", { defaultValue: "发件箱" }),
-                      icon: Send,
-                      variant: isEventOutboxNavigation(navState) ? "default" : "ghost",
-                      onClick: handleOutboxClick,
+                      expandable: true,
+                      expanded: isExpanded("nav:events"),
+                      onToggle: () => toggleExpanded("nav:events"),
+                      items: [
+                        {
+                          // 事件下面的两条队列：进来的还没处理的，和发出去的没发成功的。
+                          id: "nav:inbox",
+                          title: t("sidebar.inbox", { defaultValue: "收件箱" }),
+                          icon: Inbox,
+                          variant: isEventInboxNavigation(navState) ? "default" : "ghost",
+                          onClick: handleInboxClick,
+                        },
+                        {
+                          id: "nav:outbox",
+                          title: t("sidebar.outbox", { defaultValue: "发件箱" }),
+                          icon: Send,
+                          variant: isEventOutboxNavigation(navState) ? "default" : "ghost",
+                          onClick: handleOutboxClick,
+                        },
+                      ],
                     },
                     {
                       // Plugins sit first because they are the workspace's
@@ -2815,17 +2866,26 @@ function AppShellContent({
                   onSelectListener={handleListenerSelect}
                 />
               ) : navState.section === 'inbox' ? (
-                <InboxPanel
+                <EventsListPanel
                   workspaceId={activeWorkspaceId}
+                  selectedEventId={navState.details?.type === 'event' ? navState.details.eventId : null}
                   onSelectEvent={handleEventSelect}
+                  defaultReception="unprocessed"
+                  onDeleted={handleEventsDeleted}
                 />
               ) : navState.section === 'outbox' ? (
-                <OutboxPanel workspaceId={activeWorkspaceId} />
+                <OutboxListPanel
+                  workspaceId={activeWorkspaceId}
+                  selectedOutboxId={navState.details?.type === 'outbox' ? navState.details.outboxId : null}
+                  onSelectOutbox={handleOutboxSelect}
+                  onDeleted={handleOutboxDeleted}
+                />
               ) : (
                 <EventsListPanel
                   workspaceId={activeWorkspaceId}
                   selectedEventId={navState.details?.type === 'event' ? navState.details.eventId : null}
                   onSelectEvent={handleEventSelect}
+                  onDeleted={handleEventsDeleted}
                 />
               )
             )}

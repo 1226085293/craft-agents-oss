@@ -444,6 +444,8 @@ export const RPC_CHANNELS = {
   events: {
     /** Paginated metadata list (never includes bodies). */
     LIST: 'events:list',
+    /** Delete specific events from the log (the inbox context menu). */
+    DELETE: 'events:delete',
     /** Single event including its body. */
     GET: 'events:get',
     /** Per-source totals for the listener cards. */
@@ -501,6 +503,8 @@ export const RPC_CHANNELS = {
     OUTBOX_RETRY: 'events:outboxRetry',
     /** Drop finished (sent / failed) records; pending ones keep their place. */
     OUTBOX_PURGE: 'events:outboxPurge',
+    /** Delete specific outbox records (the outbox context menu). */
+    OUTBOX_REMOVE: 'events:outboxRemove',
 
     /**
      * Channel pairing: a one-minute, single-use code that unlocks a chat to

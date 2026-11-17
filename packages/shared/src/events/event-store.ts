@@ -498,7 +498,7 @@ export class EventStore {
         const ids = this.db
           .prepare('SELECT id FROM events ORDER BY received_at ASC LIMIT ?')
           .all(overflow) as unknown as Array<{ id: string }>;
-        removed += this.deleteIds(ids.map((r) => r.id));
+        removed += this.deleteByIds(ids.map((r) => r.id));
       }
     }
 
@@ -512,13 +512,18 @@ export class EventStore {
         .prepare(`SELECT id FROM events WHERE ${whereSql} LIMIT 500`)
         .all(...params) as unknown as Array<{ id: string }>;
       if (!ids.length) break;
-      removed += this.deleteIds(ids.map((r) => r.id));
+      removed += this.deleteByIds(ids.map((r) => r.id));
       if (ids.length < 500) break;
     }
     return removed;
   }
 
-  private deleteIds(ids: string[]): number {
+  /**
+   * Delete specific events by id (the inbox / outbox context-menu delete;
+   * the retention policy reuses the same batched primitive). FTS rows go
+   * with their event. Returns how many rows were actually removed.
+   */
+  deleteByIds(ids: string[]): number {
     if (!ids.length) return 0;
     const delEvent = this.db.prepare('DELETE FROM events WHERE id = ?');
     const delFts = this.db.prepare('DELETE FROM events_fts WHERE event_id = ?');

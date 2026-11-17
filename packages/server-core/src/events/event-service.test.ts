@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { getEventService, resetEventServicesForTest } from './event-service.ts';
-import { loadOutbox } from '@craft-agent/shared/events/outbox.ts';
+import { loadOutbox, recordOutboxCall } from '@craft-agent/shared/events/outbox.ts';
 import { bindThread } from '@craft-agent/shared/events/thread-bindings.ts';
 import { generatePairingCode, isChannelPaired, markChannelPaired } from '@craft-agent/shared/events/pairings.ts';
 import { existsSync } from 'node:fs';
@@ -401,5 +401,63 @@ describe('host pairing gate', () => {
 
     expect(isChannelPaired(root, 'message://telegram/42')).toBe(false);
     expect(service.list({}).length).toBe(0);
+  });
+});
+
+describe('context-menu deletion (events & outbox)', () => {
+  it('deleteEvents removes the named events and keeps the rest', async () => {
+    const root = makeRoot();
+    const service = await getEventService('ws-delete-events', root);
+    const env = service.listenerEnv('probe');
+    const ids: string[] = [];
+    for (const title of ['keep one', 'drop one', 'drop two']) {
+      const res = await postJson(env.CRAFT_EVENTS_URL!, env.CRAFT_EVENTS_TOKEN!, {
+        type: 'probe.note',
+        title,
+      });
+      expect(res.status).toBe(200);
+      ids.push(JSON.parse(res.body).id);
+    }
+    // A ghost id must not inflate the removal count.
+    expect(service.deleteEvents([ids[1], ids[2], 'evt-ghost'])).toBe(2);
+    expect(service.list({}).map((meta) => meta.title)).toEqual(['keep one']);
+  });
+
+  it('deleteEvents is a no-op on an empty batch', async () => {
+    const root = makeRoot();
+    const service = await getEventService('ws-delete-empty', root);
+    expect(service.deleteEvents([])).toBe(0);
+  });
+
+  it('outboxRemove drops the named records and keeps the rest', async () => {
+    const root = makeRoot();
+    const service = await getEventService('ws-outbox-remove', root);
+    const rec1 = recordOutboxCall(root, {
+      listenerId: 'telegram',
+      action: 'send_message',
+      args: { text: 'one' },
+      ok: true,
+      now: 1_000_000_001,
+    });
+    const rec2 = recordOutboxCall(root, {
+      listenerId: 'telegram',
+      action: 'send_message',
+      args: { text: 'two' },
+      ok: false,
+      error: 'refused',
+      now: 1_000_000_002,
+    });
+    const rec3 = recordOutboxCall(root, {
+      listenerId: 'wechat',
+      action: 'reply',
+      args: { text: 'three' },
+      ok: false,
+      now: 1_000_000_003,
+    });
+    expect(rec1?.id).toBeTruthy();
+    expect(rec2?.id).toBeTruthy();
+    expect(rec3?.id).toBeTruthy();
+    expect(service.outboxRemove([rec1!.id, rec3!.id])).toBe(2);
+    expect(service.outboxList().map((record) => record.id)).toEqual([rec2!.id]);
   });
 });

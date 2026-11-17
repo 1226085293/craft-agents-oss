@@ -262,6 +262,26 @@ export class EventService {
   }
 
   /**
+   * Delete specific outbox records (the 发件箱 context menu). Deleting a
+   * pending record also drops it from the retry queue: the dispatcher tick
+   * reads the same file, so a removed record is never retried again.
+   */
+  outboxRemove(ids: string[]): number {
+    if (!ids.length) return 0;
+    const records = loadOutbox(this.options.workspaceRoot);
+    const dropped = new Set(ids);
+    const kept = records.filter((record) => !dropped.has(record.id));
+    const removed = records.length - kept.length;
+    if (removed > 0) saveOutbox(this.options.workspaceRoot, kept);
+    return removed;
+  }
+
+  /** Delete specific events from the log (the 收件箱 context menu). */
+  deleteEvents(ids: string[]): number {
+    return this.store.deleteByIds(ids);
+  }
+
+  /**
    * Announce and dispatch one freshly stored event.
    *
    * Shared by the HTTP ingest server and the messaging bridge so an event that

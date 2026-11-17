@@ -44,6 +44,7 @@ import { getSettingsPageComponent } from '@/pages/settings/settings-pages'
 import ProjectInfoPage from '@/pages/ProjectInfoPage'
 import { PagesHome } from '../pages/PagesHome'
 import { EventDetailPanel } from '../events/EventDetailPanel'
+import { OutboxDetailPanel } from '../events/OutboxDetailPanel'
 import { ListenerDetailPanel } from '../events/ListenerDetailPanel'
 import { MemoryPanel } from './MemoryPanel'
 import { PageView } from '../pages/PageView'
@@ -204,6 +205,13 @@ export function MainContentPanel({
       return wrapWithStoplight(
         <Panel variant="grow" className={className}>
           <EventDetailPanel workspaceId={activeWorkspaceId} eventId={navState.details.eventId} />
+        </Panel>
+      )
+    }
+    if (navState.details?.type === 'outbox' && activeWorkspaceId) {
+      return wrapWithStoplight(
+        <Panel variant="grow" className={className}>
+          <OutboxDetailPanel workspaceId={activeWorkspaceId} outboxId={navState.details.outboxId} />
         </Panel>
       )
     }

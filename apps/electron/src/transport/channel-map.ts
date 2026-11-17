@@ -448,6 +448,7 @@ export const CHANNEL_MAP = {
 
   // Events
   listEvents: invoke(RPC_CHANNELS.events.LIST),
+  deleteEvents: invoke(RPC_CHANNELS.events.DELETE),
   getEvent: invoke(RPC_CHANNELS.events.GET),
   readEventAttachment: invoke(RPC_CHANNELS.events.READ_ATTACHMENT),
   openEventAttachment: invoke(RPC_CHANNELS.events.OPEN_ATTACHMENT),
@@ -473,6 +474,7 @@ export const CHANNEL_MAP = {
   listOutbox: invoke(RPC_CHANNELS.events.OUTBOX_LIST),
   retryOutbox: invoke(RPC_CHANNELS.events.OUTBOX_RETRY),
   purgeOutbox: invoke(RPC_CHANNELS.events.OUTBOX_PURGE),
+  removeOutbox: invoke(RPC_CHANNELS.events.OUTBOX_REMOVE),
   pairingGenerate: invoke(RPC_CHANNELS.events.PAIRING_GENERATE),
   pairingList: invoke(RPC_CHANNELS.events.PAIRING_LIST),
   pairingUnpair: invoke(RPC_CHANNELS.events.PAIRING_UNPAIR),

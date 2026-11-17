@@ -815,6 +815,8 @@ export interface ElectronAPI {
   onEventsChanged(
     callback: (workspaceId: string, event: import('@craft-agent/shared/protocol/dto').EventMetaDto) => void
   ): () => void
+  /** Delete specific events from the log (收件箱 / 发件箱 context menu). Returns how many. */
+  deleteEvents(workspaceId: string, ids: string[]): Promise<number>
   /** Durable outbox, newest first; pass a status to filter one delivery state. */
   listOutbox(
     workspaceId: string,
@@ -824,6 +826,8 @@ export interface ElectronAPI {
   retryOutbox(workspaceId: string, id: string): Promise<boolean>
   /** Drop sent/failed outbox records; pending ones keep their place. Returns how many. */
   purgeOutbox(workspaceId: string): Promise<number>
+  /** Delete specific outbox records (发件箱 context menu). Returns how many. */
+  removeOutbox(workspaceId: string, ids: string[]): Promise<number>
   /** One-minute, single-use pairing code. Send `/pair <code>` in a chat to unlock it. */
   pairingGenerate(workspaceId: string): Promise<{ code: string; expiresAt: number }>
   /** Channels that are currently paired and allowed to send events. */
@@ -1103,8 +1107,12 @@ export interface EventsNavigationState {
   navigator: 'events'
   /** list = 事件日志, listeners = 插件卡片, inbox = 未处理事件, outbox = 发出消息。 */
   section: 'list' | 'listeners' | 'inbox' | 'outbox'
-  /** Selected event id, or null. */
-  details: { type: 'event'; eventId: string } | { type: 'listener'; listenerId: string } | null
+  /** Selected event id, outbox record id, or null. */
+  details:
+    | { type: 'event'; eventId: string }
+    | { type: 'listener'; listenerId: string }
+    | { type: 'outbox'; outboxId: string }
+    | null
   rightSidebar?: RightSidebarPanel
 }
 

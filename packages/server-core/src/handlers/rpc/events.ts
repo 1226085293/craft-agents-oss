@@ -63,6 +63,8 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.events.OUTBOX_LIST,
   RPC_CHANNELS.events.OUTBOX_RETRY,
   RPC_CHANNELS.events.OUTBOX_PURGE,
+  RPC_CHANNELS.events.OUTBOX_REMOVE,
+  RPC_CHANNELS.events.DELETE,
 ] as const;
 
 function requireWorkspace(workspaceId: string) {
@@ -392,6 +394,16 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
   server.handle(RPC_CHANNELS.events.OUTBOX_PURGE, async (_ctx, workspaceId: string) => {
     const svc = await service(workspaceId);
     return svc.outboxPurge();
+  });
+
+  server.handle(RPC_CHANNELS.events.OUTBOX_REMOVE, async (_ctx, workspaceId: string, ids: string[]) => {
+    const svc = await service(workspaceId);
+    return svc.outboxRemove(Array.isArray(ids) ? ids : []);
+  });
+
+  server.handle(RPC_CHANNELS.events.DELETE, async (_ctx, workspaceId: string, ids: string[]) => {
+    const svc = await service(workspaceId);
+    return svc.deleteEvents(Array.isArray(ids) ? ids : []);
   });
 
   // --- Pairing -----------------------------------------------------------

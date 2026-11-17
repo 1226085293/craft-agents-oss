@@ -183,10 +183,15 @@ export const routes = {
      * Inbox: events that arrived but no session has finished acting on them
      * yet — the queue half of the event center, in the article's sense.
      */
-    inbox: () => 'events/inbox' as const,
+    inbox: (eventId?: string) =>
+      eventId ? `events/inbox/event/${eventId}` as const : 'events/inbox' as const,
 
-    /** Outbox: outbound messages with their delivery state (sent / pending / failed). */
-    outbox: () => 'events/outbox' as const,
+    /** Outbox: outbound messages with their delivery state (sent / pending / failed).
+     *  With an id, drills into that record's detail view. */
+    outbox: (outboxId?: string) =>
+      outboxId
+        ? `events/outbox/${outboxId}` as const
+        : 'events/outbox' as const,
 
   },
 } as const

@@ -17,11 +17,16 @@ import { useTranslation } from 'react-i18next'
 import { Search, Inbox, ChevronDown, Check, ArrowDownWideNarrow, ArrowUpNarrowWide, Paperclip } from 'lucide-react'
 import { SimpleDropdown, SimpleDropdownItem } from '@craft-agent/ui'
 import type { EventMetaDto } from '@craft-agent/shared/protocol/dto'
+import { useExplorerSelection, RowDeleteMenu, RecordDeleteConfirm } from './list-interactions'
 
 export interface EventsListPanelProps {
   workspaceId: string
   selectedEventId: string | null
   onSelectEvent: (eventId: string) => void
+  /** Inbox opens with the queue pre-filtered; the log opens unfiltered. */
+  defaultReception?: ReceptionFilter
+  /** Fired after a bulk delete succeeds so the shell can drop a stale detail. */
+  onDeleted?: (ids: string[]) => void
   className?: string
 }
 
@@ -30,10 +35,7 @@ export interface EventsListPanelProps {
  * (has configured recipients) and "未处理" (no receiving run has finished yet)
  * are the two non-default choices of the same question the user asks about a row.
  */
-type ReceptionFilter = '' | 'has-recipients' | 'unprocessed'
-/** Sort order of the list, by receivedAt. Newest-first is the default. */
-type SortOrder = 'desc' | 'asc'
-
+type ReceptionFilter = '' | 'has-recipients' | 'unprocessed' | 'processed'
 interface FilterState {
   source: string
   type: string
@@ -42,7 +44,7 @@ interface FilterState {
 
 const EMPTY_FILTERS: FilterState = { source: '', type: '', reception: '' }
 
-function formatTime(epochMs: number): string {
+export function formatTime(epochMs: number): string {
   const date = new Date(epochMs)
   const now = new Date()
   if (date.toDateString() === now.toDateString()) {
@@ -52,7 +54,7 @@ function formatTime(epochMs: number): string {
 }
 
 /** Dropdown filter styled like the rest of the filter row. */
-function FilterMenu({
+export function FilterMenu({
   value,
   placeholder,
   allLabel,
@@ -103,7 +105,9 @@ function FilterMenu({
 }
 
 /** Sort selector — same styling as FilterMenu but a two-value toggle. */
-function SortMenu({
+export type SortOrder = 'desc' | 'asc'
+
+export function SortMenu({
   value,
   onChange,
 }: {
@@ -148,12 +152,17 @@ export function EventsListPanel({
   workspaceId,
   selectedEventId,
   onSelectEvent,
+  defaultReception,
+  onDeleted,
   className,
 }: EventsListPanelProps): React.ReactElement {
   const { t } = useTranslation()
   const [events, setEvents] = React.useState<EventMetaDto[]>([])
   const [search, setSearch] = React.useState('')
-  const [filters, setFilters] = React.useState<FilterState>(EMPTY_FILTERS)
+  const [filters, setFilters] = React.useState<FilterState>(() => ({
+    ...EMPTY_FILTERS,
+    reception: defaultReception ?? '',
+  }))
   const [sortOrder, setSortOrder] = React.useState<SortOrder>('desc')
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
@@ -176,6 +185,7 @@ export function EventsListPanel({
         ...(filters.type ? { type: filters.type } : {}),
         ...(filters.reception === 'has-recipients' ? { hasRecipients: true } : {}),
         ...(filters.reception === 'unprocessed' ? { handled: false } : {}),
+        ...(filters.reception === 'processed' ? { handled: true } : {}),
         limit: 200,
       })
       setEvents(Array.isArray(rows) ? rows : [])
@@ -234,7 +244,36 @@ export function EventsListPanel({
   const RECEPTION_OPTIONS: { value: ReceptionFilter; label: string }[] = [
     { value: 'has-recipients', label: t('events.list.hasRecipients') },
     { value: 'unprocessed', label: t('events.list.unprocessed') },
+    { value: 'processed', label: t('events.list.processed') },
   ]
+
+  // ------------------------------------------------------------------
+  // Bulk selection + right-click delete (Explorer grammar, shared with the
+  // outbox list): single click activates, Ctrl/⌘ toggles, Shift ranges.
+  // ------------------------------------------------------------------
+  const { selected, handleRowClick, handleRowContext, dropIds } = useExplorerSelection(
+    sortedEvents.map((event) => event.id),
+  )
+  const [menuPos, setMenuPos] = React.useState<{ x: number; y: number } | null>(null)
+  const [confirmDelete, setConfirmDelete] = React.useState(false)
+  const [deleteBusy, setDeleteBusy] = React.useState(false)
+
+  const confirmDeleteNow = React.useCallback(async () => {
+    const ids = [...selected]
+    if (!ids.length) return
+    setDeleteBusy(true)
+    try {
+      await window.electronAPI.deleteEvents(workspaceId, ids)
+      dropIds(ids)
+      setEvents((prev) => prev.filter((event) => !ids.includes(event.id)))
+      onDeleted?.(ids)
+    } catch (error) {
+      console.error('[EventsListPanel] delete failed:', error)
+    } finally {
+      setDeleteBusy(false)
+      setConfirmDelete(false)
+    }
+  }, [selected, workspaceId, dropIds, onDeleted])
 
   return (
     <div className={className ? `flex flex-col h-full ${className}` : 'flex flex-col h-full'}>
@@ -292,18 +331,31 @@ export function EventsListPanel({
         )}
 
         {sortedEvents.map((event) => {
-          const selected = event.id === selectedEventId
+          const active = event.id === selectedEventId
+          const multi = selected.has(event.id)
           return (
             <button
               key={event.id}
               type="button"
-              onClick={() => onSelectEvent(event.id)}
+              onClick={(e) => {
+                // A plain click activates the row AND opens its detail; a
+                // Ctrl/⌘/Shift click only reshapes the bulk selection.
+                const modifierClick = handleRowClick(e, event.id)
+                if (!modifierClick) onSelectEvent(event.id)
+              }}
+              onContextMenu={(e) => {
+                handleRowContext(e, event.id)
+                setMenuPos({ x: e.clientX, y: e.clientY })
+              }}
               className={`relative w-full text-left px-3 pr-4 py-3 mx-1 rounded-[8px] transition-colors ${
                 // Same grammar as EntityRow: faint foreground wash + a left
-                // accent rule; the accent never fills the whole row.
-                selected
+                // accent rule; the accent never fills the whole row. A
+                // bulk-selected row gets a fainter wash with no accent.
+                active
                   ? 'bg-foreground/3 shadow-[inset_2px_0_0_0_hsl(var(--accent))]'
-                  : 'hover:bg-foreground/2'
+                  : multi
+                    ? 'bg-foreground/5'
+                    : 'hover:bg-foreground/2'
               }`}
               style={{ width: 'calc(100% - 8px)' }}
             >
@@ -366,6 +418,23 @@ export function EventsListPanel({
           )
         })}
       </div>
+
+      {menuPos && (
+        <RowDeleteMenu
+          position={menuPos}
+          count={selected.size}
+          onRequestDelete={() => setConfirmDelete(true)}
+          onClose={() => setMenuPos(null)}
+        />
+      )}
+      {confirmDelete && (
+        <RecordDeleteConfirm
+          count={selected.size}
+          busy={deleteBusy}
+          onCancel={() => setConfirmDelete(false)}
+          onConfirm={() => void confirmDeleteNow()}
+        />
+      )}
     </div>
   )
 }

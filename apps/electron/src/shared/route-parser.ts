@@ -208,6 +208,15 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
     if ((segments[1] === 'inbox' || segments[1] === 'outbox') && segments.length === 2) {
       return { navigator: 'events', eventsSection: section, details: null }
     }
+    // Outbox drill-down is the compact 3-segment form: events/outbox/<recordId>.
+    // (Event / listener details keep the 4-segment events/<section>/<type>/<id>.)
+    if (section === 'outbox' && segments.length === 3 && segments[2]) {
+      return {
+        navigator: 'events',
+        eventsSection: 'outbox',
+        details: { type: 'outbox', id: segments[2] },
+      }
+    }
     if (segments[2] === detailsType && segments[3]) {
       return {
         navigator: 'events',
@@ -312,6 +321,11 @@ export function buildCompoundRoute(parsed: ParsedCompoundRoute): string {
   if (parsed.navigator === 'events') {
     const section = parsed.eventsSection ?? 'list'
     if (!parsed.details) return `events/${section}`
+    // Outbox records keep the compact 3-segment form; everything else is
+    // events/<section>/<detailsType>/<id>.
+    if (section === 'outbox' && parsed.details.type === 'outbox') {
+      return `events/outbox/${parsed.details.id}`
+    }
     return `events/${section}/${parsed.details.type}/${parsed.details.id}`
   }
 
@@ -462,7 +476,7 @@ function convertCompoundToViewRoute(compound: ParsedCompoundRoute): ParsedRoute 
         : 'event-list'
       return { type: 'view', name, params: {} }
     }
-    return { type: 'view', name: 'event-info', id: compound.details.id, params: {} }
+    return { type: 'view', name: compound.details.type === 'outbox' ? 'outbox-info' : 'event-info', id: compound.details.id, params: {} }
   }
 
   // Sessions
@@ -625,7 +639,9 @@ function convertCompoundToNavigationState(compound: ParsedCompoundRoute): Naviga
       details:
         compound.details.type === 'listener'
           ? { type: 'listener', listenerId: compound.details.id }
-          : { type: 'event', eventId: compound.details.id },
+          : compound.details.type === 'outbox'
+            ? { type: 'outbox', outboxId: compound.details.id }
+            : { type: 'event', eventId: compound.details.id },
     }
   }
 
@@ -803,7 +819,9 @@ function navigationStateToCompoundRoute(state: NavigationState): ParsedCompoundR
           ? { type: 'event', id: state.details.eventId }
           : state.details?.type === 'listener'
             ? { type: 'listener', id: state.details.listenerId }
-            : null,
+            : state.details?.type === 'outbox'
+              ? { type: 'outbox', id: state.details.outboxId }
+              : null,
     }
   }
 

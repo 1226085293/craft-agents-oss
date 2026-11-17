@@ -8,9 +8,7 @@ import {
   listPairedChannels,
   markChannelPaired,
   parsePairingAttempt,
-  pairingPromptDue,
   pairingTexts,
-  recordPairingPrompt,
   redeemPairingCode,
   unpairChannel,
 } from './pairings';
@@ -111,22 +109,23 @@ describe('paired channels', () => {
   });
 });
 
-describe('prompt cooldown', () => {
-  it('allows one prompt, then cools down for 10 minutes', () => {
-    const now = 1_000_000;
-    expect(pairingPromptDue(root, CHANNEL, now)).toBe(true);
-    recordPairingPrompt(root, CHANNEL, now);
-    expect(pairingPromptDue(root, CHANNEL, now + 5 * 60_000)).toBe(false);
-    expect(pairingPromptDue(root, CHANNEL, now + 11 * 60_000)).toBe(true);
-  });
-
-  it('a paired channel keeps its prompt history but is never prompted again by the gate', () => {
+describe('pairing gate checks', () => {
+  it('a paired channel reads as paired by the gate', () => {
     markChannelPaired(root, CHANNEL);
     expect(isChannelPaired(root, CHANNEL)).toBe(true);
   });
 
-  it('a prompt-cooldown record does not pair the channel (gate must keep holding)', () => {
-    recordPairingPrompt(root, CHANNEL, 2_000_000);
+  it('a legacy prompt-cooldown row (pairedAt: 0) does not pair the channel', () => {
+    const { writeFileSync } = require('node:fs');
+    writeFileSync(
+      join(root, 'config', 'pairings.json'),
+      JSON.stringify({
+        version: 1,
+        codes: [],
+        channels: [{ channelKey: CHANNEL, pairedAt: 0, lastPromptAt: 2_000_000 }],
+      }),
+      'utf8',
+    );
     expect(isChannelPaired(root, CHANNEL)).toBe(false);
   });
 

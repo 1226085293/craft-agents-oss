@@ -39,10 +39,8 @@ import { isMessagingListener } from '@craft-agent/shared/events/manifest.ts';
 import { parseSlashCommand } from '@craft-agent/shared/events/slash-commands.ts';
 import {
   isChannelPaired,
-  pairingPromptDue,
   parsePairingAttempt,
   pairingTexts,
-  recordPairingPrompt,
   redeemPairingCode,
 } from '@craft-agent/shared/events/pairings.ts';
 import { commandReplyChannel, executeSlashCommand, slashCommandCatalogue } from './slash-command.ts';
@@ -313,7 +311,7 @@ export class EventService {
    * A channel that has not been paired (pairing code redeemed from the
    * plugin's detail page) is not a source of events at all: its messages never reach
    * the store, the dispatcher, or the inbox. The host answers them instead —
-   * a rate-limited pairing prompt, or the /pair <code> redemption itself.
+   * a pairing prompt on every one, or the /pair <code> redemption itself.
    * Events without a channel (no message:// link) are not gated.
    */
   private pairingGateInsert(event: CraftEventEnvelope): { id: string; duplicate: boolean } {
@@ -356,9 +354,9 @@ export class EventService {
           eventLog.info(`[events] pairing code ${result.reason} for ${channelKey}`);
           answer(texts.codeInvalid);
         }
-      } else if (pairingPromptDue(this.options.workspaceRoot, channelKey)) {
+      } else {
+        // No rate limit: every message from an unpaired chat gets a prompt.
         answer(texts.prompt);
-        recordPairingPrompt(this.options.workspaceRoot, channelKey);
       }
       void this.outboxTick();
     } catch (error) {

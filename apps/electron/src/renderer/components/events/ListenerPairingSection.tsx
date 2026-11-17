@@ -32,16 +32,24 @@ export function ListenerPairingSection({
   const [code, setCode] = React.useState<{ value: string; expiresAt: number } | null>(null)
   const [now, setNow] = React.useState(0)
 
+  // Pairing happens in-chat (`/pair <code>`), not on this page — so the
+  // list must keep refreshing like the outbox does: five-second poll,
+  // the same cadence the dispatcher uses.
   React.useEffect(() => {
     let cancelled = false
-    window.electronAPI
-      .pairingList(workspaceId)
-      .then((rows) => {
-        if (!cancelled) setChannels(rows)
-      })
-      .catch(() => undefined)
+    const load = () => {
+      window.electronAPI
+        .pairingList(workspaceId)
+        .then((rows) => {
+          if (!cancelled) setChannels(rows)
+        })
+        .catch(() => undefined)
+    }
+    load()
+    const timer = setInterval(load, 5000)
     return () => {
       cancelled = true
+      clearInterval(timer)
     }
   }, [workspaceId])
 
@@ -56,6 +64,12 @@ export function ListenerPairingSection({
   const ownChannels = channels
     .filter((row) => row.pairedAt > 0)
     .filter((row) => row.channelKey.startsWith(`message://${listenerId}/`))
+
+  // The code's job is done once this plugin's channel is paired: stop
+  // showing the half-expired credential on screen.
+  React.useEffect(() => {
+    if (ownChannels.length > 0) setCode(null)
+  }, [ownChannels.length])
   const remaining = code ? Math.max(0, Math.ceil((code.expiresAt - (now || Date.now())) / 1000)) : 0
   const activeCode = code !== null && remaining > 0 ? code : null
 

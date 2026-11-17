@@ -9,8 +9,9 @@ import { LOCALE_REGISTRY, type LanguageCode } from '../i18n/registry.ts';
  *
  * The model:
  * - A channel (`message://<platform>/<chatId>`) is NOT paired by default.
- * - While unpaired, its messages never become events: the host answers with
- *   a pairing prompt (rate-limited) and handles `/pair <code>` redemption.
+ * - While unpaired, its messages never become events: the host answers
+ *   every one of them with a pairing prompt (no rate limit), and handles
+ *   `/pair <code>` redemption.
  * - A code is generated in the app (the plugin's detail page), is single-use and
  *   expires after a minute. Redeeming it from a chat pairs that chat.
  *
@@ -22,9 +23,8 @@ import { LOCALE_REGISTRY, type LanguageCode } from '../i18n/registry.ts';
 export interface PairedChannelRecord {
   /** `message://<platform>/<chatId>` — exactly what deriveThreadKey produces. */
   channelKey: string;
+  /** Paired when this timestamp was set. 0 in legacy prompt-cooldown rows. */
   pairedAt: number;
-  /** Last pairing-prompt reply, for the per-channel cooldown. */
-  lastPromptAt?: number;
 }
 
 export interface PendingCodeRecord {
@@ -78,10 +78,10 @@ function pruneCodes(file: PairingsFile, now: number): PairingsFile {
 
 /**
  * A channel is paired only when an entry was created by a real pairing
- * (markChannelPaired / redeemPairingCode — `pairedAt > 0`). The same file
- * also holds prompt-cooldown records (`recordPairingPrompt` writes
- * `pairedAt: 0`), and those must NOT open the gate: otherwise the first
- * pairing prompt would let every later message through as an event.
+ * (markChannelPaired / redeemPairingCode — `pairedAt > 0`). Legacy files
+ * may still hold prompt-cooldown rows (`pairedAt: 0`) written before the
+ * cooldown was dropped, and those must NOT open the gate: otherwise the
+ * first pairing prompt would let every later message through.
  */
 export function isChannelPaired(workspaceRoot: string, channelKey: string): boolean {
   return loadPairings(workspaceRoot).channels.some(
@@ -167,25 +167,6 @@ export function redeemPairingCode(
   ];
   savePairings(workspaceRoot, pruneCodes(file, now));
   return { ok: true };
-}
-
-/**
- * Pairing prompts are rate-limited per channel: one per 10 minutes. A chat
- * that spams an unpaired bot must not spam replies back.
- */
-const PROMPT_COOLDOWN_MS = 10 * 60 * 1000;
-
-export function pairingPromptDue(workspaceRoot: string, channelKey: string, now = Date.now()): boolean {
-  const entry = loadPairings(workspaceRoot).channels.find((candidate) => candidate.channelKey === channelKey);
-  return !entry?.lastPromptAt || now - entry.lastPromptAt >= PROMPT_COOLDOWN_MS;
-}
-
-export function recordPairingPrompt(workspaceRoot: string, channelKey: string, now = Date.now()): void {
-  const file = loadPairings(workspaceRoot);
-  const entry = file.channels.find((candidate) => candidate.channelKey === channelKey);
-  if (entry) entry.lastPromptAt = now;
-  else file.channels.push({ channelKey, pairedAt: 0, lastPromptAt: now });
-  savePairings(workspaceRoot, file);
 }
 
 /**

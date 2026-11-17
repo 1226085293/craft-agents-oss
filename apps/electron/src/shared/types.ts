@@ -833,7 +833,7 @@ export interface ElectronAPI {
   /** Channels that are currently paired and allowed to send events. */
   pairingList(
     workspaceId: string
-  ): Promise<Array<{ channelKey: string; pairedAt: number; lastPromptAt?: number }>>
+  ): Promise<Array<{ channelKey: string; pairedAt: number }>>
   /** Unpair a channel; its next message gets the pairing prompt again. */
   pairingUnpair(workspaceId: string, channelKey: string): Promise<{ success: boolean }>
   listEventListeners(

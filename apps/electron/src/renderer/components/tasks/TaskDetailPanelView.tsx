@@ -22,13 +22,16 @@ import {
   CircleDot,
   Clock3,
   FileText,
+  Link2,
   PauseCircle,
+  Plus,
   RotateCcw,
   XCircle,
 } from 'lucide-react'
 
 import { useAtomValue } from 'jotai'
 import { cn } from '@/lib/utils'
+import { useAppShellContext } from '@/context/AppShellContext'
 import { planProgress } from '@craft-agent/shared/tasks/plan'
 // The `cron` subpath, not the barrel: `@craft-agent/shared/tasks` re-exports the on-disk store, and
 // pulling `node:fs` into the renderer took the whole window down once already.
@@ -193,6 +196,112 @@ type TaskTriggerValue =
   | { kind: 'manual' }
   | { kind: 'cron'; expr: string; timezone?: string; enabled: boolean }
   | { kind: 'event'; source: string; types?: string[]; enabled: boolean }
+
+/**
+ * Channel pairing — the host owns which chats may send events to this
+ * workspace. A code generated here is single-use and lives for a minute;
+ * redeemed in-chat with `/pair <code>`, it pairs that channel. While a
+ * channel is unpaired its messages never become events: the host answers
+ * them with a pairing prompt instead.
+ */
+function PairingSection(): React.JSX.Element | null {
+  const { t } = useTranslation()
+  const { activeWorkspaceId } = useAppShellContext()
+  const [channels, setChannels] = React.useState<Array<{ channelKey: string; pairedAt: number }>>([])
+  const [code, setCode] = React.useState<{ value: string; expiresAt: number } | null>(null)
+  const [now, setNow] = React.useState(0)
+
+  React.useEffect(() => {
+    if (!activeWorkspaceId) return
+    let cancelled = false
+    window.electronAPI
+      .pairingList(activeWorkspaceId)
+      .then((rows) => {
+        if (!cancelled) setChannels(rows)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [activeWorkspaceId])
+
+  React.useEffect(() => {
+    if (!code) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [code])
+
+  if (!activeWorkspaceId) return null
+
+  const remaining = code ? Math.max(0, Math.ceil((code.expiresAt - (now || Date.now())) / 1000)) : 0
+  const activeCode = code !== null && remaining > 0 ? code : null
+
+  const generate = async (): Promise<void> => {
+    try {
+      const generated = await window.electronAPI.pairingGenerate(activeWorkspaceId)
+      setNow(Date.now())
+      setCode({ value: generated.code, expiresAt: generated.expiresAt })
+    } catch {
+      // Generation failed: the button stays, no code appears.
+    }
+  }
+
+  const unpair = (channelKey: string): void => {
+    void window.electronAPI
+      .pairingUnpair(activeWorkspaceId, channelKey)
+      .then(() => setChannels((prev) => prev.filter((row) => row.channelKey !== channelKey)))
+      .catch(() => undefined)
+  }
+
+  return (
+    <section className="rounded-xl border border-border/60 bg-foreground/[0.02] p-4 md:p-5" aria-label={t('taskboard.pairing.title')}>
+      <div className="mb-2.5 flex items-center gap-2">
+        <Link2 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+        <h2 className="td-heading text-foreground">{t('taskboard.pairing.title')}</h2>
+      </div>
+
+      <p className="td-body mb-3 text-muted-foreground">{t('taskboard.pairing.hint', { seconds: 60 })}</p>
+
+      {activeCode ? (
+        <div className="mb-3 flex items-center gap-3 rounded-lg border border-border/60 bg-muted/30 px-3 py-2.5">
+          <code className="select-all break-all font-mono text-lg tracking-wider text-foreground">{activeCode.value}</code>
+          <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">{remaining}s</span>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => void generate()}
+          className="mb-3 inline-flex min-h-9 items-center gap-2 rounded-md border border-border/60 px-3 text-xs text-foreground transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+          {t('taskboard.pairing.get')}
+        </button>
+      )}
+
+      <h3 className="mb-1.5 text-xs text-muted-foreground">{t('taskboard.pairing.pairedChannels')}</h3>
+      {channels.length === 0 ? (
+        <p className="td-body text-muted-foreground">{t('taskboard.pairing.none')}</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {channels.map((row) => (
+            <li key={row.channelKey} className="flex min-w-0 items-center gap-2 td-body">
+              <span className="min-w-0 truncate font-mono text-foreground/90" title={row.channelKey}>
+                {row.channelKey}
+              </span>
+              <button
+                type="button"
+                onClick={() => unpair(row.channelKey)}
+                className="ml-auto shrink-0 text-xs text-muted-foreground transition-colors hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {t('taskboard.pairing.unpair')}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
 
 export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onAnswer, onOpenSession, planJumps, onJumpToStep, agents, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
@@ -972,6 +1081,8 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         </div>
         <p className="td-body whitespace-pre-wrap text-foreground/90">{detail.instruction}</p>
       </section>
+
+      <PairingSection />
 
       {/*
         The open question sits directly under the instruction, above the plan.

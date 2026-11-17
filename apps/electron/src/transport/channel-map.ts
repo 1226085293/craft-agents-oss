@@ -473,6 +473,9 @@ export const CHANNEL_MAP = {
   listOutbox: invoke(RPC_CHANNELS.events.OUTBOX_LIST),
   retryOutbox: invoke(RPC_CHANNELS.events.OUTBOX_RETRY),
   purgeOutbox: invoke(RPC_CHANNELS.events.OUTBOX_PURGE),
+  pairingGenerate: invoke(RPC_CHANNELS.events.PAIRING_GENERATE),
+  pairingList: invoke(RPC_CHANNELS.events.PAIRING_LIST),
+  pairingUnpair: invoke(RPC_CHANNELS.events.PAIRING_UNPAIR),
 
   // Pages
   getPages: invoke(RPC_CHANNELS.pages.GET),

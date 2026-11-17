@@ -502,6 +502,15 @@ export const RPC_CHANNELS = {
     /** Drop finished (sent / failed) records; pending ones keep their place. */
     OUTBOX_PURGE: 'events:outboxPurge',
 
+    /**
+     * Channel pairing: a one-minute, single-use code that unlocks a chat to
+     * send events. Generated on the task detail page; redeemed in-chat via
+     * `/pair <code>`.
+     */
+    PAIRING_GENERATE: 'events:pairingGenerate',
+    PAIRING_LIST: 'events:pairingList',
+    PAIRING_UNPAIR: 'events:pairingUnpair',
+
     /** This session's subscriptions. */
     LIST_SUBSCRIPTIONS: 'events:listSubscriptions',
     SUBSCRIBE: 'events:subscribe',

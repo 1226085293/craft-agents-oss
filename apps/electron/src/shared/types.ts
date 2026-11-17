@@ -824,6 +824,14 @@ export interface ElectronAPI {
   retryOutbox(workspaceId: string, id: string): Promise<boolean>
   /** Drop sent/failed outbox records; pending ones keep their place. Returns how many. */
   purgeOutbox(workspaceId: string): Promise<number>
+  /** One-minute, single-use pairing code. Send `/pair <code>` in a chat to unlock it. */
+  pairingGenerate(workspaceId: string): Promise<{ code: string; expiresAt: number }>
+  /** Channels that are currently paired and allowed to send events. */
+  pairingList(
+    workspaceId: string
+  ): Promise<Array<{ channelKey: string; pairedAt: number; lastPromptAt?: number }>>
+  /** Unpair a channel; its next message gets the pairing prompt again. */
+  pairingUnpair(workspaceId: string, channelKey: string): Promise<{ success: boolean }>
   listEventListeners(
     workspaceId: string,
     skipProbes?: boolean,

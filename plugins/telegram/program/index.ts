@@ -24,15 +24,6 @@ import type {
 import { formatForTelegram, TELEGRAM_MAX_CAPTION_LENGTH, TELEGRAM_MAX_MESSAGE_LENGTH, TELEGRAM_PARSE_MODE, type TelegramParseMode } from './format'
 
 /**
- * Discriminated chat metadata returned by `getChatInfo`. Phase A's supergroup
- * pairing flow uses this to validate that the user typed `/pair` in an
- * actual forum supergroup before binding it as the workspace's supergroup.
- */
-export type TelegramChatInfo =
-  | { type: 'supergroup'; isForum: boolean; title: string }
-  | { type: 'group' | 'channel' | 'private'; title?: string }
-
-/**
  * Hard cap for downloaded attachment size. Matches `MAX_FILE_SIZE` in
  * `@craft-agent/shared/utils/files` — files larger than this would be
  * rejected by `readFileAttachment` anyway, so we fail fast in the adapter
@@ -180,8 +171,8 @@ function describeError(err: unknown, depth = 0): Record<string, unknown> {
 
 /**
  * DM-only guard. Retained because tests use it directly; new code paths
- * should call `isAcceptedChat()` which also accepts the workspace's
- * configured supergroup chat (forum).
+ * should call `isAcceptedChat()`, which forwards DMs and group messages that
+ * @-mention the bot or are slash commands (pairing itself is host-owned).
  */
 /**
  * Detect whether the bot is explicitly @-mentioned in a Telegram message.
@@ -211,25 +202,23 @@ export function isPrivateChat(ctx: Context): boolean {
 }
 
 /**
- * Decide whether an inbound update should be processed.
+ * Decide whether an inbound update should be forwarded to Craft.
  *
- * - DMs (`private` chats) are always accepted — same as Phase 1.
- * - When the workspace has a paired supergroup, that exact `chat.id` is
- *   also accepted (forum topics live inside it).
- * - Everything else (other groups, channels, basic groups the bot was
- *   added to without explicit configuration) is dropped.
+ * Pairing is host-owned — this only decides what is worth sending at all:
  *
- * Sender-level authorization for groups/topics is intentionally NOT enforced
- * here — pairing the supergroup in Settings is the per-workspace consent
- * boundary, and topic-scoped bindings determine which session each topic
- * routes to.
+ * - DMs (`private` chats) are always forwarded. Whether the chat becomes an
+ *   event is the host's call: unpaired chats get a pairing prompt instead.
+ * - Group messages are forwarded when they @-mention the bot or start a
+ *   slash command (including the `/pair` bootstrap); group chatter nobody
+ *   addressed is dropped here, before it costs a host round-trip.
  */
-export function isAcceptedChat(ctx: Context, supergroupChatId?: string): boolean {
+export function isAcceptedChat(ctx: Context, botUsername?: string): boolean {
   const chat = ctx.chat
   if (!chat) return false
   if (chat.type === 'private') return true
-  if (!supergroupChatId) return false
-  return String(chat.id) === supergroupChatId
+  const text = ctx.message?.text ?? ''
+  if (text.startsWith('/')) return true
+  return isBotMentioned(ctx, botUsername)
 }
 
 export class TelegramAdapter implements PlatformAdapter {
@@ -273,14 +262,6 @@ export class TelegramAdapter implements PlatformAdapter {
   private rebuilding = false
   private rebuildAttempts = 0
   private log: MessagingLogger = NOOP_LOGGER
-  /**
-   * The supergroup chatId this adapter accepts non-DM messages from.
-   * Updated at runtime via `setAcceptedSupergroupChatId()` after the user
-   * pairs/unpairs a supergroup in Settings, so polling doesn't need to
-   * restart on reconfigure.
-   */
-  private supergroupChatId: string | undefined
-
   /**
    * Emit one structured log line per dropped non-accepted update. Deliberately
    * `info` (not `debug`) so a user who notices "bot isn't responding in my
@@ -334,45 +315,6 @@ export class TelegramAdapter implements PlatformAdapter {
     })
   }
 
-  /** Idempotent runtime reconfigure for the accepted supergroup chatId. */
-  setAcceptedSupergroupChatId(chatId: string | undefined): void {
-    this.supergroupChatId = chatId
-    this.log.info('[telegram] accepted supergroup updated', {
-      event: 'telegram_supergroup_set',
-      supergroupChatId: chatId ?? null,
-    })
-  }
-
-  /**
-   * Resolve a chat's metadata via Bot API. Returns `null` on any failure
-   * (network, "chat not found", missing permissions, etc.). The caller is
-   * expected to handle the null case explicitly — for the supergroup-pairing
-   * flow that means refusing to bind, rather than guessing defaults.
-   *
-   * Forum supergroups are the only chat type that can host topics. The
-   * `isForum` flag distinguishes a regular supergroup from one with topics
-   * enabled, which is required for Phase B's `createForumTopic` to work.
-   */
-  async getChatInfo(chatId: string): Promise<TelegramChatInfo | null> {
-    if (!this.bot) return null
-    try {
-      const chat = await this.bot.api.getChat(Number(chatId))
-      if (chat.type === 'supergroup') {
-        return {
-          type: 'supergroup',
-          isForum: Boolean((chat as { is_forum?: boolean }).is_forum),
-          title: chat.title ?? `Group ${chatId}`,
-        }
-      }
-      return {
-        type: chat.type,
-        title: 'title' in chat && typeof chat.title === 'string' ? chat.title : undefined,
-      }
-    } catch {
-      return null
-    }
-  }
-
   /**
    * Telegram-specific helper: extract the optional `message_thread_id` from
    * an inbound update. Returns undefined for DMs and for the General topic
@@ -398,9 +340,6 @@ export class TelegramAdapter implements PlatformAdapter {
       this.reconnectTimer = null
     }
     this.bot = new Bot(config.token)
-    if (config.acceptedSupergroupChatId) {
-      this.supergroupChatId = config.acceptedSupergroupChatId
-    }
 
     // Diagnostic middleware: log every Telegram message update before any
     // filter-specific handler runs. This is intentionally lightweight and
@@ -436,7 +375,7 @@ export class TelegramAdapter implements PlatformAdapter {
     this.bot.on('message:text', async (ctx: Context) => {
       if (!this.messageHandler || !ctx.message || !ctx.chat) return
       const text = ctx.message.text ?? ''
-      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+      if (!isAcceptedChat(ctx, this.bot?.botInfo?.username)) {
         this.logRejectedChat('message:text', ctx)
         return
       }
@@ -484,7 +423,7 @@ export class TelegramAdapter implements PlatformAdapter {
     // set. The router resolves the path via readFileAttachment() and
     // forwards a FileAttachment to the session.
     this.bot.on('message:photo', async (ctx: Context) => {
-      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+      if (!isAcceptedChat(ctx, this.bot?.botInfo?.username)) {
         this.logRejectedChat('message:photo', ctx)
         return
       }
@@ -501,7 +440,7 @@ export class TelegramAdapter implements PlatformAdapter {
     })
 
     this.bot.on('message:document', async (ctx: Context) => {
-      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+      if (!isAcceptedChat(ctx, this.bot?.botInfo?.username)) {
         this.logRejectedChat('message:document', ctx)
         return
       }
@@ -517,7 +456,7 @@ export class TelegramAdapter implements PlatformAdapter {
     })
 
     this.bot.on('message:voice', async (ctx: Context) => {
-      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+      if (!isAcceptedChat(ctx, this.bot?.botInfo?.username)) {
         this.logRejectedChat('message:voice', ctx)
         return
       }
@@ -532,7 +471,7 @@ export class TelegramAdapter implements PlatformAdapter {
     })
 
     this.bot.on('message:video', async (ctx: Context) => {
-      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+      if (!isAcceptedChat(ctx, this.bot?.botInfo?.username)) {
         this.logRejectedChat('message:video', ctx)
         return
       }
@@ -548,7 +487,7 @@ export class TelegramAdapter implements PlatformAdapter {
     })
 
     this.bot.on('message:audio', async (ctx: Context) => {
-      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+      if (!isAcceptedChat(ctx, this.bot?.botInfo?.username)) {
         this.logRejectedChat('message:audio', ctx)
         return
       }
@@ -564,7 +503,7 @@ export class TelegramAdapter implements PlatformAdapter {
     })
 
     this.bot.on('message:animation', async (ctx: Context) => {
-      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+      if (!isAcceptedChat(ctx, this.bot?.botInfo?.username)) {
         this.logRejectedChat('message:animation', ctx)
         return
       }
@@ -580,7 +519,7 @@ export class TelegramAdapter implements PlatformAdapter {
     })
 
     this.bot.on('message:video_note', async (ctx: Context) => {
-      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+      if (!isAcceptedChat(ctx, this.bot?.botInfo?.username)) {
         this.logRejectedChat('message:video_note', ctx)
         return
       }
@@ -596,7 +535,7 @@ export class TelegramAdapter implements PlatformAdapter {
     })
 
     this.bot.on('message:sticker', async (ctx: Context) => {
-      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+      if (!isAcceptedChat(ctx, this.bot?.botInfo?.username)) {
         this.logRejectedChat('message:sticker', ctx)
         return
       }
@@ -619,7 +558,7 @@ export class TelegramAdapter implements PlatformAdapter {
     // Handle callback queries (button presses)
     this.bot.on('callback_query:data', async (ctx: Context) => {
       if (!this.buttonHandler || !ctx.callbackQuery) return
-      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+      if (!isAcceptedChat(ctx, this.bot?.botInfo?.username)) {
         this.logRejectedChat('callback_query:data', ctx)
         // Answer the callback so Telegram stops showing the spinner, but
         // don't route it — same rationale as message handlers.

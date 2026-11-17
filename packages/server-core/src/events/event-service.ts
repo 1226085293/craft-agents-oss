@@ -26,6 +26,7 @@ import {
   loadOutbox,
   saveOutbox,
   outboxDue,
+  recordOutboxCall,
   nextBackoffMs,
   OUTBOX_MAX_ATTEMPTS,
   OUTBOX_PACE_MS,
@@ -35,7 +36,15 @@ import { loadSubscriptions } from '@craft-agent/shared/events/subscriptions.ts';
 import { deriveThreadKey, findThreadOwner } from '@craft-agent/shared/events/thread-bindings.ts';
 import type { ListenerConfigSchema, ListenerUi } from '@craft-agent/shared/events/manifest.ts';
 import { parseSlashCommand } from '@craft-agent/shared/events/slash-commands.ts';
-import { executeSlashCommand, slashCommandCatalogue } from './slash-command.ts';
+import {
+  isChannelPaired,
+  pairingPromptDue,
+  parsePairingAttempt,
+  pairingTexts,
+  recordPairingPrompt,
+  redeemPairingCode,
+} from '@craft-agent/shared/events/pairings.ts';
+import { commandReplyChannel, executeSlashCommand, slashCommandCatalogue } from './slash-command.ts';
 import type { CraftEventEnvelope } from '@craft-agent/shared/events/types.ts';
 import type { ListenerReportedDepsDto } from '@craft-agent/shared/protocol/dto';
 
@@ -128,7 +137,7 @@ export class EventService {
     });
 
     this.ingest = new EventIngestServer({
-      sink: this.store,
+      sink: { insert: (event) => this.pairingGateInsert(event) },
       onHealth: (listenerId) => {
         // A listener that can reach /health is proven working: flip it out of
         // 'starting' (and clear the ready-timeout) on the supervisor side.
@@ -277,6 +286,67 @@ export class EventService {
    * the payload, so the caller can log and continue instead of throwing into a
    * chat pipeline.
    */
+  /**
+   * The sink wrapper — channel pairing lives HERE, before the store.
+   *
+   * A channel that has not been paired (pairing code redeemed from the task
+   * detail page) is not a source of events at all: its messages never reach
+   * the store, the dispatcher, or the inbox. The host answers them instead —
+   * a rate-limited pairing prompt, or the /pair <code> redemption itself.
+   * Events without a channel (no message:// link) are not gated.
+   */
+  private pairingGateInsert(event: CraftEventEnvelope): { id: string; duplicate: boolean } {
+    const channelKey = deriveThreadKey(event.links);
+    if (channelKey && !isChannelPaired(this.options.workspaceRoot, channelKey)) {
+      void this.consumePairingMessage(event, channelKey);
+      // `duplicate` suppresses onInserted downstream, so nothing is
+      // dispatched and the message is never treated as an event.
+      return { id: event.id, duplicate: true };
+    }
+    return this.store.insert(event);
+  }
+
+  /**
+   * Answer a message from an unpaired channel: redeem a pairing attempt
+   * (`/pair <code>`), or send the pairing prompt (one per channel per 10
+   * minutes — an unpaired chat must not be able to spam the bot back).
+   */
+  private async consumePairingMessage(event: CraftEventEnvelope, channelKey: string): Promise<void> {
+    try {
+      const channelId = commandReplyChannel(event);
+      if (!channelId) return; // no reply link: nothing to answer with
+      const texts = pairingTexts();
+      const answer = (text: string): void => {
+        recordOutboxCall(this.options.workspaceRoot, {
+          listenerId: event.source,
+          action: 'send_message',
+          args: { channelId, text },
+          ok: false,
+          error: 'queued by host pairing gate',
+        });
+      };
+      const attempt = parsePairingAttempt(event.body);
+      if (attempt !== null) {
+        const result = redeemPairingCode(this.options.workspaceRoot, attempt, channelKey);
+        if (result.ok) {
+          eventLog.info(`[events] channel paired via code: ${channelKey}`);
+          answer(texts.paired);
+        } else {
+          eventLog.info(`[events] pairing code ${result.reason} for ${channelKey}`);
+          answer(texts.codeInvalid);
+        }
+      } else if (pairingPromptDue(this.options.workspaceRoot, channelKey)) {
+        answer(texts.prompt);
+        recordPairingPrompt(this.options.workspaceRoot, channelKey);
+      }
+      void this.outboxTick();
+    } catch (error) {
+      eventLog.warn(
+        `[events] pairing gate failed for ${channelKey}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   ingestExternalEvent(event: CraftEventEnvelope): { id: string; duplicate: boolean } | null {
     try {
       const result = this.store.insert(event);

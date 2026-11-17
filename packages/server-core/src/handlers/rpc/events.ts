@@ -24,6 +24,7 @@ import { runInstallCommand, type InstallResult } from '../../events/dependency-i
 import { installMcp, type McpInstallResult } from '../../events/mcp-registry';
 import { fetchReportedDeps, postDepAction, callPluginAction } from '../../events/listener-control';
 import { recordOutboxCall } from '@craft-agent/shared/events/outbox.ts';
+import { generatePairingCode, listPairedChannels, unpairChannel } from '@craft-agent/shared/events/pairings.ts';
 import {
   loadSubscriptions,
   saveSubscriptions,
@@ -391,6 +392,26 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
   server.handle(RPC_CHANNELS.events.OUTBOX_PURGE, async (_ctx, workspaceId: string) => {
     const svc = await service(workspaceId);
     return svc.outboxPurge();
+  });
+
+  // --- Pairing -----------------------------------------------------------
+  // A code generated here is redeemed in-chat via `/pair <code>`; the host
+  // pairing gate (EventService) is what actually unlocks the channel.
+
+  server.handle(RPC_CHANNELS.events.PAIRING_GENERATE, async (_ctx, workspaceId: string) => {
+    const workspace = requireWorkspace(workspaceId);
+    return generatePairingCode(workspace.rootPath);
+  });
+
+  server.handle(RPC_CHANNELS.events.PAIRING_LIST, async (_ctx, workspaceId: string) => {
+    const workspace = requireWorkspace(workspaceId);
+    return listPairedChannels(workspace.rootPath);
+  });
+
+  server.handle(RPC_CHANNELS.events.PAIRING_UNPAIR, async (_ctx, workspaceId: string, channelKey: string) => {
+    if (!channelKey) throw new Error('channelKey is required');
+    const workspace = requireWorkspace(workspaceId);
+    return { success: unpairChannel(workspace.rootPath, channelKey) };
   });
 
   // --- Subscriptions -------------------------------------------------------

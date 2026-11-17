@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer, type Server } from 'node:http'
 import { EventService } from './event-service.ts'
+import { markChannelPaired } from '@craft-agent/shared/events/pairings.ts'
 
 /**
  * The plugin program is the only thing between a platform and Craft now that
@@ -27,6 +28,9 @@ let service: EventService
 
 beforeAll(async () => {
   root = mkdtempSync(join(tmpdir(), 'plugin-program-'))
+  // The fixture adapter's chat is paired: unpaired channels never become
+  // events (host pairing gate), and this suite exercises the event path.
+  markChannelPaired(root, 'message://telegram/chat-9')
   service = new EventService({ workspaceId: 'ws', workspaceRoot: root })
   await service.start()
 })

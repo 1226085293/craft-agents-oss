@@ -6,6 +6,7 @@ import { request as httpRequest } from 'node:http';
 import { getEventService, resetEventServicesForTest } from './event-service.ts';
 import { loadOutbox } from '@craft-agent/shared/events/outbox.ts';
 import { bindThread } from '@craft-agent/shared/events/thread-bindings.ts';
+import { generatePairingCode, isChannelPaired, markChannelPaired } from '@craft-agent/shared/events/pairings.ts';
 import { existsSync } from 'node:fs';
 import type { EventMeta, EventRecord } from '@craft-agent/shared/events/event-store.ts';
 
@@ -221,6 +222,13 @@ async function tickUntil(predicate: () => boolean, timeoutMs = 3000): Promise<vo
   }
 }
 
+/** A dispatch target that accepts everything and never blocks. */
+const okDispatchTarget = {
+  deliver: async () => true,
+  isBusy: () => false,
+  hasQueuedUserMessage: () => false,
+} as unknown as import('./event-dispatcher.ts').DispatchTarget;
+
 describe('host slash commands', () => {
   async function postCommand(service: Awaited<ReturnType<typeof getEventService>>, body: string): Promise<void> {
     // `telegram` is the posting listener id, so the ingested event's source
@@ -238,6 +246,7 @@ describe('host slash commands', () => {
   it('/help queues a catalogue reply and does not dispatch', async () => {
     const root = makeRoot();
     const unclaimed: unknown[] = [];
+    markChannelPaired(root, 'message://telegram/42')
     const service = await getEventService(
       'ws-slash-help',
       root,
@@ -263,6 +272,7 @@ describe('host slash commands', () => {
 
   it('/stop stops the thread-bound session and confirms', async () => {
     const root = makeRoot();
+    markChannelPaired(root, 'message://telegram/42')
     bindThread(root, { threadKey: 'message://telegram/42', sessionId: 'sess-1' });
     const stopped: string[] = [];
     const service = await getEventService(
@@ -285,6 +295,7 @@ describe('host slash commands', () => {
 
   it('/stop without a binding reports idle', async () => {
     const root = makeRoot();
+    markChannelPaired(root, 'message://telegram/42')
     const service = await getEventService('ws-slash-idle', root);
 
     await postCommand(service, '/stop');
@@ -300,11 +311,12 @@ describe('host slash commands', () => {
     const unclaimed: unknown[] = [];
     // A dispatch target is required for the dispatcher (and with it the
     // onUnclaimed hook) to exist at all.
+    markChannelPaired(root, 'message://telegram/42')
     const service = await getEventService(
       'ws-slash-plain',
       root,
       undefined,
-      { deliver: async () => true },
+      okDispatchTarget,
       (event) => unclaimed.push(event),
     );
 
@@ -313,5 +325,81 @@ describe('host slash commands', () => {
 
     expect(unclaimed).toHaveLength(1);
     expect(loadOutbox(root)).toHaveLength(0);
+  });
+});
+
+
+/**
+ * The host pairing gate: while a channel is unpaired, its messages never
+ * enter the event store — the host answers with the pairing prompt or
+ * redeems a `/pair <code>` attempt instead. Once paired, the same channel
+ * flows through the normal event path.
+ */
+describe('host pairing gate', () => {
+  async function postFromChannel(
+    service: Awaited<ReturnType<typeof getEventService>>,
+    body: string,
+  ): Promise<void> {
+    const env = service.listenerEnv('telegram');
+    const response = await postJson(env.CRAFT_EVENTS_URL!, env.CRAFT_EVENTS_TOKEN!, {
+      type: 'telegram.message',
+      title: body,
+      body,
+      links: [{ rel: 'reply', url: 'message://telegram/42/9' }],
+    });
+    expect(response.status).toBe(200);
+  }
+
+  it('answers unpaired chats with the pairing prompt, and keeps them out of the event store', async () => {
+    const root = makeRoot();
+    const unclaimed: unknown[] = [];
+    const service = await getEventService(
+      'ws-pair-prompt',
+      root,
+      undefined,
+      okDispatchTarget,
+      (event) => unclaimed.push(event),
+    );
+
+    await postFromChannel(service, 'hello');
+    await tickUntil(() => loadOutbox(root).length > 0);
+
+    expect(loadOutbox(root)[0].args?.text).toContain('/pair');
+    expect(unclaimed).toHaveLength(0);
+    expect(service.list({}).length).toBe(0);
+  });
+
+  it('redeems /pair <code> and unlocks the channel for events', async () => {
+    const root = makeRoot();
+    const unclaimed: unknown[] = [];
+    const service = await getEventService(
+      'ws-pair-redeem',
+      root,
+      undefined,
+      okDispatchTarget,
+      (event) => unclaimed.push(event),
+    );
+    const { code } = generatePairingCode(root);
+
+    await postFromChannel(service, `/pair ${code}`);
+    await tickUntil(() => isChannelPaired(root, 'message://telegram/42'));
+    expect(loadOutbox(root).some((record) => String(record.args?.text ?? '').includes('Paired'))).toBe(true);
+
+    // The same channel, now paired: its messages are events again.
+    await postFromChannel(service, 'count me');
+    await tickUntil(() => service.list({}).length > 0);
+    expect(service.list({})).toHaveLength(1);
+    expect(unclaimed).toHaveLength(1);
+  });
+
+  it('answers unknown codes with the invalid-code text and stays unpaired', async () => {
+    const root = makeRoot();
+    const service = await getEventService('ws-pair-bad', root);
+
+    await postFromChannel(service, '/pair NOPE9999');
+    await tickUntil(() => loadOutbox(root).length > 0);
+
+    expect(isChannelPaired(root, 'message://telegram/42')).toBe(false);
+    expect(service.list({}).length).toBe(0);
   });
 });

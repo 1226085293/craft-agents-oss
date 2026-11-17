@@ -25,6 +25,7 @@ import { EventService } from './event-service.ts'
 import type { DispatchTarget } from './event-dispatcher.ts'
 import { bindThreadForEvent, findThreadOwner } from '@craft-agent/shared/events/thread-bindings.ts'
 import { saveSubscriptions } from '@craft-agent/shared/events/subscriptions.ts'
+import { markChannelPaired } from '@craft-agent/shared/events/pairings.ts'
 
 const dirs: string[] = []
 const open: EventService[] = []
@@ -73,6 +74,11 @@ async function harness(): Promise<Harness> {
   saveSubscriptions(workRoot, [
     { subscriptionId: 'sub-1', sessionId: 'sess_worker', filter: { sources: ['verify'] }, createdAt: 0 },
   ])
+
+  // Channel pairing (host gate): these cases exercise paired chats — the
+  // exact keys the pairing gate derives from the links below.
+  markChannelPaired(workRoot, 'message://qq/group%3A123')
+  markChannelPaired(workRoot, 'message://qq/group%3A999')
 
   const deliveries: Harness['deliveries'] = []
   const unclaimed: string[] = []

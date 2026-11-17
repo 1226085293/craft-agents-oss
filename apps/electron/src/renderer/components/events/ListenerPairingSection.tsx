@@ -100,26 +100,28 @@ export function ListenerPairingSection({
         </button>
       )}
 
-      <h3 className="mb-1.5 text-xs text-muted-foreground">{t('events.listener.pairing.pairedChannels')}</h3>
       {ownChannels.length === 0 ? (
         <p className="text-[13px] leading-5 text-muted-foreground">{t('events.listener.pairing.none')}</p>
       ) : (
-        <ul className="space-y-1.5">
-          {ownChannels.map((row) => (
-            <li key={row.channelKey} className="flex min-w-0 items-center gap-2 text-[13px] leading-5">
-              <span className="min-w-0 truncate font-mono text-foreground/90" title={row.channelKey}>
-                {row.channelKey}
-              </span>
-              <button
-                type="button"
-                onClick={() => unpair(row.channelKey)}
-                className="ml-auto shrink-0 text-xs text-muted-foreground transition-colors hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {t('events.listener.pairing.unpair')}
-              </button>
-            </li>
-          ))}
-        </ul>
+        <>
+          <h3 className="mb-1.5 text-xs text-muted-foreground">{t('events.listener.pairing.pairedChannels')}</h3>
+          <ul className="space-y-1.5">
+            {ownChannels.map((row) => (
+              <li key={row.channelKey} className="flex min-w-0 items-center gap-2 text-[13px] leading-5">
+                <span className="min-w-0 truncate font-mono text-foreground/90" title={row.channelKey}>
+                  {row.channelKey}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => unpair(row.channelKey)}
+                  className="ml-auto shrink-0 text-xs text-muted-foreground transition-colors hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {t('events.listener.pairing.unpair')}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </>
   )

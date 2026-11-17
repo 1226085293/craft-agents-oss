@@ -208,6 +208,22 @@ export function isPrivateChat(ctx: Context): boolean {
 }
 
 /**
+ * Remove THIS bot's own @-mention from a message's text so the body reads
+ * like what the user actually said to the bot. Groups require @-mentioning
+ * the bot to be heard, so a group `/pair` attempt arrives as
+ * "@MyBot /pair CODE" — and the host's pairing protocol parser is strict
+ * (the body must START with /pair, it is platform-vocabulary-free by
+ * design). Stripping the mention here keeps the host pure while making the
+ * protocol work in groups. Other mentions and text are untouched.
+ */
+export function stripBotMention(text: string, botUsername?: string): string {
+  if (!botUsername) return text
+  const escaped = botUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const without = text.replace(new RegExp(`@${escaped}(?![A-Za-z0-9_])`, 'gi'), '')
+  return without.replace(/^\s+/, '')
+}
+
+/**
  * Decide whether an inbound update should be forwarded to Craft.
  *
  * Pairing is host-owned — this only decides what is worth sending at all:
@@ -405,7 +421,9 @@ export class TelegramAdapter implements PlatformAdapter {
         senderName: ctx.from?.first_name ?? undefined,
         ...(ctx.from?.username ? { senderUsername: ctx.from.username } : {}),
         ...(ctx.from?.is_bot ? { senderIsBot: true } : {}),
-        text: ctx.message.text ?? '',
+        // Groups force an @-mention; strip it so e.g. "@bot /pair CODE" is
+        // received by the host as "/pair CODE" and its strict parser can see it.
+        text: stripBotMention(ctx.message.text ?? '', this.bot?.botInfo?.username),
         timestamp: ctx.message.date * 1000,
         raw: ctx.message,
         // Group messages are flagged so the gateway can require an explicit

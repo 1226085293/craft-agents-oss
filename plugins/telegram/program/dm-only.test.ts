@@ -14,6 +14,7 @@ import {
   isPrivateChat,
   fetchHostSlashCommands,
   registerHostSlashCommands,
+  stripBotMention,
   type TelegramCommandApi,
 } from './index'
 
@@ -223,5 +224,24 @@ describe('host slash command menu registration', () => {
 
     const fetched = await fetchHostSlashCommands()
     expect(fetched).toEqual([])
+  })
+})
+
+describe('stripBotMention', () => {
+  it('removes this bot\'s @-mention so /pair stays parseable', () => {
+    expect(stripBotMention('@Muzzik01Bot /pair ABC123', 'Muzzik01Bot')).toBe('/pair ABC123')
+    expect(stripBotMention('@muzzik01bot hi', 'Muzzik01Bot')).toBe('hi')
+    // no space after the mention
+    expect(stripBotMention('@Muzzik01Bot/pair X', 'Muzzik01Bot')).toBe('/pair X')
+  })
+
+  it('leaves other mentions, the bare command, and unknown bots untouched', () => {
+    expect(stripBotMention('/pair ABC123', 'Muzzik01Bot')).toBe('/pair ABC123')
+    expect(stripBotMention('@other_bot /pair ABC123', 'Muzzik01Bot')).toBe('@other_bot /pair ABC123')
+    expect(stripBotMention('@Muzzik01Botx hello', 'Muzzik01Bot')).toBe('@Muzzik01Botx hello')
+  })
+
+  it('is a no-op when the username is unknown', () => {
+    expect(stripBotMention('@Muzzik01Bot /pair ABC123', undefined)).toBe('@Muzzik01Bot /pair ABC123')
   })
 })

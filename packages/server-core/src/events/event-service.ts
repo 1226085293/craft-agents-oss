@@ -346,7 +346,15 @@ export class EventService {
       };
       const attempt = parsePairingAttempt(event.body);
       if (attempt !== null) {
-        const result = redeemPairingCode(this.options.workspaceRoot, attempt, channelKey);
+        // 洞 3：兑换时刻把配对人的身份快照写进记录（pairedBy/channelKind）。
+        // 后续「群里只有配对成员能写」的判定用记录里的快照，不是比对消息自带 sender。
+        const meta = event.meta;
+        const pairedBy = meta?.senderId || undefined;
+        const channelKind =
+          meta?.channelKind === 'private' || meta?.channelKind === 'group' || meta?.channelKind === 'channel'
+            ? meta.channelKind
+            : undefined;
+        const result = redeemPairingCode(this.options.workspaceRoot, attempt, channelKey, undefined, pairedBy, channelKind);
         if (result.ok) {
           eventLog.info(`[events] channel paired via code: ${channelKey}`);
           answer(texts.paired);

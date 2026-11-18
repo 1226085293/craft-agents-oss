@@ -511,6 +511,18 @@ export interface FolderSourceConfig {
   /** 授权有效期（ms epoch；空 = 长期）。MVP 落库不校验，后置实现写入与过期检查。 */
   expiresAt?: number;
 
+  /**
+   * 权限标签（渠道闸门 v6/v7）：1..N 个，词表在 config/permission-labels.json。
+   * 缺省 = 查询时按 ['private'] 处理（判断时自动套用，不回填配置）。
+   */
+  labels?: string[];
+  /**
+   * 只读源开关（MCP/源工具读写判定三层规则第 2 层）：源性质天然只读
+   * （搜索/文档库类）时置 true，探索模式下其写类工具放行；MCP 工具优先用
+   * annotations.readOnlyHint，都没有时按 write 保守。
+   */
+  readOnly?: boolean;
+
   // Status tracking
   isAuthenticated?: boolean;
   connectionStatus?: SourceConnectionStatus;

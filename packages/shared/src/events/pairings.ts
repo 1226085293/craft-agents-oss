@@ -20,11 +20,47 @@ import { LOCALE_REGISTRY, type LanguageCode } from '../i18n/registry.ts';
  * survives restarts and is readable from any host component.
  */
 
+/** 模式天花板（B2）：缺省 = 不设天花板，跟随助手默认。更严者生效。 */
+export type PermissionModeCeiling = 'safe' | 'ask' | 'allow-all';
+
+/** 接收模式：at_only = 只收@（现状）；all = 全收（阶段 6 随判定器上）。 */
+export type IngestMode = 'at_only' | 'all';
+
+/** 渠道种类（兑换消息 meta.channelKind 的原值）。 */
+export type ChannelKind = 'private' | 'group' | 'channel';
+
 export interface PairedChannelRecord {
   /** `message://<platform>/<chatId>` — exactly what deriveThreadKey produces. */
   channelKey: string;
   /** Paired when this timestamp was set. 0 in legacy prompt-cooldown rows. */
   pairedAt: number;
+  /**
+   * 谁完成了配对（平台用户 ID，兑换时刻的身份快照；洞 3）。
+   * 老记录缺省 = 未记录：群内写操作一律拒绝 + 上报私聊，不猜 owner。
+   */
+  pairedBy?: string;
+  /** 配对时刻的渠道种类（来自兑换消息 meta.channelKind，D5 合并判个人渠道用）。 */
+  channelKind?: ChannelKind;
+  /** 该通道用哪个助手（agents.json 的 id）；缺省 = 默认助手。 */
+  agentId?: string;
+  /**
+   * 标签闸开关（H1 空值语义，钉死）：
+   * 缺省/false = 闸未启用（零回归，放行一切）；
+   * true + 空 allowedLabels = 故意全禁（UI 红警）。
+   */
+  gateEnabled?: boolean;
+  /** 启用标签闸时放行的标签列表。 */
+  allowedLabels?: string[];
+  /** 模式天花板：缺省 = 跟随助手默认（严禁回填 'safe' 到旧记录）。 */
+  permissionMode?: PermissionModeCeiling;
+  /** 接收模式（缺省 at_only；'all' 相关字段随阶段 6 使用）。 */
+  ingestMode?: IngestMode;
+  /** 全收触发提示词（判定参考规则，每通道可单独写）。 */
+  triggerPrompt?: string;
+  /** 全收：只默默记不回话。 */
+  recordOnly?: boolean;
+  /** 全收：入库喂记忆。 */
+  memoryFeed?: boolean;
 }
 
 export interface PendingCodeRecord {
@@ -35,12 +71,15 @@ export interface PendingCodeRecord {
 }
 
 interface PairingsFile {
-  version: 1;
+  version: 1 | 2;
   codes: PendingCodeRecord[];
   channels: PairedChannelRecord[];
 }
 
-const EMPTY: PairingsFile = { version: 1, codes: [], channels: [] };
+/** v2 = 通道闸门字段（agentId/allowedLabels/gateEnabled/permissionMode/ingestMode/pairedBy…）。 */
+export const PAIRINGS_FILE_VERSION = 2;
+
+const EMPTY: PairingsFile = { version: PAIRINGS_FILE_VERSION, codes: [], channels: [] };
 
 export function pairingsPath(workspaceRoot: string): string {
   return join(workspaceRoot, 'config', 'pairings.json');
@@ -52,8 +91,9 @@ export function loadPairings(workspaceRoot: string): PairingsFile {
   if (!existsSync(path)) return { ...EMPTY, codes: [], channels: [] };
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<PairingsFile>;
+    // v1 老文件原样读入（新字段全可选，缺省 = 闸关）；绝不回填字段，避免改变行为。
     return {
-      version: 1,
+      version: parsed.version === PAIRINGS_FILE_VERSION ? PAIRINGS_FILE_VERSION : 1,
       codes: Array.isArray(parsed.codes) ? parsed.codes : [],
       channels: Array.isArray(parsed.channels) ? parsed.channels : [],
     };
@@ -65,7 +105,8 @@ export function loadPairings(workspaceRoot: string): PairingsFile {
 function savePairings(workspaceRoot: string, file: PairingsFile): void {
   const path = pairingsPath(workspaceRoot);
   mkdirSync(join(workspaceRoot, 'config'), { recursive: true });
-  writeFileSync(path, JSON.stringify(file, null, 2), 'utf8');
+  // 首次写入即升 v2（v1 记录的新字段全可选，升版无迁移成本）。
+  writeFileSync(path, JSON.stringify({ ...file, version: PAIRINGS_FILE_VERSION }, null, 2), 'utf8');
 }
 
 /** Drop codes that are used up or past their expiry. */
@@ -94,12 +135,16 @@ export function listPairedChannels(workspaceRoot: string): PairedChannelRecord[]
 }
 
 /** Record a channel as paired (idempotent — re-pairing just refreshes the timestamp). */
-export function markChannelPaired(workspaceRoot: string, channelKey: string, now = Date.now()): void {
+export function markChannelPaired(
+  workspaceRoot: string,
+  channelKey: string,
+  now = Date.now(),
+  pairedBy?: string,
+): void {
   const file = pruneCodes(loadPairings(workspaceRoot), now);
-  file.channels = [
-    ...file.channels.filter((entry) => entry.channelKey !== channelKey),
-    { channelKey, pairedAt: now },
-  ];
+  const record: PairedChannelRecord = { channelKey, pairedAt: now };
+  if (pairedBy) record.pairedBy = pairedBy;
+  file.channels = [...file.channels.filter((entry) => entry.channelKey !== channelKey), record];
   savePairings(workspaceRoot, file);
 }
 
@@ -151,6 +196,8 @@ export function redeemPairingCode(
   code: string,
   channelKey: string,
   now = Date.now(),
+  pairedBy?: string,
+  channelKind?: ChannelKind,
 ): PairingRedemption {
   const file = loadPairings(workspaceRoot);
   const entry = file.codes.find((candidate) => candidate.code === code);
@@ -161,9 +208,14 @@ export function redeemPairingCode(
     return { ok: false, reason: entry.used && entry.expiresAt > now ? 'invalid' : 'expired' };
   }
   entry.used = true;
+  // 洞 3：兑换时刻把身份快照写进记录（pairedBy/channelKind）——
+  // 后续「群里只有配对成员能写」判定用的就是这里，不是比对消息自带 sender。
+  const record: PairedChannelRecord = { channelKey, pairedAt: now };
+  if (pairedBy) record.pairedBy = pairedBy;
+  if (channelKind) record.channelKind = channelKind;
   file.channels = [
     ...file.channels.filter((candidate) => candidate.channelKey !== channelKey),
-    { channelKey, pairedAt: now },
+    record,
   ];
   savePairings(workspaceRoot, pruneCodes(file, now));
   return { ok: true };

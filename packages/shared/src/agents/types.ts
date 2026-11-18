@@ -36,7 +36,7 @@ export interface AgentDefaults {
  * This string is repeated in the supervisor's prompt **every turn**, so its
  * length is a per-turn cost, not just a layout constraint.
  */
-export const MAX_DISPATCH_HINT_CHARS = 120;
+export const MAX_DISPATCH_HINT_CHARS = 200;
 
 export interface AgentProfile {
   id: string;
@@ -67,6 +67,16 @@ export interface AgentProfile {
    * is in reach, leave it out.
    */
   dispatchHint?: string;
+  /**
+   * 可分配任务开关：只有开启的助手进入派活名单（任务分配打包阶段）。
+   * 缺省 = false（显式开启才进名单，安全默认）。
+   */
+  assignable?: boolean;
+  /**
+   * 记忆域（memory-domains.json 的 slug）：该助手 L1 笔记归哪个家。
+   * 域体系启用前可缺省；启用后由 UI 选择（个人域隔离 / 项目域共享只读）。
+   */
+  memoryDomain?: string;
   defaults: AgentDefaults;
   sources: AgentScope;
   skills: AgentScope;

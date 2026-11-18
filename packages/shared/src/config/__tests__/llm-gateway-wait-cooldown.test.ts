@@ -171,9 +171,14 @@ describe('LlmGateway waitForCooldown', () => {
     const res = await post(gateway!, { stream: true, sessionKey: 'wait-session' });
     await readJson(res);
 
-    expect(events[0]).toMatchObject({ sessionId: 'wait-session', waiting: true, phase: 'cooldown' });
-    expect(events[0]!.seconds).toBeGreaterThanOrEqual(1);
-    expect(events[events.length - 1]).toEqual({ sessionId: 'wait-session', waiting: false, phase: 'cooldown' });
+    // The dispatch first-byte hold now precedes the cooldown events, so
+    // filter by phase instead of index (the pairing is what this test guards).
+    const cooldownStart = events.find((e) => e.waiting && e.phase === 'cooldown');
+    const cooldownEnds = events.filter((e) => !e.waiting && e.phase === 'cooldown');
+    expect(cooldownStart).toMatchObject({ sessionId: 'wait-session', waiting: true, phase: 'cooldown' });
+    expect(cooldownStart!.seconds).toBeGreaterThanOrEqual(1);
+    expect(cooldownEnds.length).toBe(1);
+    expect(cooldownEnds[0]).toEqual({ sessionId: 'wait-session', waiting: false, phase: 'cooldown' });
   });
 
   it('does not wait when the strategy has no waitForCooldown config', async () => {
@@ -346,8 +351,13 @@ describe('LlmGateway waitForCooldown', () => {
     // an HTTP status — it travels as an in-stream error event instead.
     expect(res.status).toBe(200);
     expect(text).toContain('event: error');
-    expect(events[0]).toMatchObject({ sessionId: 'reload-wait', waiting: true, phase: 'cooldown' });
-    expect(events[events.length - 1]).toEqual({ sessionId: 'reload-wait', waiting: false, phase: 'cooldown' });
+    // The dispatch first-byte hold now precedes the cooldown events, so
+    // filter by phase instead of index.
+    const cooldownStart = events.find((e) => e.waiting && e.phase === 'cooldown');
+    const cooldownEnds = events.filter((e) => !e.waiting && e.phase === 'cooldown');
+    expect(cooldownStart).toMatchObject({ sessionId: 'reload-wait', waiting: true, phase: 'cooldown' });
+    expect(cooldownEnds.length).toBe(1);
+    expect(cooldownEnds[0]).toEqual({ sessionId: 'reload-wait', waiting: false, phase: 'cooldown' });
   });
 
   it('cuts the cooldown wait short when the client goes away (clientGone)', async () => {
@@ -461,6 +471,46 @@ describe('LlmGateway waitForCooldown', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(1500);
     expect(stub.calls.length).toBe(1);
   }, 20000);
+
+  describe('dispatch first-byte hold (phase signal)', () => {
+    type HoldEvent = { waiting: boolean; phase?: string; seconds?: number; refresh?: boolean };
+
+    it('emits a dispatch_first_byte hold around the upstream call (start + end)', async () => {
+      const waits: HoldEvent[] = [];
+      const cfg = baseConfig();
+      const stub = await start(cfg, [
+        { status: 200, body: JSON.stringify({ id: 'ok' }), delayMs: 800 },
+      ], (e) => waits.push(e));
+      const res = await post(gateway!, {});
+      const json = await readJson(res);
+      expect(json.id).toBe('ok');
+      expect(stub.calls.length).toBe(1);
+      const startEvt = waits.find((w) => w.waiting && w.phase === 'dispatch_first_byte' && !w.refresh);
+      const endEvt = waits.find((w) => !w.waiting && w.phase === 'dispatch_first_byte');
+      // Default preset budget: 30 s first byte.
+      expect(startEvt?.seconds).toBe(30);
+      expect(waits.indexOf(startEvt!)).toBeGreaterThanOrEqual(0);
+      expect(waits.indexOf(endEvt!)).toBeGreaterThan(waits.indexOf(startEvt!));
+    }, 15000);
+
+    it('ticks refresh events through a long dispatch hold', async () => {
+      const waits: HoldEvent[] = [];
+      const cfg = baseConfig();
+      // 3 s budget -> refresh tick every 1 s; a 2.5 s dispatch must be
+      // crossed by at least one refresh (a full-budget wait would otherwise
+      // outlive the client's 90 s stall watchdog untouched).
+      cfg.presets.noLadder = { ...cfg.presets.noLadder, firstByteSeconds: 3 };
+      const stub = await start(cfg, [
+        { status: 200, body: JSON.stringify({ id: 'slow' }), delayMs: 2500 },
+      ], (e) => waits.push(e));
+      const res = await post(gateway!, {});
+      const json = await readJson(res);
+      expect(json.id).toBe('slow');
+      expect(stub.calls.length).toBe(1);
+      expect(waits.some((w) => w.waiting && w.phase === 'dispatch_first_byte' && w.refresh === true)).toBe(true);
+      expect(waits.some((w) => !w.waiting && w.phase === 'dispatch_first_byte')).toBe(true);
+    }, 15000);
+  });
 });
 
 describe('cooldownSleep keepalive prelude (unit)', () => {

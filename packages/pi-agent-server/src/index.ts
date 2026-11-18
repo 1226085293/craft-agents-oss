@@ -301,7 +301,7 @@ type InboundMessage =
   | { type: 'compact'; id: string; customInstructions?: string }
   | { type: 'set_auto_compaction'; id: string; enabled: boolean }
   /** The gateway is parked in a gateway-internal wait (cooldown or retry backoff); silence is expected. */
-  | { type: 'gateway_cooldown_wait'; waiting: boolean; phase?: string; seconds?: number }
+  | { type: 'gateway_cooldown_wait'; waiting: boolean; phase?: string; seconds?: number; refresh?: boolean }
   | RuntimeConfigUpdateMessage
   | SwitchConnectionMessage
   | { type: 'steer'; message: string }
@@ -4700,7 +4700,7 @@ async function processMessage(msg: InboundMessage): Promise<void> {
       lastTurnActivityAt = Date.now();
       debugLog(
         msg.waiting
-          ? `[gateway-retry] ${msg.phase ?? 'cooldown'} wait started${msg.seconds != null && msg.seconds > 0 ? ` (~${msg.seconds}s)` : ''}`
+          ? `[gateway-retry] ${msg.phase ?? 'cooldown'} wait ${msg.refresh ? 'refreshed' : 'started'}${msg.seconds != null && msg.seconds > 0 ? ` (~${msg.seconds}s)` : ''}`
           : `[gateway-retry] ${msg.phase ?? 'cooldown'} wait ended`,
       );
       break;

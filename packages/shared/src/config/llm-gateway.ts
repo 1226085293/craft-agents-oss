@@ -138,7 +138,7 @@ const CATALOG_TIMEOUT_MS = 10_000;
  * watchdogs, so a 90s stall threshold aborted a request that was still
  * being retried).
  */
-export type GatewayWaitPhase = 'cooldown' | 'retry_backoff';
+export type GatewayWaitPhase = 'cooldown' | 'retry_backoff' | 'dispatch_first_byte';
 
 export interface GatewayWaitEvent {
   sessionId?: string;
@@ -146,6 +146,12 @@ export interface GatewayWaitEvent {
   seconds?: number;
   /** Which gateway phase owns the wait; legacy call sites omit it. */
   phase?: GatewayWaitPhase;
+  /**
+   * Re-arms a phase that is already in progress (a heartbeat during a long
+   * dispatch hold). Consumers refresh their watchdog on every event, so a
+   * refresh must get through even when nothing else about the wait changed.
+   */
+  refresh?: boolean;
 }
 
 export interface LlmGatewayOptions {
@@ -1532,6 +1538,56 @@ export class LlmGateway {
     const markStage = (stage: string): void => {
       if (stageMs[stage] === undefined) stageMs[stage] = Date.now() - requestStartedAt;
     };
+    // Dispatch first-byte hold: while the gateway waits for the upstream's
+    // first byte (headers within the preset's firstByte budget, then the
+    // first body chunk within the same remaining budget) the session client
+    // sees total silence — no model events, no cooldown events. The 90 s
+    // stall watchdog (TURN_STALL_TIMEOUT_MS) used to misfire in exactly that
+    // window: a 90 s Agnes dispatch outlived it and the turn was killed
+    // three seconds before the gateway's own timeout (261110-brave-titanium,
+    // 2026-11-18 15:26). The start event resets the watchdog, refresh ticks
+    // keep it alive through a full-budget wait, and the end event fires as
+    // soon as the first byte is observed — after which model events and
+    // backoff/cooldown events take over.
+    let dispatchHoldActive = false;
+    let dispatchHoldTicker: ReturnType<typeof setInterval> | undefined;
+    const endDispatchHold = (): void => {
+      if (!dispatchHoldActive) return;
+      dispatchHoldActive = false;
+      if (dispatchHoldTicker) {
+        clearInterval(dispatchHoldTicker);
+        dispatchHoldTicker = undefined;
+      }
+      this.onCooldownWait?.({ sessionId, waiting: false, phase: 'dispatch_first_byte' });
+    };
+    const beginDispatchHold = (firstByteSeconds: number): void => {
+      if (firstByteSeconds <= 0) return;
+      dispatchHoldActive = true;
+      this.onCooldownWait?.({
+        sessionId,
+        waiting: true,
+        phase: 'dispatch_first_byte',
+        seconds: Math.ceil(firstByteSeconds),
+      });
+      // Tick at most every 30 s and never slower than a third of the budget:
+      // a wait that runs the whole budget must keep re-arming the client's
+      // 90 s stall watchdog (a 90 s budget vs a 90 s watchdog would
+      // otherwise race, and the stall had been winning it).
+      const budgetMs = Math.round(firstByteSeconds * 1000);
+      const refreshMs = Math.min(30_000, Math.max(1_000, Math.floor(budgetMs / 3)));
+      if (refreshMs < budgetMs) {
+        dispatchHoldTicker = setInterval(() => {
+          if (!dispatchHoldActive) return;
+          this.onCooldownWait?.({
+            sessionId,
+            waiting: true,
+            phase: 'dispatch_first_byte',
+            refresh: true,
+            seconds: Math.ceil(firstByteSeconds),
+          });
+        }, refreshMs);
+      }
+    };
     // Same-target attempt policy for one provider/model/key selection.
     const retryPolicy = plan.retry;
     let attempt = 0;
@@ -1843,9 +1899,15 @@ export class LlmGateway {
         lastUpstreamModel = upstreamModel;
 
         let call: UpstreamCall;
+        beginDispatchHold(
+          presetFor(this.getConfig(), provider, selection.keyId).firstByteSeconds
+            ?? DEFAULT_PRESET.firstByteSeconds
+            ?? 0,
+        );
         try {
           call = await this.callUpstream(provider, selection.keyId, upstreamModel, payload, unit.publicModel);
         } catch (err) {
+          endDispatchHold();
           lastError = `upstream ${provider.id} transport error: ${describeError(err)}`;
           this.log(lastError);
           // No HTTP response at all: 0 renders as "—" rather than as a status.
@@ -1875,6 +1937,9 @@ export class LlmGateway {
 
         const response = call.response;
         const firstByteMs = call.firstByteRemainingMs;
+        // A non-200 lands with its headers: the first-byte wait is over and
+        // the error-handling events (backoff, cooldown) take over from here.
+        if (response.status !== 200) endDispatchHold();
         // Keep the total timer alive through the body read; `finally` releases
         // it on every exit (success, retry, cooldown).
         try {
@@ -1906,6 +1971,7 @@ export class LlmGateway {
             stream: payload.stream === true,
           }, {
             firstByteMs,
+            onFirstByte: endDispatchHold,
             streamGapMs: Math.max(
               0,
               (presetFor(this.getConfig(), provider, selection.keyId).streamGapSeconds
@@ -2903,6 +2969,8 @@ export class LlmGateway {
     },
     guard: {
       firstByteMs: number;
+      /** Fired once the first upstream byte is observed (or its wait timed out). */
+      onFirstByte?: () => void;
       streamGapMs?: number;
       /** Cap on reasoning-only streaming before the attempt is cut short. */
       visibleOutputMs?: number;
@@ -2926,6 +2994,7 @@ export class LlmGateway {
         // here is what produced "upstream stream ended without a finish_reason"
         // for every non-streaming caller.
         const read = await this.readTextWithTimeout(response, firstByteMs, abort);
+        guard.onFirstByte?.();
         if (read.firstByteTimeout) return { truncated: true, firstByteTimeout: true };
         const text = read.text;
         let payloadOut: Record<string, unknown>;
@@ -2979,6 +3048,7 @@ export class LlmGateway {
 
     if (!response.body || contentType.includes('application/json')) {
       const read = await this.readTextWithTimeout(response, firstByteMs, abort);
+      guard.onFirstByte?.();
       if (read.firstByteTimeout) return { truncated: true, firstByteTimeout: true };
       const text = read.text;
       if (timing) {
@@ -3020,6 +3090,7 @@ export class LlmGateway {
 
     const reader = response.body.getReader();
     const first = await this.readFirstChunk(reader, firstByteMs, abort);
+    guard.onFirstByte?.();
     if (first.firstByteTimeout) {
       try {
         await reader.cancel();
@@ -3307,6 +3378,8 @@ export class LlmGateway {
     timing?: { firstByteMs?: number; totalMs?: number; usage: MutableUsage; startedAt: number },
     guard: {
       firstByteMs: number;
+      /** Fired once the first upstream byte is observed (or its wait timed out). */
+      onFirstByte?: () => void;
       streamGapMs?: number;
       /** Cap on reasoning-only streaming before the attempt is cut short. */
       visibleOutputMs?: number;
@@ -3361,6 +3434,7 @@ export class LlmGateway {
 
     const reader = response.body.getReader();
     const first = await this.readFirstChunk(reader, firstByteMs, abort);
+    guard.onFirstByte?.();
     if (first.firstByteTimeout) {
       try {
         await reader.cancel();

@@ -394,6 +394,7 @@ export const CHANNEL_MAP = {
   agentsSave: invoke(RPC_CHANNELS.agents.SAVE),
   agentsDelete: invoke(RPC_CHANNELS.agents.DELETE),
   memoryDomains: invoke(RPC_CHANNELS.memoryDomains.LIST),
+  memoryDomainsRead: invoke(RPC_CHANNELS.memoryDomains.READ),
   tasksList: invoke(RPC_CHANNELS.taskboard.LIST),
   tasksGet: invoke(RPC_CHANNELS.taskboard.GET),
   tasksUpdate: invoke(RPC_CHANNELS.taskboard.UPDATE),

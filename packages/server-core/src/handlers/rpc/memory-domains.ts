@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from 'node:fs';
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol';
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config';
 import { loadAgents } from '@craft-agent/shared/agents';
@@ -5,7 +6,10 @@ import { ensureAgentMemoryDomain, loadMemoryDomains, type MemoryDomainsFile } fr
 import type { RpcServer } from '@craft-agent/server-core/transport';
 import type { HandlerDeps } from '../handler-deps';
 
-export const HANDLED_CHANNELS = [RPC_CHANNELS.memoryDomains.LIST] as const;
+export const HANDLED_CHANNELS = [RPC_CHANNELS.memoryDomains.LIST, RPC_CHANNELS.memoryDomains.READ] as const;
+
+/** Hard cap on a single domain read: MEMORY.md is a curated note, not a dump. */
+const MAX_DOMAIN_CONTENT_CHARS = 200_000;
 
 /**
  * Memory domains (v6/v7 slice C minimal): the table the 助手卡 "记忆域" dropdown
@@ -29,4 +33,54 @@ export function registerMemoryDomainsHandlers(server: RpcServer, deps: HandlerDe
     }
     return loadMemoryDomains(workspace.rootPath, false);
   });
+
+  /**
+   * Read one domain's memory file for the settings view. The slug must match
+   * a registered domain; the path is taken from the registry entry, never
+   * from the caller — an unknown slug yields the empty shape, not a 404
+   * race against the filesystem.
+   */
+  server.handle(
+    RPC_CHANNELS.memoryDomains.READ,
+    async (
+      _ctx,
+      workspaceId: string,
+      slug: string,
+    ): Promise<{
+      slug: string;
+      kind?: 'personal' | 'project';
+      path?: string;
+      mattersMost?: string;
+      exists: boolean;
+      content: string;
+      truncated: boolean;
+    }> => {
+      const workspace = getWorkspaceByNameOrId(workspaceId);
+      if (!workspace) return { slug, exists: false, content: '', truncated: false };
+      const file = loadMemoryDomains(workspace.rootPath, false);
+      const domain = file.domains.find((entry) => entry.slug === slug);
+      if (!domain) return { slug, exists: false, content: '', truncated: false };
+      let exists = false;
+      let content = '';
+      const domainPath = domain.path;
+      try {
+        if (domainPath && existsSync(domainPath)) {
+          content = readFileSync(domainPath, 'utf8');
+          exists = true;
+        }
+      } catch (error) {
+        log.warn(`MEMORY_DOMAINS_READ: ${slug}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const truncated = content.length > MAX_DOMAIN_CONTENT_CHARS;
+      return {
+        slug,
+        kind: domain.kind,
+        path: domain.path,
+        ...(domain.mattersMost ? { mattersMost: domain.mattersMost } : {}),
+        exists,
+        content: truncated ? content.slice(0, MAX_DOMAIN_CONTENT_CHARS) : content,
+        truncated,
+      };
+    },
+  );
 }

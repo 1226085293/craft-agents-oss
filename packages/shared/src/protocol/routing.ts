@@ -442,6 +442,7 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
 
   // memoryDomains — per-workspace memory domain registry (config/memory-domains.json)
   RPC_CHANNELS.memoryDomains.LIST,
+  RPC_CHANNELS.memoryDomains.READ,
 
   // oauth — OAuth state management
   RPC_CHANNELS.oauth.START,

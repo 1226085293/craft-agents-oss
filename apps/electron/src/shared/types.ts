@@ -927,6 +927,19 @@ export interface ElectronAPI {
     version: number
     domains: Array<{ slug: string; kind: 'personal' | 'project'; path?: string; mattersMost?: string }>
   }>
+  /** One domain's MEMORY.md content (registry-path read; empty shape for unknown slugs). */
+  memoryDomainsRead(
+    workspaceId: string,
+    slug: string,
+  ): Promise<{
+    slug: string
+    kind?: 'personal' | 'project'
+    path?: string
+    mattersMost?: string
+    exists: boolean
+    content: string
+    truncated: boolean
+  }>
   /** Unpair a channel; its next message gets the pairing prompt again. */
   pairingUnpair(workspaceId: string, channelKey: string): Promise<{ success: boolean }>
   /**

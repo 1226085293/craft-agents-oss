@@ -410,6 +410,12 @@ export const RPC_CHANNELS = {
   memoryDomains: {
     /** List domains, auto-registering existing projects as shared domains. */
     LIST: 'memoryDomains:list',
+    /**
+     * Read one domain's MEMORY.md. The path comes from the registry entry,
+     * never from the caller, so the slug is the only input and it must
+     * match a registered domain — no path traversal, no arbitrary reads.
+     */
+    READ: 'memoryDomains:read',
   },
   agents: {
     /** Role profiles for the picker (built-in default first). */

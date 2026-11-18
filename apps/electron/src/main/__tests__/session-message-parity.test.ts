@@ -120,7 +120,8 @@ describe('messageToStored/storedToMessage round-trip', () => {
       'isError', 'attachments', 'badges', 'annotations',
       'isIntermediate', 'turnId', 'infoLevel',
       'errorCode', 'errorTitle', 'errorDetails', 'errorOriginal', 'errorCanRetry',
-      'planPath',
+      // `planPath` dropped with the plan-approval removal (c7c2b604): the
+      // implementation no longer emits it, so it must not be expected here.
       'authRequestId', 'authRequestType', 'authSourceSlug', 'authSourceName',
       'authStatus', 'authCredentialMode', 'authHeaderName', 'authHeaderNames',
       'authLabels', 'authDescription', 'authHint', 'authSourceUrl',

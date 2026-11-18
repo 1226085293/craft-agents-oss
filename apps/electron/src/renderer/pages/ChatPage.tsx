@@ -902,6 +902,22 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
    */
   const supervisorTitle = currentLane === 'user' ? '督导 · 用户' : '督导 · 任务'
 
+  /**
+   * Task-lane read-only-shell banner (v7 §三): rendered under the header in
+   * BOTH the loading branch and the main return — the lane is what the
+   * conversation is, so the notice must survive the message load finishing.
+   */
+  const taskLaneBanner = isSupervisorSession && currentLane === 'task' ? (
+    <div className="flex items-center gap-2 border-b border-border/40 bg-muted/40 px-4 py-1.5 text-[11px] text-muted-foreground">
+      <Info className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span>
+        {t('chat.supervisorTaskLaneReadOnly', {
+          defaultValue: '任务车道现为只读档案：任务执行已迁移到任务会话（worker 车道）。这里保留历史记录供查阅，仍可提问，但不能再派活。',
+        })}
+      </span>
+    </div>
+  ) : null
+
   const headerTitle = isSupervisorSession ? (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -1002,18 +1018,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
         <>
           <div className="h-full flex flex-col" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
             <PanelHeader  hidden={hideChatHeader} title={headerTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
-            {/* 任务车道 = 只读壳（v7 §三）：工具层已剥离派活工具，UI 同步——
-                保留记录可查（可提问），不再宣称“做活”。 */}
-            {isSupervisorSession && currentLane === 'task' ? (
-              <div className="flex items-center gap-2 border-b border-border/40 bg-muted/40 px-4 py-1.5 text-[11px] text-muted-foreground">
-                <Info className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                <span>
-                  {t('chat.supervisorTaskLaneReadOnly', {
-                    defaultValue: '任务车道现为只读档案：任务执行已迁移到任务会话（worker 车道）。这里保留历史记录供查阅，仍可提问，但不能再派活。',
-                  })}
-                </span>
-              </div>
-            ) : null}
+            {taskLaneBanner}
             <div className="flex-1 flex flex-col min-h-0">
               <ChatDisplay
                 ref={setChatDisplayRef}
@@ -1090,6 +1095,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     <>
       <div className="h-full flex flex-col" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
         <PanelHeader  hidden={hideChatHeader} title={headerTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
+        {taskLaneBanner}
         <div className="flex-1 flex flex-col min-h-0">
           <ChatDisplay
             ref={setChatDisplayRef}

@@ -1303,6 +1303,8 @@
   "settings.llm.tokens": "Tokens",
   "settings.llm.totalTokens": "Total tokens",
   "settings.llm.uses": "Uses",
+  "settings.memory.description": "Domeny pamięci: jeden zapisywalny zakres per asystent, MEMORY.md projektu jako wspólny zakres tylko do odczytu",
+  "settings.memory.title": "Pamięć",
   "settings.network.bypassPlaceholder": "localhost, 127.0.0.1, .example.com",
   "settings.network.bypassRules": "Reguły pomijania",
   "settings.network.httpProxy": "Proxy HTTP",

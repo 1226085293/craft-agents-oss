@@ -1303,6 +1303,8 @@
   "settings.llm.tokens": "Tokens",
   "settings.llm.totalTokens": "Total tokens",
   "settings.llm.uses": "Uses",
+  "settings.memory.description": "Memória-domainok: egy írható domain asszisztentenként, a projekt MEMORY.md-je közös, csak olvasható domainként",
+  "settings.memory.title": "Memória",
   "settings.network.bypassPlaceholder": "localhost, 127.0.0.1, .example.com",
   "settings.network.bypassRules": "Megkerülési szabályok",
   "settings.network.httpProxy": "HTTP proxy",

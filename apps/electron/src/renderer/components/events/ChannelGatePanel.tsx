@@ -75,6 +75,7 @@ export function ChannelGatePanel({
     row.permissionMode ?? '__default',
   )
   const [ingestMode, setIngestMode] = React.useState<'at_only' | 'all'>(row.ingestMode ?? 'at_only')
+  const [triggerPrompt, setTriggerPrompt] = React.useState(row.triggerPrompt ?? '')
   const [newLabel, setNewLabel] = React.useState('')
   const [claimResult, setClaimResult] = React.useState<string | null>(null)
   const [preview, setPreview] = React.useState<ChannelGatePreview | null>(null)
@@ -107,14 +108,7 @@ export function ChannelGatePanel({
     }
   }, [workspaceId, row.channelKey, gateEnabled, allowedLabels, previewNonce])
 
-  // 自动保存（首渲染不算；row 引用变化=外部已刷新，重置基线）
-  const baseline = React.useRef({
-    agentId: row.agentId ?? '',
-    gateEnabled: row.gateEnabled === true,
-    labels: [...(row.allowedLabels ?? [])],
-    mode: (row.permissionMode ?? '__default') as typeof mode,
-    ingestMode: row.ingestMode ?? 'at_only',
-  })
+  // 自动保存只在用户交互后（dirty）触发；row 引用变化时外层重新挂载面板，state 随之重置
   const [dirty, setDirty] = React.useState(false)
   React.useEffect(() => {
     if (!dirty) return
@@ -125,6 +119,8 @@ export function ChannelGatePanel({
       patch.allowedLabels = gateEnabled ? allowedLabels : []
       patch.permissionMode = mode === '__default' ? null : mode
       patch.ingestMode = ingestMode
+      // 判定参考规则：空串按未设置存（pairings 侧 || undefined 不落盘）
+      patch.triggerPrompt = triggerPrompt.trim() || null
       setDirty(false)
       void window.electronAPI
         .channelGate(workspaceId, row.channelKey, patch)
@@ -137,7 +133,7 @@ export function ChannelGatePanel({
         .catch(() => undefined)
     }, AUTO_SAVE_MS)
     return () => clearTimeout(timer)
-  }, [agentId, gateEnabled, allowedLabels, mode, ingestMode, dirty])
+  }, [agentId, gateEnabled, allowedLabels, mode, ingestMode, triggerPrompt, dirty])
 
   const markDirty = (): void => setDirty(true)
 
@@ -404,6 +400,29 @@ export function ChannelGatePanel({
             </span>
           </span>
         </label>
+        {/* 全收时的判定参考规则（每通道单独写，喂给判定器当 assistantHint）；
+            只在全收模式下可编辑，at_only 下判定器不跑，改了也无效。 */}
+        {ingestMode === 'all' && (
+          <div className="pl-5">
+            <div className="text-[11px] text-muted-foreground">
+              {t('events.channelGate.triggerPromptLabel', {
+                defaultValue: '触发提示词（判定参考规则，可空）',
+              })}
+            </div>
+            <input
+              type="text"
+              value={triggerPrompt}
+              onChange={(event) => {
+                setTriggerPrompt(event.target.value)
+                markDirty()
+              }}
+              placeholder={t('events.channelGate.triggerPromptPlaceholder', {
+                defaultValue: '例如：只在提到 MKFramework 或团队任务时回复',
+              })}
+              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1 text-[12px]"
+            />
+          </div>
+        )}
       </div>
 
       {/* 源可见性预览（阶段 1 半成品：只有标签交集） */}

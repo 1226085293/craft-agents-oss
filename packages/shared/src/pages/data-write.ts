@@ -150,11 +150,23 @@ const patch = INPUT.patch;
 
 mkdirSync(dirname(INPUT.dbPath), { recursive: true });
 const db = new Database(INPUT.dbPath);
-// busy_timeout before WAL: concurrent first-writers each need the exclusive
-// lock to flip journal_mode, which contends immediately as SQLITE_BUSY without
-// a timeout set first. (Kept in lockstep with pages/data-store.ts.)
+// busy_timeout does not cover the journal-mode flip: that statement needs an
+// exclusive lock and bypasses the busy handler, so concurrent first-writers can
+// still see SQLITE_BUSY. Short-circuit when a peer already flipped it, else
+// retry briefly. (Kept in lockstep with pages/data-store.ts enableWal.)
 db.exec('PRAGMA busy_timeout = 5000;');
-db.exec('PRAGMA journal_mode = WAL;');
+for (let attempt = 0; ; attempt += 1) {
+  const mode = String(db.query('PRAGMA journal_mode;').get()?.journal_mode ?? '').toLowerCase();
+  if (mode === 'wal') break;
+  try {
+    db.exec('PRAGMA journal_mode = WAL;');
+    break;
+  } catch (error) {
+    if (attempt >= 7) throw error;
+    const waitUntil = Date.now() + 20 * (attempt + 1);
+    while (Date.now() < waitUntil) { /* yield the lock */ }
+  }
+}
 db.exec(\`
   CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,

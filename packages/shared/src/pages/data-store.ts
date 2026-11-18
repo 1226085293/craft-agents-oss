@@ -59,6 +59,38 @@ export interface ExportSnapshotOptions {
   maxPointsPerSeries?: number;
 }
 
+/**
+ * Flip the database to WAL, tolerating concurrent first-writers.
+ *
+ * `PRAGMA journal_mode = WAL` needs an exclusive lock and ignores busy_timeout,
+ * so a peer flipping it at the same moment surfaces as SQLITE_BUSY. Re-reading
+ * the mode after a failure is the cheap escape: if the peer already did it, we
+ * are done; otherwise retry a few times with a short backoff.
+ */
+export function enableWal(db: { exec: (sql: string) => unknown; query: (sql: string) => { get: () => unknown } }): void {
+  const current = (): string => {
+    const row = db.query('PRAGMA journal_mode;').get() as { journal_mode?: string } | undefined;
+    return (row?.journal_mode ?? '').toLowerCase();
+  };
+  if (current() === 'wal') return;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      db.exec('PRAGMA journal_mode = WAL;');
+      return;
+    } catch (error) {
+      lastError = error;
+      if (current() === 'wal') return;
+      const waitUntil = Date.now() + 20 * (attempt + 1);
+      while (Date.now() < waitUntil) {
+        // Synchronous backoff: this runs before the store accepts work, and the
+        // whole point is to yield the lock, not to stay responsive.
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Failed to enable WAL');
+}
+
 export class PageDataStore {
   private readonly db: Database;
   private readonly snapshotPath: string;
@@ -67,13 +99,14 @@ export class PageDataStore {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.snapshotPath = snapshotPath ?? join(dirname(dbPath), PAGE_SNAPSHOT_FILENAME);
     this.db = new Database(dbPath);
-    // busy_timeout MUST be set before switching to WAL: on a brand-new db,
-    // concurrent first-writers each need the exclusive lock to flip journal_mode,
-    // and without a timeout that contends immediately as SQLITE_BUSY. Setting it
-    // first makes the WAL switch (and every later write) wait instead of failing
-    // (refresh script vs. agent write_page_data).
+    // busy_timeout covers ordinary writes, but NOT the journal-mode flip: SQLite
+    // needs an exclusive lock for `PRAGMA journal_mode` and that statement
+    // bypasses the busy handler, so concurrent first-writers can still get
+    // SQLITE_BUSY there (observed: spawned writer vs. host store on a fresh db).
+    // Hence the retry below — and the "already WAL" short-circuit, because once
+    // one writer flips it the others have nothing left to do.
     this.db.exec('PRAGMA busy_timeout = 5000;');
-    this.db.exec('PRAGMA journal_mode = WAL;');
+    enableWal(this.db);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS kv (
         key TEXT PRIMARY KEY,

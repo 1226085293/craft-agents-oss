@@ -2115,8 +2115,12 @@ export class PiAgent extends BaseAgent {
           break;
         }
         if (parsed.code !== 'unknown_error') {
+          // Tell the adapter an error card is on screen: a parked retryable
+          // error from an earlier attempt must not be released on top of it.
+          this.adapter.noteTerminalErrorSurfaced();
           this.eventQueue.enqueue({ type: 'typed_error', error: parsed });
         } else {
+          this.adapter.noteTerminalErrorSurfaced();
           this.eventQueue.enqueue({
             type: 'error',
             message: `Pi subprocess error: ${rawMessage}`,

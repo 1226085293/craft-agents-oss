@@ -1790,6 +1790,43 @@ describe('PiEventAdapter', () => {
       ]);
     });
 
+    it('drops a parked error when a newer terminal error already surfaced (2026-11-17 double card)', () => {
+      // Real sequence in 261110-brave-titanium: the session client aborted a
+      // silent gateway wait (45 s first-byte watchdog) so that attempt's error
+      // was parked; the retried step then died on the gateway's
+      // `503 gateway reloaded, retry`, which the subprocess `error` lane
+      // surfaced at once. The terminal agent_end used to release the parked
+      // error on top of it — two identically-worded cards for one failure.
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+
+      // Attempt 0: retryable transport failure — parked, nothing on screen.
+      expect(collect(adapter.adaptEvent(transientError('fetch failed') as any))).toHaveLength(0);
+
+      // The retried step dies terminally and reaches the UI through the
+      // subprocess error lane — outside adaptEvent. That lane tells the adapter.
+      adapter.noteTerminalErrorSurfaced();
+
+      // Terminal agent_end reaches the release path; the parked error is the
+      // superseded one and must NOT become a second card.
+      const finalEnd = collect(adapter.adaptEvent({ type: 'agent_end', messages: [], willRetry: false } as any));
+      expect(finalEnd.filter((e: any) => e.type === 'typed_error' || e.type === 'error')).toHaveLength(0);
+      expect(finalEnd).toMatchObject([{ type: 'retry', phase: 'end' }, { type: 'complete' }]);
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+    });
+
+    it('still releases the parked error when no terminal error was surfaced', () => {
+      // Guard rail for the case above: the drop must be conditional, or a
+      // genuinely retried-then-failed turn would end with no explanation.
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent(transientError('fetch failed') as any));
+      const end = collect(adapter.adaptEvent({ type: 'agent_end', messages: [], willRetry: false } as any));
+      expect(end).toMatchObject([
+        { type: 'retry', phase: 'end' },
+        { type: 'typed_error', error: { code: 'network_error', originalError: 'fetch failed' } },
+        { type: 'complete' },
+      ]);
+    });
+
     it('cancelled retry: auto_retry_end { success: false } while holding releases the error and completes', () => {
       collect(adapter.adaptEvent({ type: 'turn_start' } as any));
       collect(adapter.adaptEvent(transientError('fetch failed') as any));

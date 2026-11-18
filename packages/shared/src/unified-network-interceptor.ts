@@ -2428,8 +2428,14 @@ function synthesizeMalformedBodyResponse(
  * connection, not a slow model: cap the wait well below the turn watchdog so
  * the failure surfaces as a retryable network error ON THIS REQUEST instead
  * of poisoning the session state.
+ *
+ * Contract: this MUST stay comfortably above
+ * `LlmGateway.KEEPALIVE_FIRST_MS` (10 s) — the gateway commits SSE headers and
+ * sends its first keepalive that early while a request waits out a cooldown.
+ * If the watchdog ever drops below the keepalive delay, every long gateway
+ * wait dies client-side (2026-11-17, 261110-brave-titanium).
  */
-const SSE_FIRST_BYTE_TIMEOUT_MS = (() => {
+export const SSE_FIRST_BYTE_TIMEOUT_MS = (() => {
   const raw = Number(process.env.CRAFT_SSE_FIRST_BYTE_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 45_000;
 })();

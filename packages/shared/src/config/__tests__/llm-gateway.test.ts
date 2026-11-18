@@ -304,7 +304,11 @@ describe('LlmGateway', () => {
     expect(gateway.keyStates().find((key) => key.provider === 'p1' && key.keyId === 'p1-k1')?.cooldownRemaining).toBeGreaterThanOrEqual(90);
   });
 
-  it('skips sibling keys and advances to the next unit after a positive-cooldown 429', async () => {
+  it('rotates to the sibling key after a positive-cooldown 429', async () => {
+    // A positive local 429 cooldown cools the key, but the provider's other
+    // key is a different account and serves right now — the request must not
+    // abandon the provider (the old `break` answered 429 while a healthy
+    // sibling sat idle: 261110-brave-titanium, 2026-11-17).
     const cfg = config({
       presets: { limited: { rateLimitSeconds: 3600 } },
       providers: [
@@ -315,15 +319,16 @@ describe('LlmGateway', () => {
     cfg.strategies[0]!.members = [{ provider: 'p1' }, { provider: 'p2' }];
     const stub = await start(cfg, [
       { status: 429, body: JSON.stringify({ error: 'rate limited' }) },
-      { status: 200, body: JSON.stringify({ id: 'next-unit-not-next-key' }) },
+      { status: 200, body: JSON.stringify({ id: 'sibling-key' }) },
     ]);
 
     const res = await post(gateway, {});
     expect(res.status).toBe(200);
-    expect((await readJson(res)).id).toBe('next-unit-not-next-key');
-    expect(stub.calls.map((call) => new URL(call.url).hostname)).toEqual(['p1.example.com', 'p2.example.com']);
+    expect((await readJson(res)).id).toBe('sibling-key');
+    // p1-k1 refused and was cooled; p1-k2 served — still inside p1.
+    expect(stub.calls.map((call) => new URL(call.url).hostname)).toEqual(['p1.example.com', 'p1.example.com']);
     expect(stub.calls.map((call) => (call.init?.headers as Record<string, string>)['x-api-key']))
-      .toEqual(['sk-p1-SECRET-1', 'sk-p2-1']);
+      .toEqual(['sk-p1-SECRET-1', 'sk-p1-SECRET-2']);
     expect(gateway.keyStates().find((key) => key.provider === 'p1' && key.keyId === 'p1-k1')?.cooldownRemaining)
       .toBeGreaterThan(0);
     expect(gateway.keyStates().find((key) => key.provider === 'p1' && key.keyId === 'p1-k1')?.cooldownRemaining)
@@ -363,9 +368,13 @@ describe('LlmGateway', () => {
       .toBeGreaterThan(0);
   });
 
-  it('moves to the next provider on positive-cooldown 429 without retrying another key', async () => {
+  it('tries every key of the failing provider before falling to the next one', async () => {
+    // Both p1 keys refuse and are cooled for their local 429 hold; only
+    // after the whole provider is exhausted does the request fall through
+    // to p2 — a sibling key is always the cheaper hop.
     const cfg = config();
     const stub = await start(cfg, [
+      { status: 429, body: JSON.stringify({ error: 'rate limited' }) },
       { status: 429, body: JSON.stringify({ error: 'rate limited' }) },
       { status: 200, body: JSON.stringify({ id: 'ok-on-p2' }) },
     ]);
@@ -373,11 +382,14 @@ describe('LlmGateway', () => {
     const res = await post(gateway, {});
     expect(res.status).toBe(200);
     expect((await readJson(res)).id).toBe('ok-on-p2');
-    expect(stub.calls.length).toBe(2);
+    expect(stub.calls.length).toBe(3);
     expect(stub.calls.map((call) => new URL(call.url).hostname)).toEqual([
+      'p1.example.com',
       'p1.example.com',
       'p2.example.com',
     ]);
+    expect(stub.calls.map((call) => (call.init?.headers as Record<string, string>)['x-api-key']))
+      .toEqual(['sk-p1-SECRET-1', 'sk-p1-SECRET-2', 'sk-p2-SECRET-1']);
   });
 
   it('moves to the next provider when one key fails at the transport level', async () => {

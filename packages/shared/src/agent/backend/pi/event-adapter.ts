@@ -553,6 +553,20 @@ export class PiEventAdapter extends BaseEventAdapter {
   }
 
   /**
+   * Record that this turn already produced its error card from OUTSIDE this
+   * adapter — the subprocess `error` message lane in `PiAgent`, which enqueues
+   * a `typed_error` directly (it never passes through `adaptEvent`).
+   *
+   * Without this the parked-error release at `agent_end` cannot know a newer,
+   * terminal failure was already shown and stacks a second, superseded card on
+   * the same turn (2026-11-17, 261110-brave-titanium: `503 gateway reloaded,
+   * retry` followed 6 ms later by a 62 s-old `SSE … 45000ms` watchdog error).
+   */
+  noteTerminalErrorSurfaced(): void {
+    this.hasEmittedTerminalError = true;
+  }
+
+  /**
    * Yield the parked retryable error (if any) and leave the retry state
    * machine. Used when the SDK will not retry (disabled/exhausted) or when a
    * retry was cancelled.
@@ -563,7 +577,23 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.retryState = 'none';
     this.cancelRetryFallbackTimer();
     yield { type: 'retry', phase: 'end' };
-    if (held) yield held;
+    // One failure, one card. A newer attempt can already have surfaced a
+    // TERMINAL error while this attempt's retryable error sat parked — the
+    // 2026-11-17 pair in 261110-brave-titanium: the gateway refused the retried
+    // step with `503 gateway reloaded, retry` (non-retryable → surfaced at
+    // once), then the terminal agent_end released the parked 45 s-watchdog
+    // error from an earlier attempt, stacking a second, already-superseded
+    // card whose visible text was identical.
+    if (held && this.hasEmittedTerminalError) {
+      this.log.debug('Dropping parked retry error — a terminal error already surfaced this turn', {
+        dropped: (held as { error?: { code?: string } }).error?.code ?? held.type,
+      });
+      return;
+    }
+    if (held) {
+      this.hasEmittedTerminalError = true;
+      yield held;
+    }
   }
 
   /**
@@ -577,14 +607,18 @@ export class PiEventAdapter extends BaseEventAdapter {
       this.retryFallbackTimerId = null;
       if (this.retryState !== armedState) return;
       this.log.warn(`Auto-retry fallback fired — ${reason}`, { timeoutMs, state: armedState });
-      const held: CraftAgentEvent = this.heldRetryError ?? {
-        type: 'error',
-        message: 'The model request failed and the automatic retry did not start. Please try again.',
-      };
+      // Same one-card rule as releaseHeldRetryError(): never stack a parked
+      // error on top of a terminal one that already surfaced this turn.
+      const held: CraftAgentEvent | null = this.hasEmittedTerminalError
+        ? null
+        : this.heldRetryError ?? {
+          type: 'error',
+          message: 'The model request failed and the automatic retry did not start. Please try again.',
+        };
       this.heldRetryError = null;
       this.retryState = 'none';
       this.onFallbackEvent?.({ type: 'retry', phase: 'end' });
-      this.onFallbackEvent?.(held);
+      if (held) this.onFallbackEvent?.(held);
       this.onFallbackComplete?.();
     }, timeoutMs);
   }
@@ -860,7 +894,14 @@ export class PiEventAdapter extends BaseEventAdapter {
             recovered: false,
             attempt: this.gatewayRetryAttempt,
           };
-          if (terminalError) yield terminalError;
+          if (terminalError) {
+            // One card per failure: the subprocess error lane may already have
+            // surfaced this same failure (it bypasses adaptEvent).
+            if (!this.hasEmittedTerminalError) {
+              this.hasEmittedTerminalError = true;
+              yield terminalError;
+            }
+          }
         }
         if ((event as { gatewayRetryPending?: boolean }).gatewayRetryPending) {
           this.gatewayRetryState = 'awaiting';
@@ -912,10 +953,16 @@ export class PiEventAdapter extends BaseEventAdapter {
         if (this.deferredRetryError) {
           const buffered = this.deferredRetryError;
           this.deferredRetryError = null;
-          this.hasEmittedTerminalError = true;
-          yield buffered.parsed
-            ? { type: 'typed_error', error: buffered.parsed }
-            : { type: 'error', message: buffered.message };
+          // A terminal error from a later attempt already produced the card —
+          // this buffered one describes a failure the retry superseded.
+          if (this.hasEmittedTerminalError) {
+            this.log.debug('Dropping buffered subprocess error — a terminal error already surfaced this turn');
+          } else {
+            this.hasEmittedTerminalError = true;
+            yield buffered.parsed
+              ? { type: 'typed_error', error: buffered.parsed }
+              : { type: 'error', message: buffered.message };
+          }
         }
         // Defense resume (pi-agent-server defense layer): the subprocess
         // annotates the FIRST agent_end with defenseResumePending=true when it
@@ -1019,7 +1066,13 @@ export class PiEventAdapter extends BaseEventAdapter {
             recovered: !terminalError,
             attempt: this.gatewayRetryAttempt,
           };
-          if (terminalError) yield terminalError;
+          if (terminalError) {
+            // Same one-card rule as the fallback release above.
+            if (!this.hasEmittedTerminalError) {
+              this.hasEmittedTerminalError = true;
+              yield terminalError;
+            }
+          }
         }
         if (this.lastUsage && this.lastContextTokens > 0) {
           // Report the last REAL context size. Using `lastUsage.input` here would

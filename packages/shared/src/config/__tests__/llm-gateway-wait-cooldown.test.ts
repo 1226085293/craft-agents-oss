@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { LlmGateway } from '../llm-gateway.ts';
+import { gatewayRequestFingerprint } from '../gateway-stream-retry.ts';
 import type { LlmConfig, LlmProvider } from '../llm-config.ts';
 
 function provider(id: string, over: Partial<LlmProvider> = {}): LlmProvider {
@@ -157,7 +158,7 @@ describe('LlmGateway waitForCooldown', () => {
   it('signals cooldown wait start/end for the owning session', async () => {
     const cfg = baseConfig();
     cfg.strategies[0]!.waitForCooldown = { enabled: true, maxWaitSeconds: 60 };
-    const events: Array<{ sessionId?: string; waiting: boolean; seconds?: number }> = [];
+    const events: Array<{ sessionId?: string; waiting: boolean; seconds?: number; phase?: string }> = [];
     await start(
       cfg,
       [
@@ -327,7 +328,7 @@ describe('LlmGateway waitForCooldown', () => {
   it('pairs the wait-end callback when a reload interrupts the wait', async () => {
     const cfg = baseConfig();
     cfg.strategies[0]!.waitForCooldown = { enabled: true, maxWaitSeconds: 60 };
-    const events: Array<{ sessionId?: string; waiting: boolean; seconds?: number }> = [];
+    const events: Array<{ sessionId?: string; waiting: boolean; seconds?: number; phase?: string }> = [];
     await start(
       cfg,
       [{ status: 429, headers: { 'retry-after': '30' }, body: JSON.stringify({ error: 'rate limited' }) }],
@@ -338,33 +339,55 @@ describe('LlmGateway waitForCooldown', () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     gateway!.rebuild();
     const res = await pending;
-    await res.text();
+    const text = await res.text();
 
-    expect(res.status).toBe(503);
+    // The 30s wait is at/above the prelude threshold, so the SSE 200
+    // prelude was committed at t=0 and the terminal 503 can no longer be
+    // an HTTP status — it travels as an in-stream error event instead.
+    expect(res.status).toBe(200);
+    expect(text).toContain('event: error');
     expect(events[0]).toMatchObject({ sessionId: 'reload-wait', waiting: true, phase: 'cooldown' });
     expect(events[events.length - 1]).toEqual({ sessionId: 'reload-wait', waiting: false, phase: 'cooldown' });
   });
 
-  it('gives up waiting when the client disconnects mid-wait', async () => {
+  it('cuts the cooldown wait short when the client goes away (clientGone)', async () => {
     const cfg = baseConfig();
     cfg.strategies[0]!.waitForCooldown = { enabled: true, maxWaitSeconds: 60 };
-    const stub = await start(cfg, [
-      { status: 429, headers: { 'retry-after': '30' }, body: JSON.stringify({ error: 'rate limited' }) },
-    ]);
+    const events: Array<{ waiting: boolean; phase?: string }> = [];
+    const stub = await start(
+      cfg,
+      [{ status: 429, headers: { 'retry-after': '30' }, body: JSON.stringify({ error: 'rate limited' }) }],
+      (event) => events.push(event),
+    );
 
-    // Abort the client side while the gateway sits in its 30s wait.
-    const controller = new AbortController();
-    const pending = fetch(`${gateway!.baseUrl}/v1/messages`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
-      body: JSON.stringify({ model: 'auto', stream: true }),
-      signal: controller.signal,
-    });
-    // Give the gateway time to reach the wait, then cut the connection.
+    // Enter the 30s cooldown wait.
+    const pending = post(gateway!, { stream: true, sessionKey: 'cut-wait' });
+    pending.catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 300));
-    controller.abort();
-    await expect(pending).rejects.toThrow();
-    // The wait must end well before the full 30s cooldown elapses.
+    expect(events.some((e) => e.waiting === true)).toBe(true);
+
+    // This runtime (Bun node:http on Windows) does not reliably surface a
+    // client-side abort as a server-side socket close once the request body
+    // has been read (probed 2026-11-18: no socket close/end/error fires and
+    // probe writes keep succeeding), so the deterministic trigger for the
+    // clientGone path is a teardown: stop() destroys the tracked sockets,
+    // onClientGone flips clientGone, and cooldownSleep must cut the wait
+    // short instead of running to the 30s deadline. A production client
+    // disconnect drives the same clientGone wiring.
+    const t0 = Date.now();
+    await gateway!.stop();
+    let firedAt: number | null = null;
+    for (let i = 0; i < 30; i++) {
+      if (events.some((e) => e.waiting === false)) {
+        firedAt = Date.now() - t0;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(firedAt).not.toBeNull();
+    // The wait ended EARLY, not at the 30s deadline.
+    expect(firedAt!).toBeLessThan(5_000);
+    // No second upstream call was made: the wait was cut, not completed.
     expect(stub.calls.length).toBe(1);
   });
 
@@ -393,5 +416,116 @@ describe('LlmGateway waitForCooldown', () => {
     expect(backoffs.length).toBeGreaterThanOrEqual(4);
     expect(backoffs[0]).toMatchObject({ sessionId: 'backoff-session', waiting: true, seconds: 1 });
     expect(backoffs[1]).toEqual({ sessionId: 'backoff-session', waiting: false, phase: 'retry_backoff' });
+  });
+
+  it('waits out key cooldowns even when the session stream state exhausted every key of the unit', async () => {
+    // Storm residue (261110-brave-titanium, 2026-11-17): repeated failures
+    // leave the session's stream-retry state with the unit's routes
+    // explicitly exhausted while their keys are still cooling. The wait
+    // target must be answered from the provider-level pool view — feeding
+    // the session's exclusion set into it zeroed `soonest` and skipped
+    // waitForCooldown, so the request answered 5xx at the instant of
+    // arrival and only a re-send (fresh state, thawed keys) recovered.
+    const cfg = baseConfig();
+    cfg.strategies[0]!.waitForCooldown = { enabled: true, maxWaitSeconds: 60 };
+    const stub = await start(cfg, [
+      // Prime: cool the sole key for ~2s (retry-after honored, noLadder preset).
+      { status: 429, headers: { 'retry-after': '2' }, body: JSON.stringify({ error: 'rate limited' }) },
+    ]);
+    const primed = await post(gateway!, {});
+    expect(primed.status).toBe(429);
+    expect(stub.calls.length).toBe(1);
+
+    // Reproduce the storm residue for the next request's session+fingerprint:
+    // the unit's only route is explicitly exhausted in the session state.
+    const store = (
+      gateway as unknown as {
+        streamRetryStates: {
+          getOrCreate(sessionId: string, fingerprint: string, strategyId: string): { exhaustedRoutes: Set<string> };
+        };
+      }
+    ).streamRetryStates;
+    store
+      .getOrCreate('storm-session', gatewayRequestFingerprint({ model: 'auto', stream: true }), 'auto')
+      .exhaustedRoutes.add('p1::auto::p1-k1');
+
+    const started = Date.now();
+    const res = await post(gateway!, { stream: true, sessionKey: 'storm-session' });
+    await res.text();
+
+    // The exhausted verdict outlives the thaw, so this request still ends in
+    // a 5xx — but the gateway must wait out the key cooldown instead of
+    // answering at the instant of arrival.
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(logs.some((line) => line.includes('all units cooling, waiting'))).toBe(true);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1500);
+    expect(stub.calls.length).toBe(1);
+  }, 20000);
+});
+
+describe('cooldownSleep keepalive prelude (unit)', () => {
+  const testLogs: string[] = [];
+  const makeUnstartedGateway = () =>
+    new LlmGateway({
+      getConfig: () => baseConfig(),
+      fetchImpl: stubUpstream([]).impl,
+      log: (m) => testLogs.push(m),
+    });
+
+  interface PreludeProbe {
+    calls: string[];
+    res: Record<string, unknown>;
+  }
+  const fakeRes = (): PreludeProbe => {
+    const calls: string[] = [];
+    const res = {
+      headersSent: false,
+      writableEnded: false,
+      destroyed: false,
+      writeHead: (status: number) => {
+        res.headersSent = true;
+        calls.push(`head:${status}`);
+      },
+      write: (chunk: string) => {
+        calls.push(chunk);
+        return true;
+      },
+      end: () => {
+        res.writableEnded = true;
+      },
+    };
+    return { calls, res };
+  };
+
+  it('commits the SSE prelude immediately for waits at/above the threshold (t=0)', async () => {
+    // A 40 s wait outlives the client's 45 s first-byte watchdog only if the
+    // body opens late; the t=0 prelude commits 200 + the first `: keepalive`
+    // in the first beat so the watchdog clears in the same delivery.
+    testLogs.length = 0;
+    const gateway = makeUnstartedGateway();
+    const { calls, res } = fakeRes();
+    const p = (gateway as any).cooldownSleep(40, (gateway as any).generation, {}, res);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(calls.length).toBe(2);
+    expect(calls[0]).toBe('head:200');
+    expect(calls[1]).toBe(': keepalive\n\n');
+    expect(testLogs.some((l) => l.includes('prelude committed'))).toBe(true);
+    res.destroyed = true;
+    // Plain await: bun's expect(promise).resolves matcher hangs on this
+    // runtime (bun 1.3.13, 2026-11-18), so assert on the settled value instead.
+    expect(await p).toBe('disconnected');
+  });
+
+  it('defers the prelude for waits below the threshold (no early SSE commit)', async () => {
+    testLogs.length = 0;
+    const gateway = makeUnstartedGateway();
+    const { calls, res } = fakeRes();
+    const p = (gateway as any).cooldownSleep(10, (gateway as any).generation, {}, res);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(calls.length).toBe(0);
+    res.destroyed = true;
+    // Plain await: bun's expect(promise).resolves matcher hangs on this
+    // runtime (bun 1.3.13, 2026-11-18), so assert on the settled value instead.
+    expect(await p).toBe('disconnected');
   });
 });

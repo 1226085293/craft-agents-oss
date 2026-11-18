@@ -404,17 +404,6 @@ const DEFAULT_TOTAL_SECONDS = 600;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 /** Matches DEFAULT_PRESET.maxImageParts; used when a preset leaves it unset. */
 const DEFAULT_PRESET_MAX_IMAGE_PARTS = DEFAULT_PRESET.maxImageParts ?? 4;
-/**
- * Keys of one provider a single request may try before moving on.
- *
- * Keys are separate accounts: one that times out or is rate-limited says
- * nothing about the next, so the ladder rotates within the provider first (it
- * is the cheapest hop). The cap is a wall-clock guard rather than a policy —
- * a first-byte timeout costs the whole preset budget, so three keys is the most
- * a client should wait for one provider before the request goes elsewhere.
- */
-const MAX_KEY_TRIES_PER_PROVIDER = 3;
-
 /** Persisted-cooldown namespaces; key cooldowns stay unprefixed for compat. */
 const UNIT_COOLDOWN_PREFIX = 'unit|';
 const ENDPOINT_COOLDOWN_PREFIX = 'endpoint|';
@@ -473,6 +462,46 @@ export class LlmGateway {
    * SDK's fetchWithTimeout covers time-to-headers only.)
    */
   private static readonly WAIT_COOLDOWN_BUDGET_SECONDS = 540;
+
+  /**
+   * Waits of at least this many seconds commit the SSE prelude (200 +
+   * `: keepalive`) IMMEDIATELY at wait start (t=0).
+   *
+   * The session client's first-byte watchdog (`SSE_FIRST_BYTE_TIMEOUT_MS`, 45 s)
+   * arms when the response body opens and clears on the FIRST chunk — so a
+   * wait long enough to outlive it must open the body and deliver that first
+   * byte atomically at t=0, or the watchdog can misfire mid-wait.
+   *
+   * 261110-brave-titanium, 2026-11-17 22:32: a 59.66 s wait committed the
+   * prelude at +10 s (headers) yet the client still aborted at its +45 s
+   * mark — the first chunk never cleared the watchdog. A t=0 prelude makes
+   * the arming and the clearing coincident, so the misfire is structurally
+   * impossible for long waits. Waits shorter than the threshold cannot
+   * outlive the watchdog, so they keep the deferred prelude below.
+   */
+  static readonly KEEPALIVE_PRELUDE_THRESHOLD_SECONDS = 30;
+
+  /**
+   * Delay before the FIRST SSE keepalive comment for waits SHORTER than
+   * {@link KEEPALIVE_PRELUDE_THRESHOLD_SECONDS} (deferred prelude).
+   *
+   * This is a hard contract with the session client, not a tuning knob: the
+   * subprocess wraps every response body in `withFirstByteWatchdog`
+   * (`unified-network-interceptor.ts`), which aborts a stream that produced no
+   * byte within `SSE_FIRST_BYTE_TIMEOUT_MS` (45 s) — counted from the response
+   * headers. Once {@link cooldownSleep} has written those headers, silence
+   * longer than that watchdog kills the request and wastes the whole wait.
+   *
+   * 2026-11-17 (261110-brave-titanium): the first heartbeat used to wait 60 s,
+   * i.e. 15 s PAST the watchdog, so a 134 s wait died at its 45 s mark with
+   * `SSE stream produced no data within 45000ms`. Ten seconds keeps a wide
+   * margin under the watchdog while still letting short (≤10 s) cooldowns
+   * resolve without committing the response to SSE.
+   */
+  static readonly KEEPALIVE_FIRST_MS = 10_000;
+
+  /** Keepalive cadence once the first heartbeat has gone out. */
+  static readonly KEEPALIVE_INTERVAL_MS = 15_000;
 
   /**
    * Route-scoped cooldown: `provider::publicModel` -> epoch-seconds.
@@ -1165,6 +1194,7 @@ export class LlmGateway {
             replanLeft,
             hardBlocked: false,
             sessionId,
+            clientGone: () => clientGone,
           });
           if (plannedWait.action === 'waited') {
             waitBudgetLeft -= plannedWait.seconds;
@@ -1249,6 +1279,7 @@ export class LlmGateway {
           plannedUnits: new Set(plan.units.map((unit) => unit.id)),
           hardBlocked: outcome.requestError || outcome.tprRejected,
           sessionId,
+          clientGone: () => clientGone,
         });
         if (executedWait.action === 'waited') {
           waitBudgetLeft -= executedWait.seconds;
@@ -1531,13 +1562,18 @@ export class LlmGateway {
         };
       };
 
-      // Keys of this provider one request may try. A key is its own account, so
-      // a *per-key* failure (rate limit, quota, a revoked key) is worth another
-      // key of the same provider — without it one bad key ended the turn while
-      // the provider's other keys sat idle. Endpoint-level failures (transport,
-      // first byte) do not rotate: see `leaveProvider`.
+      // Every enabled key of this provider is one the request may try. A key
+      // is its own account, so a *per-key* failure (rate limit, quota, a
+      // revoked key) is worth every other key of the same provider — one bad
+      // key must never end the turn while the provider's other keys sit idle
+      // (261110-brave-titanium, 2026-11-17: a walled key ended each request
+      // after one dispatch while a sibling key served seconds later).
+      // Worst case (every key refusing) stays bounded by the client's
+      // first-byte watchdog: a 429/quota refusal is a fast probe, not a slow
+      // failure. Endpoint-level failures (transport, first byte) do not
+      // rotate: see `leaveProvider`.
       const enabledKeys = provider.keys.filter((k) => k.enabled !== false).length;
-      const keyBudget = Math.min(Math.max(1, enabledKeys), MAX_KEY_TRIES_PER_PROVIDER);
+      const keyBudget = Math.max(1, enabledKeys);
       let keyTries = 0;
       let keyAttempts = 0;
       let targetStartedAtMs = Date.now();
@@ -1886,12 +1922,12 @@ export class LlmGateway {
           const signal = parseRateLimitSignal(response.headers, errorBody);
           const localCooldown = this.rateLimitCooldownSeconds(provider, selection.keyId);
           if (localCooldown > 0) {
-            await coolKey('rate_limit', signal);
-            releaseKey();
-            // A positive configured 429 cooldown advances the route unit
-            // immediately; do not spend more keys of this provider on the same
-            // model before the next planned unit.
-            break;
+            // Cool the key for its local 429 hold, then hand off to the
+            // provider's next key: the 429 belongs to this account, and a
+            // sibling key is a different account with its own quota — cooling
+            // drops it out of rotation until it thaws, the next key serves now.
+            if (!(await rotateKey('rate_limit', signal))) break;
+            continue;
           }
 
           const upstreamHoldSeconds = (signal.retryAfterSeconds ?? 0) > 0 || signal.dayLevel
@@ -2126,11 +2162,13 @@ export class LlmGateway {
       // A provider without a pool contributes nothing: it is neither waiting
       // nor newly usable (the planner reports it as its own error).
       if (!pool) continue;
-      // Only *explicitly* exhausted stream routes are excluded here. A key
-      // whose target budget is merely spent (for example maxAttempts:1 after a
-      // normal 429) is still a cooldown the strategy can wait out; excluding it
-      // made `soonest` zero and silently disabled waitForCooldown for every
-      // session-keyed request.
+      // The SERVABILITY check keeps the session view: a route this session's
+      // stream state explicitly exhausted is not servable *for this logical
+      // request* (the exhaustion outlives any key cooldown), so it must not
+      // trigger a re-plan. (Budget-spent routes are deliberately NOT in
+      // `exhaustedRoutes`: a spent target keeps a cooldown the strategy can
+      // wait out — excluding it once made `soonest` zero and silently
+      // disabled waitForCooldown for every session-keyed request.)
       const excludedStreamKeys = streamRetryState
         ? this.explicitExhaustedStreamKeys(streamRetryState, unit.id)
         : new Set<string>();
@@ -2139,12 +2177,21 @@ export class LlmGateway {
         if (!planned || !planned.has(unit.id)) servableOutsidePlan = true;
         continue;
       }
+      // The WAIT TARGET is a provider-level question, answered from the
+      // unfiltered pool view: an exhausted route still owns its key cooldown
+      // (exhausted routes are cooled in onStreamFailure), and that thaw is
+      // what un-parks the next request after the terminal state delete.
+      // Feeding the exclusion set in here zeroed `soonest` whenever a storm
+      // had marked every key of a provider exhausted — waitForCooldown then
+      // skipped and the request answered 5xx at the instant of arrival
+      // (261110-brave-titanium, 2026-11-17: agnes keys all cooling, only a
+      // re-send 20 s later recovered).
+      const waitView = await pool.availability(unit.upstreamModel);
       // retryAfterSeconds > 0 = a cooldown/window that waiting can clear
       // (key cooldown, rate-limit window, concurrency drain). === 0 with
-      // !available = stream-exhausted keys or an empty pool — waiting does
-      // not clear those, so the unit contributes nothing.
-      if (availability.retryAfterSeconds > 0) {
-        soonest = Math.min(soonest, availability.retryAfterSeconds);
+      // !available = an empty pool — the unit contributes nothing.
+      if (waitView.retryAfterSeconds > 0) {
+        soonest = Math.min(soonest, waitView.retryAfterSeconds);
       }
     }
     return { servableOutsidePlan, soonest: Number.isFinite(soonest) ? soonest : 0 };
@@ -2155,33 +2202,47 @@ export class LlmGateway {
    * reload or a client disconnect cuts the wait short instead of leaving a
    * zombie request hanging on a connection nobody reads.
    *
-   * Heartbeat insertion point: if the client-side silence-timeout experiment
-   * shows the session client aborts silent waits, SSE keepalive comments go
-   * here (writeHead(200) before the first chunk, `: keepalive` per chunk).
+   * Heartbeat: the response is committed to SSE (writeHead(200)) and a
+   * `: keepalive` comment goes out every {@link KEEPALIVE_INTERVAL_MS}. Waits
+   * of at least {@link KEEPALIVE_PRELUDE_THRESHOLD_SECONDS} commit that
+   * prelude IMMEDIATELY at t=0 so the client's first-byte watchdog (45 s)
+   * clears in the same delivery that opens the body; shorter waits defer the
+   * first beat to {@link KEEPALIVE_FIRST_MS}. Every beat logs, so the
+   * gateway side stays verifiable when a client dies mid-wait.
    */
   private async cooldownSleep(
     seconds: number,
     generation: number,
     req: IncomingMessage,
     res: ServerResponse,
+    clientGone?: () => boolean,
   ): Promise<'done' | 'reloaded' | 'disconnected'> {
     const deadline = Date.now() + Math.max(0, Math.ceil(seconds * 1000));
-    let lastHeartbeatAt = Date.now();
-    let heartbeatAfterMs = 60_000;
+    // Long waits prelude NOW: the client's first-byte watchdog clears on the
+    // first chunk, so the 200 headers and that byte must arrive together at
+    // wait start. Short waits keep the deferred first beat.
+    const preludeNow = seconds >= LlmGateway.KEEPALIVE_PRELUDE_THRESHOLD_SECONDS;
+    let lastHeartbeatAt = preludeNow ? 0 : Date.now();
+    let heartbeatAfterMs: number = LlmGateway.KEEPALIVE_FIRST_MS;
+    let beat = 0;
     for (;;) {
       if (generation !== this.generation) return 'reloaded';
-      // Client-gone detection uses the response side only: Bun marks the
-      // REQUEST stream destroyed as soon as its body is consumed (which
-      // always happened before the wait), so req.destroyed says nothing.
-      // A disconnected client tears down the socket, which surfaces here as
-      // res.destroyed.
-      if (res.destroyed) return 'disconnected';
+      // Client-gone detection: in this runtime a client abort surfaces as a
+      // socket/req 'close', NOT as res.destroyed (probed 2026-11-18: res stays
+      // not-destroyed and res 'close' never fires, while req.socket 'close' does).
+      // The caller passes a live clientGone getter (attachClientDisconnect); OR
+      // it with res.destroyed so runtimes that DO set it still cut the wait.
+      if (clientGone?.() || res.destroyed) {
+        return 'disconnected';
+      }
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) return 'done';
       // Keep the streaming client's HTTP body timer alive while no model events
       // exist. Comments are valid SSE in both Anthropic and OpenAI streams.
       if (Date.now() - lastHeartbeatAt >= heartbeatAfterMs) {
-        if (!res.headersSent) {
+        beat += 1;
+        const preludeJustNow = !res.headersSent;
+        if (preludeJustNow) {
           res.writeHead(200, {
             'content-type': 'text/event-stream',
             'cache-control': 'no-cache',
@@ -2189,11 +2250,13 @@ export class LlmGateway {
           });
         }
         if (!res.writableEnded) res.write(': keepalive\n\n');
+        this.log(
+          `[gateway] cooldown wait keepalive beat ${beat}${preludeJustNow ? ' (prelude committed: SSE 200 + keepalive, t=0)' : ''} (~${Math.ceil(seconds)}s wait)`,
+        );
         lastHeartbeatAt = Date.now();
-        // The first heartbeat may wait longer (short cooldowns should not
-        // pre-commit an SSE response); once started it stays well inside the
-        // 300s client fallback.
-        heartbeatAfterMs = 15_000;
+        // Once started the cadence stays well inside both the 45 s first-byte
+        // watchdog and the 300 s client fallback.
+        heartbeatAfterMs = LlmGateway.KEEPALIVE_INTERVAL_MS;
       }
       // Real sleep, deliberately not the injectable waitForRetry: the deadline
       // is wall-clock, so a fake that resolves instantly would spin the loop.
@@ -2233,6 +2296,8 @@ export class LlmGateway {
       plannedUnits?: ReadonlySet<string>;
       hardBlocked: boolean;
       sessionId?: string;
+      /** Live client-disconnect getter (wired via attachClientDisconnect); ends the wait early. */
+      clientGone?: () => boolean;
     },
   ): Promise<
     | { action: 'skip' }
@@ -2268,7 +2333,7 @@ export class LlmGateway {
     );
     try {
       this.onCooldownWait?.({ sessionId: opts.sessionId, waiting: true, seconds: soonest, phase: 'cooldown' });
-      const end = await this.cooldownSleep(soonest, opts.generation, opts.req, opts.res);
+      const end = await this.cooldownSleep(soonest, opts.generation, opts.req, opts.res, opts.clientGone);
       if (end === 'done') return { action: 'waited', seconds: soonest };
       return { action: end };
     } finally {

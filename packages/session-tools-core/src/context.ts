@@ -405,6 +405,13 @@ export interface SessionToolContext {
      * "I read the request, now get it done". The result comes back to the
      * originating channel, not to the person's user lane.
      */
+    /**
+     * H4: come back to this conversation after a delay.
+     *
+     * One per session — a second request replaces the first rather than stacking,
+     * so a model that re-schedules on every turn cannot accumulate timers.
+     */
+    scheduleFollowup?(payload: { minutes: number; note: string }): Promise<{ at: number; replaced: boolean }>;
     dispatchTask?(payload: {
       task: string;
       title?: string;

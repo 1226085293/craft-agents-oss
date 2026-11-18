@@ -2094,6 +2094,16 @@ export class SessionManager implements ISessionManager {
   // Pending credential request resolvers (keyed by requestId)
   private pendingCredentialResolvers: Map<string, (response: import('@craft-agent/shared/protocol').CredentialResponse) => void> = new Map()
   // Permission request metadata tracking (keyed by requestId)
+  /**
+   * Pending follow-ups (H4), one per session.
+   *
+   * Held outside the session record on purpose: a timer is a live process fact,
+   * not persisted state. A restart drops it, which is the honest outcome — a
+   * follow-up that fires after a restart would arrive with no context about what
+   * the session was doing.
+   */
+  private pendingFollowups = new Map<string, { timer: NodeJS.Timeout; at: number }>();
+
   private pendingPermissionRequests: Map<string, {
     sessionId: string
     type?: 'bash' | 'file_write' | 'mcp_mutation' | 'api_mutation' | 'admin_approval'
@@ -6530,6 +6540,40 @@ export class SessionManager implements ISessionManager {
            * that took the request keeps the reply — the worker reports back to this
            * channel, so the person hears the answer where they asked.
            */
+          /**
+           * H4: come back to this conversation after a delay.
+           *
+           * One-shot and one-per-session. Replacing rather than stacking matters
+           * because a model that re-schedules each turn would otherwise build up
+           * timers it can no longer see.
+           */
+          scheduleFollowup: async (payload) => {
+            const minutes = Math.max(1, Math.round(payload.minutes))
+            const delayMs = minutes * 60 * 1000
+            const at = Date.now() + delayMs
+            const previous = this.pendingFollowups.get(managed.id)
+            if (previous) clearTimeout(previous.timer)
+            const note = payload.note.trim()
+            const timer = setTimeout(() => {
+              this.pendingFollowups.delete(managed.id)
+              void this.sendMessage(
+                managed.id,
+                [
+                  '【你之前安排自己在这个时候回来。】',
+                  '',
+                  note,
+                  '',
+                  '现在处理它：如果需要人回答，用一句话问清楚；如果没事，简短汇报你做了什么。',
+                ].join('\n'),
+              ).catch((error) => {
+                sessionLog.warn('schedule_followup: delivery failed', { sessionId: managed.id, error })
+              })
+            }, delayMs)
+            // A follow-up must not keep the process alive on its own.
+            timer.unref?.()
+            this.pendingFollowups.set(managed.id, { timer, at })
+            return { at, replaced: Boolean(previous) }
+          },
           dispatchTask: async (payload) => {
             const taskText = payload.task.trim()
             if (!taskText) throw new Error('task is empty')
@@ -11666,6 +11710,12 @@ ${request.prompt}`;
     this.pendingDeltas.delete(sessionId)
     this.clearAdminRememberApprovalsForSession(sessionId)
     this.clearPendingPermissionRequestsForSession(sessionId)
+    // A deleted session's follow-up must not fire into nothing (H4).
+    const followup = this.pendingFollowups.get(sessionId)
+    if (followup) {
+      clearTimeout(followup.timer)
+      this.pendingFollowups.delete(sessionId)
+    }
 
     const backgroundStore = this.backgroundTaskStores.get(sessionId)
     if (backgroundStore) {

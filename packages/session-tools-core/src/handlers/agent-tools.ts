@@ -15,6 +15,7 @@ import type {
   AskUserInput,
   CreateTaskInput,
   DispatchTaskInput,
+  ScheduleFollowupInput,
   DispatchInput,
   ListQuestionsInput,
   ReportResultInput,
@@ -320,6 +321,45 @@ export async function handleDispatchTask(
   } catch (error) {
     return errorResponse(
       `Failed to dispatch: ${error instanceof Error ? error.message : 'unknown error'}`,
+    );
+  }
+}
+
+/**
+ * Come back to this conversation later (H4).
+ *
+ * One-shot by design: a repeating timer on a chat session is a way to spam a
+ * group forever, and a person who wants a schedule is describing a task (which
+ * has triggers). The note is written by the model for its future self, so it is
+ * returned verbatim rather than reformatted.
+ */
+export async function handleScheduleFollowup(
+  ctx: SessionToolContext,
+  args: ScheduleFollowupInput,
+): Promise<ToolResult> {
+  if (!ctx.agentTools?.scheduleFollowup) {
+    return errorResponse('schedule_followup is not available in this session.');
+  }
+  if (!Number.isFinite(args.minutes) || args.minutes < 1) {
+    return errorResponse('minutes must be at least 1.');
+  }
+  if (!args.note?.trim()) {
+    return errorResponse('note is required — say what you should do when you come back.');
+  }
+  try {
+    const result = await ctx.agentTools.scheduleFollowup({
+      minutes: Math.round(args.minutes),
+      note: args.note.trim(),
+    });
+    const when = new Date(result.at).toLocaleString('zh-CN', { hour12: false });
+    return successResponse(
+      result.replaced
+        ? `已改期：原来的提醒被这一条替换，${when} 回到这个会话。`
+        : `已安排：${when} 回到这个会话。`,
+    );
+  } catch (error) {
+    return errorResponse(
+      `Failed to schedule: ${error instanceof Error ? error.message : 'unknown error'}`,
     );
   }
 }

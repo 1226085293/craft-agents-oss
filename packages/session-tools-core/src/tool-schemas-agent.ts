@@ -322,6 +322,32 @@ export const DispatchTaskSchema = z.object({
 
 export type DispatchTaskInput = z.infer<typeof DispatchTaskSchema>;
 
+/**
+ * `schedule_followup` — H4 (stage 7): re-open this conversation later.
+ *
+ * One-shot, not a cron: 「20 分钟后提醒我问一下结果」 is the shape that comes up
+ * in a channel, and a repeating timer on a chat session is a way to spam a group
+ * forever. A person who wants a schedule says so to a task (which has triggers);
+ * this is for the conversational case.
+ *
+ * Deliberately a worker tool, absent from the supervisor table: the supervisor is
+ * a pipe (collect, report, escalate), and its periodic check-ins are driven by
+ * the system's judge loop, not by a tool it calls on itself.
+ */
+export const ScheduleFollowupSchema = z.object({
+  minutes: z
+    .number()
+    .min(1)
+    .max(24 * 60)
+    .describe('How long to wait before coming back to this conversation, in minutes (1 minute to 24 hours).'),
+  note: z
+    .string()
+    .min(1)
+    .describe('What to do when you come back — write it for yourself, and include anything the person asked you to check.'),
+})
+
+export type ScheduleFollowupInput = z.infer<typeof ScheduleFollowupSchema>;
+
 export const TaskUpdateSchema = z.object({
   identifier: z.string(),
   status: z.enum(['backlog', 'running', 'paused', 'completed', 'failed', 'canceled']).optional(),

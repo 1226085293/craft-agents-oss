@@ -42,6 +42,7 @@ import {
   handleReportResult,
   handleCreateTask,
   handleDispatchTask,
+  handleScheduleFollowup,
   handleTaskGet,
   handleTaskHandoff,
   handleTaskPlan,
@@ -55,6 +56,7 @@ import {
   ReportResultSchema,
   CreateTaskSchema,
   DispatchTaskSchema,
+  ScheduleFollowupSchema,
   TaskGetSchema,
   TaskHandoffSchema,
   TaskListSchema,
@@ -409,6 +411,7 @@ export const TOOL_DESCRIPTIONS = {
   call_llm: `Get a secondary LLM for focused subtasks: parallel batch processing, efficiency gains, structured extraction (outputSchema), context isolation. Put text in the prompt param; use attachments only for file paths on disk (max 20 items; for files >2000 lines pass a startLine/endLine range).`,
   spawn_session: `Create an independent session running with its own prompt, connection, model, and sources. Useful for delegating research/analysis/drafts to parallel sessions. Use help=true first to list connections/models/sources. The prompt param is required; optional overrides: model, llmConnection, permissionMode, thinkingLevel, enabledSourceSlugs, workingDirectory. By default (subscribe=true) this session starts FOLLOWING the new session: every finished turn is posted back here as a message and you are woken. Pass subscribe=false for fire-and-forget work. This call returns as soon as the session starts (status 'started'); end your turn instead of polling.`,
 
+  schedule_followup: `Come back to this conversation later, once. Use it when the person asks to be reminded, or when you promised to check something after a delay — 「20 分钟后提醒我」. The note is for your future self: write what to do and what the person is waiting for. One pending follow-up per conversation; scheduling again replaces the previous one. For anything that should repeat, the person wants a task (which has triggers), not this.`,
   dispatch_task: `Hand one bounded job to a worker and get the result back here. Use this when the person asked for something to be done rather than answered — 「让 B 把报表跑一下」, 「把这份清单整理成表格」. Copy the request in task verbatim: a rewording destroys the boundary the worker needs to know when it is finished. Tell the person the task id you got back, then stop — the worker reports to this channel when it is done. Do NOT use this to do the work yourself, and do NOT use it for a question you can answer directly.`,
   create_task: `User-facing supervisor only: the single door through which a person's words enter the system. Pass the user's request VERBATIM in \`request\` — never summarise or reword it (a relay that paraphrased 「只做 1.1，做完就停」 into a meta-instruction produced a task whose boundary existed nowhere). The system creates the task record and hands the words to the lane that analyses them into scope / directive / plan and dispatches. You do not see that lane and cannot message it. To add to an existing task, pass its taskId — nothing new is created, the words become a follow-up.`,
   task_list: `Supervisor-only: list tasks, newest activity first. Filter by status to find what is still running or waiting on a decision.`,
@@ -544,6 +547,14 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
    * decides which role may see the definition.
    */
   { name: 'dispatch_task', description: TOOL_DESCRIPTIONS.dispatch_task, inputSchema: DispatchTaskSchema, executionMode: 'registry', safeMode: 'block', roles: ['worker'], handler: handleDispatchTask },
+  /**
+   * H4: a worker tool, absent from both supervisor tables.
+   *
+   * The supervisor is a pipe — collect, report, escalate — and its periodic
+   * check-ins come from the system's judge loop, not from a tool it calls on
+   * itself. `SUPERVISOR_TOOL_NAMES` is where that is actually enforced.
+   */
+  { name: 'schedule_followup', description: TOOL_DESCRIPTIONS.schedule_followup, inputSchema: ScheduleFollowupSchema, executionMode: 'registry', safeMode: 'allow', roles: ['worker'], handler: handleScheduleFollowup },
   { name: 'task_list', description: TOOL_DESCRIPTIONS.task_list, inputSchema: TaskListSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskList },
   { name: 'task_get', description: TOOL_DESCRIPTIONS.task_get, inputSchema: TaskGetSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskGet },
   { name: 'task_update', description: TOOL_DESCRIPTIONS.task_update, inputSchema: TaskUpdateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskUpdate },

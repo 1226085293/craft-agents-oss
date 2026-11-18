@@ -70,6 +70,10 @@ export interface AgentToolBindingsDeps {
     title?: string;
     agentId?: string;
   }) => Promise<{ taskId: string; message: string }>;
+  /**
+   * H4: one pending follow-up per session. A second call replaces the first.
+   */
+  scheduleFollowup?: (payload: { minutes: number; note: string }) => Promise<{ at: number; replaced: boolean }>;
   /** Supervisor runtime, for dispatch guards. */
   dispatchViaSupervisor?: (params: {
     target:
@@ -190,5 +194,6 @@ export function buildAgentToolBindings(deps: AgentToolBindingsDeps) {
     /** Absent in lanes that should not have the door; the tool refuses itself then. */
     ...(deps.createTaskFromUser ? { createTaskFromUser: deps.createTaskFromUser } : {}),
     ...(deps.dispatchTask ? { dispatchTask: deps.dispatchTask } : {}),
+    ...(deps.scheduleFollowup ? { scheduleFollowup: deps.scheduleFollowup } : {}),
   };
 }

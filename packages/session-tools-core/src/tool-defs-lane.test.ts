@@ -79,6 +79,14 @@ describe('supervisor lanes', () => {
     const workerTools = new Set(getSessionToolNames({ role: 'worker' }))
     expect(workerTools.has('dispatch_task')).toBe(true)
     expect(workerTools.has('create_task')).toBe(false)
+    /**
+     * H4: the follow-up tool is a worker tool. The supervisor lane's periodic
+     * check-ins are driven by the system's judge loop, not by a tool it calls on
+     * itself, so neither supervisor lane may hold it.
+     */
+    expect(workerTools.has('schedule_followup')).toBe(true)
+    expect(new Set(getSessionToolNames({ role: 'supervisor', supervisorLane: 'user' })).has('schedule_followup')).toBe(false)
+    expect(new Set(getSessionToolNames({ role: 'supervisor', supervisorLane: 'task' })).has('schedule_followup')).toBe(false)
   })
 
   it('narrows the JSON-schema path the Pi proxy defs use', () => {

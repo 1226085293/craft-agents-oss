@@ -604,6 +604,15 @@ export interface SessionToolFilterOptions {
    */
   supervisorLane?: 'user' | 'task';
   /**
+   * The session's permission mode, when it is a channel-attached session.
+   *
+   * H3 (v7): exploration must not be "bash, but read-only" — auditing a
+   * read-only bash is guessing about a shell. The whole write surface is simply
+   * not registered, so there is no filter to get wrong and nothing to bypass.
+   */
+  sessionMode?: 'safe' | 'ask' | 'allow-all';
+
+  /**
    * Tools this particular session may use, from the task it was spawned for.
    *
    * A scope, not a whitelist: it can only narrow what the role already allows,
@@ -734,6 +743,29 @@ export const USER_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 export const USER_LANE_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set(['create_task']);
 
+/**
+ * The write surface this package owns (H3).
+ *
+ * `bash`/`write`/`edit` are not here — they come from the Pi side, and its table
+ * gets the same `sessionMode` rule (the two tables must agree; a session that
+ * loses `create_page` but keeps a shell would be exploring with hands).
+ *
+ * What this set covers is the package's own mutators: pages, memory, templates,
+ * sandboxed scripts. Each of these can change state a person would have to undo,
+ * so exploration does not receive them at all — no read-only variant, no filter
+ * to audit.
+ */
+export const CORE_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'script_sandbox',
+  'create_page',
+  'update_page',
+  'write_page_data',
+  'delete_page',
+  'add_memory',
+  'transform_data',
+  'render_template',
+]);
+
 /** Whether a tool is visible to a supervisor lane. */
 export function isToolVisibleToLane(name: string, lane?: 'user' | 'task'): boolean {
   // Absent lane = the working lane, which keeps the full table. Defaulting the other way
@@ -773,6 +805,15 @@ export function getSessionToolDefs(options?: SessionToolFilterOptions): SessionT
      * quietly delete real capabilities from it.
      */
     if (role === 'supervisor' && !isToolVisibleToLane(def.name, options?.supervisorLane)) return false;
+
+    /**
+     * H3: exploration and asking never receive hands.
+     *
+     * `safe` (探索) drops the core write tools entirely; `ask` keeps them but they
+     * go through the confirmation gate. Removal — not a read-only whitelist — is
+     * the point: a whitelist on a shell is a policy the shell does not enforce.
+     */
+    if (options?.sessionMode === 'safe' && CORE_WRITE_TOOL_NAMES.has(def.name)) return false;
 
     // The session scope narrows the role, and only narrows: an entry here can
     // never re-enable something the role above denied.

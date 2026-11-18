@@ -11,6 +11,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   getSessionToolNames,
   getToolDefsAsJsonSchema,
+  CORE_WRITE_TOOL_NAMES,
   isToolVisibleToLane,
   SUPERVISOR_TOOL_NAMES,
   USER_LANE_DENIED_TOOL_NAMES,
@@ -156,5 +157,45 @@ describe('supervisor lanes', () => {
      */
     expect(plain.has('create_task')).toBe(false)
     expect(withLane.has('create_task')).toBe(false)
+  })
+})
+
+/**
+ * H3 (v7): exploration never receives hands.
+ *
+ * The rejected alternative was a read-only bash whitelist. It is rejected because
+ * a whitelist on a shell is a policy the shell does not enforce — the audit is a
+ * guess about which commands are harmless. Removing the tools entirely means
+ * there is no filter to get wrong.
+ */
+describe('session mode narrows the tool table (H3)', () => {
+  it('drops every mutator this package owns in exploration', () => {
+    const tools = new Set(getSessionToolNames({ role: 'worker', sessionMode: 'safe' }))
+    for (const name of CORE_WRITE_TOOL_NAMES) {
+      expect(tools.has(name)).toBe(false)
+    }
+    // Reads survive: exploration is for looking.
+    for (const name of ['list_pages', 'get_page', 'list_events', 'query_memories']) {
+      expect(tools.has(name)).toBe(true)
+    }
+  })
+
+  it('keeps them in asking (the gate, not the removal, is the control there)', () => {
+    const tools = new Set(getSessionToolNames({ role: 'worker', sessionMode: 'ask' }))
+    for (const name of CORE_WRITE_TOOL_NAMES) {
+      expect(tools.has(name)).toBe(true)
+    }
+  })
+
+  it('keeps them in execution', () => {
+    const tools = new Set(getSessionToolNames({ role: 'worker', sessionMode: 'allow-all' }))
+    for (const name of CORE_WRITE_TOOL_NAMES) {
+      expect(tools.has(name)).toBe(true)
+    }
+  })
+
+  it('never widens: a mode cannot grant what the role already denied', () => {
+    const supervisorTools = new Set(getSessionToolNames({ role: 'supervisor', sessionMode: 'allow-all' }))
+    expect(supervisorTools.has('bash')).toBe(false)
   })
 })

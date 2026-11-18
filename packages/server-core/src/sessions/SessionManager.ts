@@ -1597,6 +1597,14 @@ export interface ManagedSession {
   hasUnread?: boolean
   // User-owned source picker state persisted to session metadata.
   enabledSourceSlugs?: string[]
+  /**
+   * Permission mode the tool table was built from (H3), frozen at creation.
+   *
+   * Distinct from `permissionMode`, which can tighten at runtime: this one only
+   * decides which tools exist, and must not change while the prompt describes
+   * them.
+   */
+  sessionMode?: 'safe' | 'ask' | 'allow-all'
   /** 选择器模式：auto（默认）= 已授权源中 Agent 自主；only = 仅这些；exclude = 排除这些 */
   sourceScope?: 'auto' | 'only' | 'exclude'
   /** Source slugs currently applied to the live agent and connection pool. */
@@ -5414,6 +5422,14 @@ export class SessionManager implements ISessionManager {
       // Resolved once, held for the session's life: the tool table must not move
       // under the model mid-conversation.
       ...(options?.toolScope ? { toolScope: options.toolScope } : {}),
+      /**
+       * H3: the mode the table was built from, frozen here.
+       *
+       * Only the create-time mode matters — tightening later changes the runtime
+       * gate, not the set of tools the prompt already described. Recording it
+       * lets the Pi backend build a table that matches.
+       */
+      sessionMode: defaultPermissionMode,
     })
 
     // Eagerly load messages for branched sessions so the renderer gets the full
@@ -6069,6 +6085,8 @@ export class SessionManager implements ISessionManager {
          * against that lane's rules.
          */
         ...(managed.supervisorLane ? { supervisorLane: managed.supervisorLane } : {}),
+        // H3: the mode the tool table is built from (frozen at creation).
+        ...(managed.sessionMode ? { sessionMode: managed.sessionMode } : {}),
         taskId: managed.taskId,
         ...(managed.taskScope ? { taskScope: managed.taskScope } : {}),
         ...(managed.toolScope ? { toolScope: managed.toolScope } : {}),

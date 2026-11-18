@@ -1508,6 +1508,10 @@ export class PiAgent extends BaseAgent {
       // The lane decides what a supervisor may do: the user-facing one neither dispatches
       // nor edits plans, so it must not be handed either.
       this.config.session?.supervisorLane,
+      // H3: exploration receives no mutators at all. Frozen at creation like the
+      // scope above — a tool table that changed mid-session would contradict the
+      // prompt the model is already reasoning with.
+      this.config.session?.sessionMode,
     );
 
     // Hide `browser_tool` when the user has disabled the built-in browser

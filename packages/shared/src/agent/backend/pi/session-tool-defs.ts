@@ -51,12 +51,22 @@ export function getSessionToolProxyDefs(
    * not to. Neither is the job.
    */
   supervisorLane?: 'user' | 'task',
+  /**
+   * The session's permission mode (H3).
+   *
+   * Exploration must not receive the package's mutators, and this table is where
+   * that happens for the Pi backend. Passed rather than inferred so the caller
+   * has one place to decide the mode — inferring it here would silently keep the
+   * old table for every caller that forgot.
+   */
+  sessionMode?: 'safe' | 'ask' | 'allow-all',
 ): SessionToolProxyDef[] {
   const defs = getToolDefsAsJsonSchema({
     prefix: 'mcp__session__',
     includeDeveloperFeedback: FEATURE_FLAGS.developerFeedback,
     ...(role ? { role } : {}),
     ...(supervisorLane ? { supervisorLane } : {}),
+    ...(sessionMode ? { sessionMode } : {}),
     ...(scope?.allow ? { allowedTools: scope.allow } : {}),
     ...(scope?.deny ? { deniedTools: scope.deny } : {}),
   });

@@ -179,6 +179,15 @@ export interface SessionConfig {
    * sees cannot change mid-conversation.
    */
   toolScope?: { allow?: string[]; deny?: string[] };
+  /**
+   * Permission mode this session was created with (H3).
+   *
+   * Exploration must not receive the mutating tools at all, so the table is
+   * built from this at creation and then held — same rule as `toolScope`, and
+   * for the same reason: the tools must not change under a prompt that already
+   * describes them.
+   */
+  sessionMode?: 'safe' | 'ask' | 'allow-all';
   /** Delegation depth: supervisor 0 → worker 1 → sub-worker 2 (hard cap). */
   spawnDepth?: number;
   /** 数据源选择器模式：auto（默认）/ only（仅这些）/ exclude（排除这些） */

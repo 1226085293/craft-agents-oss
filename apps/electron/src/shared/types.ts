@@ -569,6 +569,18 @@ export interface ElectronAPI {
   tasksUpdate(workspaceId: string, id: string, status: string): Promise<unknown>
   tasksRun(workspaceId: string, id: string): Promise<{ started: boolean; reason?: string }>
   tasksDelete(workspaceId: string, id: string): Promise<{ ok: boolean; reason?: string }>
+  /**
+   * Answer an open question (decision card) — on a task when one exists, otherwise on the
+   * session that asked. Implemented since the decision-card work but missing from this
+   * interface; the channel-map parity guard (compile-time) caught the drift.
+   */
+  tasksAnswer(
+    workspaceId: string,
+    taskId: string,
+    text: string,
+    askedBySessionId?: string,
+    decisionId?: string,
+  ): Promise<{ accepted: boolean; reason?: string }>
   tasksUpdateTrigger(workspaceId: string, id: string, trigger: unknown): Promise<unknown>
   tasksHandoff(
     workspaceId: string,

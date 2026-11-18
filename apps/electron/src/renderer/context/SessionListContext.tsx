@@ -32,6 +32,8 @@ export interface SessionListContextValue {
   activeChatMatchInfo?: { sessionId: string | null; count: number; isHighlighting?: boolean }
   /** Whether a session currently has a pending permission/admin prompt */
   hasPendingPrompt?: (sessionId: string) => boolean
+  /** Start a new session from the list (rendered by the same row affordances as the shell). */
+  onNewSession?: () => void
 }
 
 const SessionListContext = createContext<SessionListContextValue | null>(null)

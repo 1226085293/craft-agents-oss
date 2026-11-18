@@ -129,3 +129,28 @@ describe('McpClientPool.getProxyToolSlugs', () => {
     expect(pool.getProxyToolSlugs().size).toBe(0);
   });
 });
+
+describe('McpClientPool.getProxyToolAnnotations (hole-2 layer 1)', () => {
+  class AnnotationsPool extends McpClientPool {
+    override async connect(slug: string, config: SdkMcpServerConfig): Promise<void> {
+      const fake: PoolClient = {
+        listTools: async () => [
+          { name: 'get_report', description: 'd', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
+          { name: 'do_mutation', description: 'd', inputSchema: { type: 'object' } },
+        ],
+        callTool: async () => ({ content: [] }),
+        close: async () => {},
+      };
+      await this.registerClient(slug, fake);
+      this.activeConfigs.set(slug, config);
+    }
+  }
+
+  test('exposes readOnlyHint keyed by proxy name; tools without annotations are absent', async () => {
+    const pool = new AnnotationsPool();
+    await pool.connect('crm', httpConfig('a'));
+    expect(pool.getProxyToolAnnotations()).toEqual({
+      'mcp__crm__get_report': { readOnlyHint: true },
+    });
+  });
+});

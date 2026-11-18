@@ -577,6 +577,24 @@ export class McpClientPool {
     return map;
   }
 
+  /**
+   * Hole-2 layer 1: the tools' own annotations (MCP spec `annotations`), keyed
+   * by proxy name. Only entries that actually carry annotations are reported —
+   * the consumers apply the three-layer rule (readOnlyHint > source read-only
+   * switch > conservative write) and treat absence as "no declaration".
+   */
+  getProxyToolAnnotations(): Record<string, { readOnlyHint?: boolean }> {
+    const out: Record<string, { readOnlyHint?: boolean }> = {};
+    for (const [slug, tools] of this.toolCache) {
+      for (const tool of tools) {
+        const annotations = (tool as { annotations?: { readOnlyHint?: boolean } }).annotations;
+        if (!annotations) continue;
+        out[proxyToolName(slug, tool.name)] = { readOnlyHint: annotations.readOnlyHint };
+      }
+    }
+    return out;
+  }
+
   // ============================================================
   // Tool Execution
   // ============================================================

@@ -13,6 +13,7 @@
  */
 
 import { isApiEndpointAllowed, shouldAllowToolInMode } from './mode-manager.ts';
+import { resolveMcpToolEffect } from '../events/action-effects.ts';
 import type { PermissionsContext } from './permissions-config.ts';
 import type {
   FolderSourceConfig,
@@ -59,8 +60,26 @@ export function evaluateApiEndpointPolicy(
 export function evaluateMcpToolPolicy(
   proxyToolName: string,
   input: Record<string, unknown>,
-  options?: { plansFolderPath?: string },
+  options?: {
+    plansFolderPath?: string;
+    /** 洞 2 层 1：MCP 工具自带 annotations（代理名 → readOnlyHint） */
+    mcpToolAnnotations?: Record<string, { readOnlyHint?: boolean }>;
+    /** 洞 2 层 2：该工具所属源的只读开关 */
+    sourceReadOnly?: boolean;
+  },
 ): SourceActionPolicyDecision {
+  // Hole-2 three-layer rule (v7): an explicit read declaration (the tool's own
+  // readOnlyHint, or the source's manual read-only switch) settles the effect
+  // before the conservative name-pattern oracle — callers that don't supply
+  // declarations get exactly the pre-existing behavior.
+  const effect = resolveMcpToolEffect(
+    options?.mcpToolAnnotations?.[proxyToolName],
+    options?.sourceReadOnly,
+  );
+  if (effect === 'read') {
+    return { decision: 'allow', reason: 'read-only' };
+  }
+
   const safeModeResult = shouldAllowToolInMode(proxyToolName, input, 'safe', {
     plansFolderPath: options?.plansFolderPath,
   });

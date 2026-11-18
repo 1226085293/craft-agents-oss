@@ -1138,6 +1138,13 @@ export class PiAgent extends BaseAgent {
   private sessionToolDefsForLayering: ToolDefLike[] = [];
 
   /**
+   * Hole-2 layer 1: MCP tools' own annotations (proxy name → readOnlyHint),
+   * refreshed on every pool source sync (registerPoolToolsWithSubprocess),
+   * passed into the pre-tool pipeline and the layered-dispatch re-check.
+   */
+  private mcpToolAnnotations: Record<string, { readOnlyHint?: boolean }> = {};
+
+  /**
    * Stable protocol hint injected in layered mode (never varies per turn)
    * so the prompt cache prefix stays intact (issue #862).
    */
@@ -1653,6 +1660,7 @@ export class PiAgent extends BaseAgent {
     if (!this.mcpPool) return;
     const proxyDefs = this.mcpPool.getProxyToolDefs();
     const slugByProxy = this.mcpPool.getProxyToolSlugs();
+    this.mcpToolAnnotations = this.mcpPool.getProxyToolAnnotations();
 
     const tl = this.toolLayering;
     if (!tl || tl.mode === 'flat') {
@@ -2543,8 +2551,10 @@ export class PiAgent extends BaseAgent {
             sourceToolPolicies: s.config.sourceToolPolicies,
             name: s.config.name,
             tagline: s.config.tagline,
+            readOnly: s.config.readOnly,
           }]),
       ),
+      mcpToolAnnotations: this.mcpToolAnnotations,
       sourceSessionDeny: this.getSourceSessionDeny(),
       permissionManager: this.permissionManager,
       prerequisiteManager: this.prerequisiteManager,
@@ -3166,6 +3176,12 @@ export class PiAgent extends BaseAgent {
       // Permission re-check against the REAL target tool (spec §6): the
       // subprocess only saw call_tool in pre_tool_use, so evaluate the target's
       // own policy here to keep Explore/ask semantics identical to flat mode.
+      const sourceReadOnlySlugs: Record<string, boolean> = Object.fromEntries(
+        this.sourceManager
+          .getAllSources()
+          .filter(s => s.config.enabled && s.config.readOnly === true)
+          .map(s => [s.config.slug, true]),
+      );
       const targetCheck = shouldAllowToolInMode(
         entry.fullName,
         callArgs,
@@ -3173,6 +3189,8 @@ export class PiAgent extends BaseAgent {
         {
           plansFolderPath: getSessionPlansPath(this.config.workspace.rootPath, this._sessionId),
           dataFolderPath: getSessionDataPath(this.config.workspace.rootPath, this._sessionId),
+          mcpToolAnnotations: this.mcpToolAnnotations,
+          sourceReadOnlySlugs,
         },
       );
       if (!targetCheck.allowed) {

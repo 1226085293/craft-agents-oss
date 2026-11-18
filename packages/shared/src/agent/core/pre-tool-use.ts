@@ -56,7 +56,7 @@ import type { FolderSourceConfig } from '../../sources/types.ts';
 /** 源授权策略摘要（运行时裁决所需字段的子集） */
 export type SourcePolicyConfigSummary = Pick<
   FolderSourceConfig,
-  'grantedPermissions' | 'riskLevel' | 'sourcePolicy' | 'sourceToolPolicies' | 'name' | 'tagline'
+  'grantedPermissions' | 'riskLevel' | 'sourcePolicy' | 'sourceToolPolicies' | 'name' | 'tagline' | 'readOnly'
 >;
 import { permissionsConfigCache, type PermissionsContext } from '../permissions-config.ts';
 import type { PrerequisiteCheckResult } from './prerequisite-manager.ts';
@@ -655,6 +655,8 @@ export interface PreToolUseInput {
   authorizedSourceSlugs?: string[];
   /** 源配置摘要（授权字段），用于 grantedPermissions/riskLevel/sourcePolicy/sourceToolPolicies 裁定 */
   sourceConfigs?: Record<string, SourcePolicyConfigSummary>;
+  /** 洞 2 层 1：MCP 工具自带 annotations（代理名 → readOnlyHint），来自 pool 缓存的工具清单 */
+  mcpToolAnnotations?: Record<string, { readOnlyHint?: boolean }>;
   /** 本会话被禁止（deny-session）的工具名列表 */
   sourceSessionDeny?: string[];
   /** PermissionManager for session-scoped whitelists */
@@ -739,6 +741,7 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
     authorizedSourceSlugs,
     sourceConfigs,
     sourceSessionDeny,
+    mcpToolAnnotations,
     permissionManager,
     prerequisiteManager,
     backendMetadata,
@@ -769,11 +772,21 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
   // ============================================================
   // 1. PERMISSION MODE CHECK
   // ============================================================
+  // 洞 2 三层规则（safe/explore 闸门的读判定）：层 1 工具 annotations /
+  // 层 2 源只读开关，由调用方（agent）从 pool 缓存与源配置带进来。
+  const sourceReadOnlySlugs: Record<string, boolean> | undefined = sourceConfigs
+    ? Object.fromEntries(
+        Object.entries(sourceConfigs)
+          .filter(([, cfg]) => cfg.readOnly === true)
+          .map(([slug]) => [slug, true]),
+      )
+    : undefined;
+
   const modeResult = shouldAllowToolInMode(
     toolName,
     input,
     effectivePermissionMode,
-    { plansFolderPath, dataFolderPath, permissionsContext }
+    { plansFolderPath, dataFolderPath, permissionsContext, mcpToolAnnotations, sourceReadOnlySlugs }
   );
 
   if (!modeResult.allowed) {
@@ -934,7 +947,7 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
       permissionsContext,
       plansFolderPath,
       onDebug,
-      { sourceConfigs, sourceSessionDeny },
+      { sourceConfigs, sourceSessionDeny, mcpToolAnnotations },
     );
     if (promptInfo) {
       const adminWrappedInput =
@@ -1117,6 +1130,8 @@ export function shouldPromptInAskMode(
   sourceAccessCtx?: {
     sourceConfigs?: Record<string, SourcePolicyConfigSummary>;
     sourceSessionDeny?: string[];
+    /** 洞 2 层 1：MCP 工具 annotations（代理名 → readOnlyHint） */
+    mcpToolAnnotations?: Record<string, { readOnlyHint?: boolean }>;
   },
 ): PromptInfo | null {
   const evaluateSourceAccess = (): ReturnType<typeof evaluateSourceToolAccess> | null => {
@@ -1189,8 +1204,18 @@ export function shouldPromptInAskMode(
 
   // --- MCP mutations (with authorization/autonomy decision) ---
   if (toolName.startsWith('mcp__')) {
-    // Freestanding policy: blocked-in-safe-mode = mutation (shared with the Pages action bridge)
-    const policy = evaluateMcpToolPolicy(toolName, input, { plansFolderPath });
+    // Freestanding policy: blocked-in-safe-mode = mutation (shared with the Pages action bridge).
+    // Hole-2 layers: the tool's own readOnlyHint (层 1) or the source's manual read-only
+    // switch (层 2) classify the call as read → ask mode skips the confirmation.
+    const parsedMcpSource = parseSourceSlugFromTool(toolName);
+    const mcpSourceReadOnly = parsedMcpSource
+      ? sourceAccessCtx?.sourceConfigs?.[parsedMcpSource.slug]?.readOnly
+      : undefined;
+    const policy = evaluateMcpToolPolicy(toolName, input, {
+      plansFolderPath,
+      mcpToolAnnotations: sourceAccessCtx?.mcpToolAnnotations,
+      sourceReadOnly: mcpSourceReadOnly,
+    });
     if (policy.decision === 'allow') {
       // Read-only MCP tool — no prompt needed
       return null;

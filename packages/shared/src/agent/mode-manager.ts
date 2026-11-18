@@ -34,6 +34,7 @@ import {
   type PowerShellValidationResult,
   type PowerShellValidationReason,
 } from './powershell-validator.ts';
+import { resolveMcpToolEffect } from '../events/action-effects.ts';
 import {
   type PermissionMode,
   type ModeConfig,
@@ -1867,6 +1868,10 @@ export function shouldAllowToolInMode(
     plansFolderPath?: string;
     dataFolderPath?: string;
     permissionsContext?: PermissionsContext;
+    /** 洞 2 层 1：MCP 工具自带 annotations（代理名 → readOnlyHint），来自 pool 缓存 */
+    mcpToolAnnotations?: Record<string, { readOnlyHint?: boolean }>;
+    /** 洞 2 层 2：源级只读开关（slug → 开关开），配置源的人最懂其性质 */
+    sourceReadOnlySlugs?: Record<string, boolean>;
   }
 ): ToolCheckResult {
   // Get config: merged custom if context provided, otherwise defaults
@@ -2105,6 +2110,22 @@ export function shouldAllowToolInMode(
         allowed: false,
         reason: `API ${method} ${path ?? ''} is blocked in ${config.displayName}. Switch to Ask or Allow All mode (${config.shortcutHint}) to make changes.`
       };
+    }
+
+    // Hole-2 three-layer rule (v7): explicit declarations beat the name-pattern
+    // oracle. Layer 1 = the tool's own readOnlyHint (tool author's word), layer 2
+    // = the source's manual read-only switch (configurer's word); both classify
+    // the call as read even when the pattern oracle (conservative by design)
+    // would miss it. No declaration → falls through to the oracle below.
+    {
+      const slug = toolName.split('__')[1];
+      const effect = resolveMcpToolEffect(
+        options?.mcpToolAnnotations?.[toolName],
+        slug ? options?.sourceReadOnlySlugs?.[slug] : undefined,
+      );
+      if (effect === 'read') {
+        return { allowed: true };
+      }
     }
 
     if (isReadOnlyMcpToolWithConfig(toolName, config)) {

@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'bun:test';
 
-import { filterActionsByMode, isEffectOffered, needsConfirmation } from './action-effects.ts';
+import { deniedActionsForMode, filterActionsByMode, isEffectOffered, needsConfirmation, resolveMcpToolEffect } from './action-effects.ts';
 import { resolveActionEffect } from './manifest.ts';
 
 const action = (name: string, extra: Record<string, unknown> = {}) => ({ name, ...extra });
@@ -62,5 +62,47 @@ describe('H2 mode → effect table', () => {
     expect(needsConfirmation('ask', 'read')).toBe(false);
     expect(needsConfirmation('safe', 'write')).toBe(false);
     expect(needsConfirmation('allow-all', 'write')).toBe(false);
+  });
+});
+
+describe('deniedActionsForMode (H2 production consumer)', () => {
+  const actions = [
+    action('read_messages', { effect: 'read' }),
+    action('reply', { repliesToOrigin: true }),
+    action('post_report', { effect: 'write' }),
+    action('send_message'), // no effect declared → conservative write
+  ];
+
+  it('safe mode denies exactly the write-effect actions (explicit or defaulted)', () => {
+    expect(deniedActionsForMode(actions as never, 'safe')).toEqual(['post_report', 'send_message']);
+  });
+
+  it('ask and allow-all deny nothing — the confirmation gate, not the offer, is their control', () => {
+    expect(deniedActionsForMode(actions as never, 'ask')).toEqual([]);
+    expect(deniedActionsForMode(actions as never, 'allow-all')).toEqual([]);
+  });
+
+  it('an empty action list denies nothing', () => {
+    expect(deniedActionsForMode([], 'safe')).toEqual([]);
+  });
+});
+
+describe('resolveMcpToolEffect (hole 2, three layers)', () => {
+  it('layer 1: the tool\'s own readOnlyHint wins', () => {
+    expect(resolveMcpToolEffect({ readOnlyHint: true }, true)).toBe('read');
+  });
+
+  it('layer 2: the source\'s read-only switch classifies its tools as read', () => {
+    expect(resolveMcpToolEffect(undefined, true)).toBe('read');
+  });
+
+  it('layer 3: nothing declared, nothing switched — conservative write', () => {
+    expect(resolveMcpToolEffect(undefined, undefined)).toBe('write');
+    expect(resolveMcpToolEffect({ readOnlyHint: false }, false)).toBe('write');
+  });
+
+  it('a false readOnlyHint never upgrades to read', () => {
+    expect(resolveMcpToolEffect({ readOnlyHint: false }, true)).toBe('read'); // layer 2 still decides
+    expect(resolveMcpToolEffect({ readOnlyHint: false })).toBe('write');
   });
 });

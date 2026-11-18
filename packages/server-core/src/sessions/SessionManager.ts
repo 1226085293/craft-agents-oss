@@ -42,6 +42,7 @@ import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
 import { assemblePluginTools } from '@craft-agent/shared/events/plugin-tools'
+import { deniedActionsForMode } from '@craft-agent/shared/events/action-effects.ts'
 import { isPermissionModeStricter, type WakePermissionSpec } from '@craft-agent/shared/events/permissions'
 import { recordOutboxCall } from '@craft-agent/shared/events/outbox.ts'
 
@@ -6039,19 +6040,29 @@ export class SessionManager implements ISessionManager {
       // rather than an error.
       let pluginTools: ReturnType<typeof assemblePluginTools> = []
       try {
-        pluginTools = assemblePluginTools(
-          loadListeners({
-            workspaceRoot: managed.workspace.rootPath,
-            catalogDirs: pluginCatalogDirs(),
-            skipProbes: true,
-          }).map((entry) => ({
-            id: entry.id,
-            enabled: entry.enabled,
-            installed: entry.source === 'workspace',
-            actions: entry.manifest.actions ?? [],
-          })),
-          managed.toolScope ?? {},
+        const listenerSources = loadListeners({
+          workspaceRoot: managed.workspace.rootPath,
+          catalogDirs: pluginCatalogDirs(),
+          skipProbes: true,
+        }).map((entry) => ({
+          id: entry.id,
+          enabled: entry.enabled,
+          installed: entry.source === 'workspace',
+          actions: entry.manifest.actions ?? [],
+        }))
+        // H2 offer table, wired: the mode is frozen into the tool table at
+        // creation (same discipline as toolScope). Exploration offers read +
+        // reply only, so write-effect actions are denied here, not at call
+        // time. `?? 'ask'` mirrors the restore-path default (no deny).
+        const scope = managed.toolScope ?? {}
+        const modeDeny = deniedActionsForMode(
+          listenerSources.flatMap((source) => source.actions),
+          managed.permissionMode ?? 'ask',
         )
+        pluginTools = assemblePluginTools(listenerSources, {
+          ...scope,
+          ...(modeDeny.length ? { deny: [...(scope.deny ?? []), ...modeDeny] } : {}),
+        })
       } catch (error) {
         sessionLog.warn('plugin tool assembly failed', { sessionId: managed.id, error })
       }

@@ -60,3 +60,41 @@ export function filterActionsByMode<T extends Pick<PluginAction, 'effect' | 'rep
 export function needsConfirmation(mode: SessionMode, effect: ActionEffect): boolean {
   return mode === 'ask' && effect === 'write';
 }
+
+/**
+ * The action names this mode must NOT offer (H2 rule 1: 探索 = read + reply
+ * only). Composed with the channel-gate deny list at the assembly site, so
+ * the offer table is frozen at session creation exactly like toolScope.
+ *
+ * This is the production consumer of the compile table: before it the table
+ * was a pure decision module with no caller — the same shape the judge
+ * module had before its wiring landed.
+ */
+export function deniedActionsForMode(
+  actions: readonly Pick<PluginAction, 'name' | 'effect' | 'repliesToOrigin'>[],
+  mode: SessionMode,
+): string[] {
+  if (mode !== 'safe') return [];
+  return actions
+    .filter((action) => resolveActionEffect(action) === 'write')
+    .map((action) => action.name);
+}
+
+/**
+ * Hole 2: resolve an MCP tool's effect class. MCP tools are discovered
+ * dynamically and carry no manifest, so the three-layer rule decided in v7:
+ *
+ * 1. the tool's own `annotations.readOnlyHint` (MCP spec field),
+ * 2. the source's manual read-only switch (the person configuring a source
+ *    knows its nature best),
+ * 3. unclassified = **write** (conservative: an unknown tool that mutates
+ *    state is the one worth a confirmation).
+ */
+export function resolveMcpToolEffect(
+  annotations: { readOnlyHint?: boolean } | undefined,
+  sourceReadOnly?: boolean,
+): ActionEffect {
+  if (annotations?.readOnlyHint === true) return 'read';
+  if (sourceReadOnly) return 'read';
+  return 'write';
+}

@@ -2,10 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import {
   BUILTIN_PRIVATE_LABEL,
   addPermissionLabel,
   canDeletePermissionLabel,
+  computeWakeNarrowing,
   gateSourceSlugs,
   loadPermissionLabels,
   resolveChannelPermission,
@@ -172,5 +174,76 @@ describe('pairings v2（v1 老文件零回归 + 身份快照）', () => {
     const record = loadPairings(root).channels.find((entry) => entry.channelKey === G);
     expect(record?.pairedBy).toBe('U1');
     expect(record?.channelKind).toBe('group');
+  });
+
+  it('钉 2：首写升 v2 —— 老记录字段保持「不存在」（不补默认值、不写 null）', () => {
+    writeFileSync(
+      join(root, 'config', 'pairings.json'),
+      JSON.stringify({ version: 1, codes: [], channels: [{ channelKey: G, pairedAt: 1700000000000 }] }),
+    );
+    markChannelPaired(root, P, 2); // 触发一次 save
+    const raw = JSON.parse(readFileSync(join(root, 'config', 'pairings.json'), 'utf8')) as {
+      version: number;
+      channels: Array<Record<string, unknown>>;
+    };
+    expect(raw.version).toBe(2);
+    const legacy = raw.channels.find((entry) => entry.channelKey === G);
+    expect(legacy).toBeDefined();
+    for (const key of ['permissionMode', 'allowedLabels', 'gateEnabled', 'agentId', 'pairedBy']) {
+      expect(legacy).not.toHaveProperty(key);
+    }
+    // 再读一次：老记录仍是闸关
+    expect(resolveChannelPermission(loadPairings(root).channels, G).gateEnabled).toBe(false);
+  });
+});
+
+describe('computeWakeNarrowing（钉 3 唤醒边界）', () => {
+  const labels = new Map<string, string[]>([
+    ['s1', ['company']],
+    ['s2', ['private']],
+    ['s3', []], // 没打标 → 自动 private
+  ]);
+  const baseline = ['s1', 's2', 's3'];
+
+  it('本批无开闸渠道 → 回落基线（undefined + null）', () => {
+    const records = [rec({ channelKey: G, pairedAt: 1 })]; // 老记录 = 闸关
+    expect(computeWakeNarrowing(records, [{ channelKey: G, senderId: 'S' }], baseline, labels)).toEqual({
+      enabledSourceSlugs: undefined,
+      permissionMode: null,
+    });
+  });
+
+  it('单渠道开闸 → 从基线取交集 + 天花板', () => {
+    const records = [rec({ channelKey: G, gateEnabled: true, allowedLabels: ['company'], permissionMode: 'safe' })];
+    const spec = computeWakeNarrowing(records, [{ channelKey: G, senderId: 'OTHER' }], baseline, labels);
+    expect(spec.enabledSourceSlugs).toEqual(['s1']);
+    expect(spec.permissionMode).toBe('safe');
+  });
+
+  it('开闸 + 0 标签 → 全禁（[]，不是 undefined）', () => {
+    const records = [rec({ channelKey: G, gateEnabled: true, allowedLabels: [] })];
+    expect(computeWakeNarrowing(records, [{ channelKey: G }], baseline, labels).enabledSourceSlugs).toEqual([]);
+  });
+
+  it('一批两个渠道 → 交集 + 最严天花板', () => {
+    const G2 = 'message://telegram/-999';
+    const records = [
+      rec({ channelKey: G, gateEnabled: true, allowedLabels: ['company', 'private'] }),
+      rec({ channelKey: G2, gateEnabled: true, allowedLabels: ['private'], permissionMode: 'ask' }),
+    ];
+    const spec = computeWakeNarrowing(records, [{ channelKey: G }, { channelKey: G2 }], baseline, labels);
+    // G 放行 ['company','private'] → s1,s2,s3（s3 无标签=私有）全过；G2 只放行 ['private'] → s2,s3
+    expect(spec.enabledSourceSlugs).toEqual(['s2', 's3']);
+    expect(spec.permissionMode).toBe('ask');
+  });
+
+  it('D5：配对成员的个人域标签在唤醒时并入', () => {
+    const records = [
+      rec({ channelKey: G, gateEnabled: true, allowedLabels: ['public'] }),
+      rec({ channelKey: P, pairedBy: 'S', channelKind: 'private' }),
+    ];
+    const spec = computeWakeNarrowing(records, [{ channelKey: G, senderId: 'S' }], baseline, labels);
+    // 有效放行 = ['public','private'] → s2/s3（private）过
+    expect(spec.enabledSourceSlugs).toEqual(['s2', 's3']);
   });
 });

@@ -44,6 +44,9 @@ export function registerSourcesHandlers(server: RpcServer, deps: HandlerDeps): v
       mcp: config.mcp,
       api: config.api,
       local: config.local,
+      // 渠道闸门（v6/v7 修 1）：三种源（MCP/API/文件夹）共用顶层字段，创建即可打标
+      ...(config.labels?.length ? { labels: config.labels } : {}),
+      ...(config.readOnly !== undefined ? { readOnly: config.readOnly } : {}),
     })
   })
 

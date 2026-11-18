@@ -29,6 +29,11 @@ import { loadRoutes, matchRoute, formatRouteInstruction, formatRouteRuleIssue, r
 import { readAgentRoster } from '@craft-agent/shared/agents';
 import { isRecurring, isTerminal, resumeDecisionFor } from '@craft-agent/shared/tasks';
 import { DispatchQueue } from './dispatch-queue.ts';
+import { deriveThreadKey } from '@craft-agent/shared/events/thread-bindings.ts';
+import { loadPairings } from '@craft-agent/shared/events/pairings.ts';
+import { computeWakeNarrowing, sourceLabelSet, type WakePermissionSpec } from '@craft-agent/shared/events/permissions.ts';
+import { getEnabledSources } from '@craft-agent/shared/sources';
+import type { BacklogEventItem } from '@craft-agent/shared/agents/supervisor';
 
 const log = createLogger('supervisor');
 
@@ -81,8 +86,14 @@ export interface SupervisorSessionInfo {
 
 export interface SupervisorRuntimeDeps {
   workspaceRoot: string;
-  /** Find or lazily create the workspace's on-duty supervisor for a lane. */
-  ensureSupervisorSession: (lane?: 'user' | 'task') => Promise<SupervisorSessionInfo | null>;
+  /** Find or lazily create the workspace's on-duty supervisor for a lane. `wakeSpec` (钉 3) applies the wake-boundary permission narrowing on the CREATE path. */
+  ensureSupervisorSession: (lane?: 'user' | 'task', wakeSpec?: WakePermissionSpec) => Promise<SupervisorSessionInfo | null>;
+  /**
+   * Wake-boundary permission recompute (钉 3, slice B): apply the current
+   * channel-gate narrowing + mode ceiling to the running lane session when a
+   * channel event wakes it. Absent in hosts without channel pairing.
+   */
+  applyWakePermission?: (sessionId: string, spec: WakePermissionSpec) => void;
   getSession: (sessionId: string) => SupervisorSessionInfo | null;
   /** Create a worker session and start it with `instruction`. Refused when the task's run lock is held (serial mode: one live run per task). */
   spawnWorker: (params: {
@@ -271,6 +282,7 @@ export class SupervisorRuntime {
     title: string;
     summary?: string;
     links?: Array<{ rel?: string; url: string }>;
+    meta?: Record<string, string>;
   }): Promise<'routed' | 'queued'> {
     const rules = loadRoutes(this.deps.workspaceRoot);
     const decision = matchRoute(
@@ -372,9 +384,15 @@ export class SupervisorRuntime {
     // A conversation event is the user talking — the user lane owns the dialogue
     // (and can escalate to a task); an environment event is the task lane's.
     const lane = this.laneForEvent(event);
+    // Slice B (v7 钉 3): carry the channel-gate context into the backlog so the
+    // drain can recompute the wake-boundary narrowing without re-reading the
+    // event store. Non-message events push no channel info → permissions stay.
+    const channelKey = deriveThreadKey(event.links);
     this.backlogFor(lane).push({
       id: event.id,
       summary: `${event.source}/${event.type}: ${event.title}`,
+      ...(channelKey ? { channelKey } : {}),
+      ...(event.meta?.senderId ? { senderId: event.meta.senderId } : {}),
     });
     await this.drainToSupervisor(lane);
     return 'queued';
@@ -406,15 +424,28 @@ export class SupervisorRuntime {
     const backlog = this.backlogFor(lane);
     if (backlog.size === 0) return;
 
-    const supervisor = await this.ensureSupervisor(lane);
+    const items = backlog.drain();
+    // 钉 3 (slice B): recompute the channel-gate narrowing at the wake boundary
+    // from the CURRENT config. A batch with no channel events (pure desktop /
+    // ambient wake) leaves permissions untouched.
+    const spec = items.some((item) => item.channelKey !== undefined)
+      ? this.computeWakePermission(items)
+      : null;
+    const supervisor = await this.ensureSupervisor(lane, spec ?? undefined);
     if (!supervisor) {
+      for (const item of items) backlog.push(item);
       log.warn(`[supervisor] no ${lane}-lane supervisor session available; events stay queued`);
       return;
     }
     // Busy supervisor: keep the backlog; it will be drained on its next turn.
-    if (supervisor.isProcessing) return;
-
-    const items = backlog.drain();
+    // (The spec is recomputed on the next drain, so deferring costs nothing.)
+    if (supervisor.isProcessing) {
+      for (const item of items) backlog.push(item);
+      return;
+    }
+    // The create path already took the spec; the reuse path (an existing
+    // on-duty session) gets it here — the call is idempotent and equality-guarded.
+    if (spec) this.deps.applyWakePermission?.(supervisor.id, spec);
     await this.deps.sendToSession(supervisor.id, formatBacklogNudge(items));
     // Claim each conversation the backlog carried, so the next message in the
     // same channel comes straight here instead of re-entering triage. Events
@@ -422,6 +453,31 @@ export class SupervisorRuntime {
     for (const item of items) {
       this.deps.bindThread?.({ eventId: item.id, sessionId: supervisor.id });
     }
+  }
+
+  /** 钉 3: the channel items of a drained batch (backlog items that carry a message:// key). */
+  private channelWakeItems(items: readonly BacklogEventItem[]): BacklogEventItem[] {
+    return items.filter((item) => item.channelKey !== undefined);
+  }
+
+  /**
+   * 钉 3 (slice B): wake-boundary permission recompute — current pairings +
+   * current source labels → this wake's effective narrowing, INCLUDING the
+   * "restore the baseline" case (no gated channel → 回落, 放宽也生效).
+   * Pure config reads; no side effects.
+   */
+  private computeWakePermission(items: readonly BacklogEventItem[]): WakePermissionSpec {
+    const records = loadPairings(this.deps.workspaceRoot).channels;
+    const enabled = getEnabledSources(this.deps.workspaceRoot);
+    const labelsBySlug = new Map(
+      enabled.map((source) => [source.config.slug, sourceLabelSet(source.config.labels)]),
+    );
+    return computeWakeNarrowing(
+      records,
+      this.channelWakeItems(items),
+      enabled.map((source) => source.config.slug),
+      labelsBySlug,
+    );
   }
 
   /**
@@ -460,14 +516,14 @@ export class SupervisorRuntime {
     }
   }
 
-  private async ensureSupervisor(lane: 'user' | 'task'): Promise<SupervisorSessionInfo | null> {
+  private async ensureSupervisor(lane: 'user' | 'task', wakeSpec?: WakePermissionSpec): Promise<SupervisorSessionInfo | null> {
     const cached = this.onDutyByLane.get(lane);
     if (cached) {
       const existing = this.deps.getSession(cached);
       if (existing) return existing;
       this.onDutyByLane.delete(lane);
     }
-    const created = await this.deps.ensureSupervisorSession(lane);
+    const created = await this.deps.ensureSupervisorSession(lane, wakeSpec);
     if (created) this.onDutyByLane.set(lane, created.id);
     return created;
   }

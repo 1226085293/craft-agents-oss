@@ -589,6 +589,10 @@ export interface CreateSourceInput {
   local?: LocalSourceConfig;
   icon?: string; // Emoji or URL (auto-downloaded)
   enabled?: boolean;
+  /** 权限标签（渠道闸门 v6/v7）：创建时即可打标，同 FolderSourceConfig.labels */
+  labels?: string[];
+  /** 只读源开关（洞 2 三层判定第 2 层），同 FolderSourceConfig.readOnly */
+  readOnly?: boolean;
 }
 
 /**

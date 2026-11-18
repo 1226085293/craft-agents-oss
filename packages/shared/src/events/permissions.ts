@@ -191,3 +191,54 @@ export function resolveChannelPermission(
   if (record.pairedBy) result.pairedBy = record.pairedBy;
   return result;
 }
+
+/**
+ * 唤醒边界收窄规格（钉 3：源 scope + 模式每次唤醒按当前配置重算）。
+ *
+ * 语义钉死：
+ * - 本批通道都没开标签闸 → `enabledSourceSlugs: undefined` = 回落到工作区基线（放宽也生效）；
+ * - 有通道开闸 → 从工作区基线逐个通道取交集（不用上次收窄值，防棘轮）；
+ * - `permissionMode: null` = 回落基线模式（督导会话创建基线是 allow-all）；
+ *   有天花板时取本批最严（stricter 两两合算）。
+ */
+export interface WakePermissionSpec {
+  /** undefined = 回落工作区默认。 */
+  enabledSourceSlugs?: string[];
+  /** null = 回落基线模式；值 = 本次唤醒天花板。 */
+  permissionMode?: PermissionModeCeiling | null;
+}
+
+/** 一次唤醒的通道事件批（backlog 项；channelKey 缺省 = 非通道事件）。 */
+export type WakeChannelEvent = { channelKey?: string; senderId?: string };
+
+/**
+ * 计算唤醒收窄（纯函数）：同渠道×同发信人去重，逐通道取交集 + 最严天花板。
+ * @param workspaceSourceSlugs 工作区启用源基线（getEnabledSources）
+ * @param labelsBySlug 各源有效标签集（sourceLabelSet；缺省=private）
+ */
+export function computeWakeNarrowing(
+  records: readonly PairedChannelRecord[],
+  wakeEvents: readonly WakeChannelEvent[],
+  workspaceSourceSlugs: readonly string[],
+  labelsBySlug: ReadonlyMap<string, readonly string[]>,
+): WakePermissionSpec {
+  let slugs = [...workspaceSourceSlugs];
+  let ceiling: PermissionModeCeiling | undefined;
+  let anyGated = false;
+  const seen = new Set<string>();
+  for (const wakeEvent of wakeEvents) {
+    if (!wakeEvent.channelKey) continue;
+    const key = `${wakeEvent.channelKey}\u0000${wakeEvent.senderId ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const perm = resolveChannelPermission(records, wakeEvent.channelKey, wakeEvent.senderId);
+    if (!perm.gateEnabled) continue;
+    anyGated = true;
+    slugs = gateSourceSlugs(slugs, labelsBySlug, true, perm.allowedLabels);
+    if (perm.permissionMode) ceiling = stricterPermissionMode(ceiling, perm.permissionMode);
+  }
+  return {
+    enabledSourceSlugs: anyGated ? slugs : undefined,
+    permissionMode: ceiling ?? null,
+  };
+}

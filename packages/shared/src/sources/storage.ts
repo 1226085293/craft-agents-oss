@@ -497,6 +497,9 @@ export async function createSource(
     type: input.type,
     createdAt: now,
     updatedAt: now,
+    // 渠道闸门（v6/v7）：创建时即可打标；缺省 = 查询时按 ['private'] 处理
+    ...(input.labels?.length ? { labels: input.labels } : {}),
+    ...(input.readOnly !== undefined ? { readOnly: input.readOnly } : {}),
   };
 
   // Add type-specific config

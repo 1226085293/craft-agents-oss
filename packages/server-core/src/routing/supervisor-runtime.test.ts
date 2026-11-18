@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { SupervisorRuntime, type SupervisorSessionInfo } from './supervisor-runtime.ts';
 import { getRoutesPath } from '@craft-agent/shared/routing';
+import { type WakePermissionSpec } from '@craft-agent/shared/events/permissions.ts';
 
 const dirs: string[] = [];
 function workspace(): string {
@@ -1862,5 +1863,113 @@ describe('lane routing for unclaimed events', () => {
     const last = h.sent.at(-1);
     expect(last?.text).toContain('你好');
     expect(h.ensureCalls.filter((lane) => lane === 'user')).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v7 slice B (钉 3): wake-boundary channel permission narrowing
+// ---------------------------------------------------------------------------
+
+describe('drainToSupervisor wake-boundary permission narrowing (钉 3)', () => {
+  function writePairingChannels(root: string, channels: unknown[]): void {
+    mkdirSync(join(root, 'config'), { recursive: true });
+    writeFileSync(
+      join(root, 'config', 'pairings.json'),
+      JSON.stringify({ version: 2, codes: [], channels }),
+    );
+  }
+
+  function writeSource(root: string, slug: string, labels?: string[]): void {
+    mkdirSync(join(root, 'sources', slug), { recursive: true });
+    writeFileSync(
+      join(root, 'sources', slug, 'config.json'),
+      JSON.stringify({
+        id: slug,
+        name: slug,
+        slug,
+        enabled: true,
+        provider: 'test',
+        type: 'local',
+        ...(labels ? { labels } : {}),
+      }),
+    );
+  }
+
+  /** Minimal harness focused on the gate: pairings + two labeled sources + captured hooks. */
+  function gateHarness(root: string, channels: unknown[]) {
+    writePairingChannels(root, channels);
+    writeSource(root, 'co', ['company']);
+    writeSource(root, 'pr', ['private']);
+    const applied: Array<{ sessionId: string; spec: unknown }> = [];
+    const ensureSpecs: unknown[] = [];
+    const supervisor: SupervisorSessionInfo = {
+      id: 'sess_sup',
+      role: 'supervisor',
+      spawnDepth: 0,
+      isProcessing: false,
+    };
+    const runtime = new SupervisorRuntime({
+      workspaceRoot: root,
+      ensureSupervisorSession: async (_lane: 'user' | 'task' | undefined, wakeSpec?: WakePermissionSpec) => {
+        ensureSpecs.push(wakeSpec ?? null);
+        return supervisor;
+      },
+      getSession: () => supervisor,
+      spawnWorker: async () => ({ refused: true, reason: 'test' }),
+      sendToSession: async () => {},
+      applyWakePermission: (sessionId: string, spec: WakePermissionSpec) => {
+        applied.push({ sessionId, spec });
+      },
+    } as never);
+    return { runtime, applied, ensureSpecs };
+  }
+
+  it('开闸渠道：收窄+天花板同时进 create 路径与 apply（reuse 路径）', async () => {
+    const root = workspace();
+    const G = 'message://telegram/-1001';
+    const { runtime, applied, ensureSpecs } = gateHarness(root, [
+      { channelKey: G, pairedAt: 1, gateEnabled: true, allowedLabels: ['company'], permissionMode: 'safe' },
+    ]);
+    await runtime.routeUnclaimed({
+      id: 'e1',
+      source: 'telegram',
+      type: 'message.received',
+      title: 'hello',
+      links: [{ rel: 'reply-to', url: G }],
+      meta: { senderId: 'S9', channelKind: 'group' },
+    });
+    expect(applied).toHaveLength(1);
+    expect(applied[0]).toEqual({
+      sessionId: 'sess_sup',
+      spec: { enabledSourceSlugs: ['co'], permissionMode: 'safe' },
+    });
+    expect(ensureSpecs[0]).toEqual({ enabledSourceSlugs: ['co'], permissionMode: 'safe' });
+  });
+
+  it('老记录（闸关）→ 回落基线（undefined + null），apply 仍被调一次', async () => {
+    const root = workspace();
+    const G = 'message://telegram/-2002';
+    const { runtime, applied } = gateHarness(root, [{ channelKey: G, pairedAt: 1700000000000 }]);
+    await runtime.routeUnclaimed({
+      id: 'e2',
+      source: 'telegram',
+      type: 'message.received',
+      title: 'hi',
+      links: [{ url: G }],
+    });
+    expect(applied).toHaveLength(1);
+    expect(applied[0].spec).toEqual({ enabledSourceSlugs: undefined, permissionMode: null });
+  });
+
+  it('无通道事件（环境事件）→ 不碰权限（apply 零调用）', async () => {
+    const root = workspace();
+    const { runtime, applied } = gateHarness(root, []);
+    await runtime.routeUnclaimed({
+      id: 'e3',
+      source: 'webhook',
+      type: 'deploy.ok',
+      title: 'env event',
+    });
+    expect(applied).toHaveLength(0);
   });
 });

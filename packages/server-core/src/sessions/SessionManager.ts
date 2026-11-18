@@ -12,7 +12,7 @@ import { pluginCatalogDirs } from '../events/event-service.ts'
 import { callPluginAction } from '../events/listener-control.ts'
 import { copyFile, readFile, writeFile, mkdir, stat, rm, readdir } from 'fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
-import { type AgentEvent, setPermissionMode, setTransientPermissionMode, clearTransientPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
+import { type AgentEvent, setPermissionMode, setTransientPermissionMode, clearTransientPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, type PermissionModeChangedBy, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
 import {
   resolveSessionConnection,
   resolveBackendContext,
@@ -42,6 +42,7 @@ import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
 import { assemblePluginTools } from '@craft-agent/shared/events/plugin-tools'
+import { type WakePermissionSpec } from '@craft-agent/shared/events/permissions'
 import { recordOutboxCall } from '@craft-agent/shared/events/outbox.ts'
 
 /** 6-hex id, used for collision-free attachment names. */
@@ -4360,6 +4361,7 @@ export class SessionManager implements ISessionManager {
       title: string;
       summary?: string;
       links?: Array<{ rel?: string; url: string }>;
+      meta?: Record<string, string>;
     },
   ): Promise<void> {
     await this.getSupervisorRuntime(workspaceId).routeUnclaimed(event)
@@ -9179,13 +9181,13 @@ ${request.prompt}`;
 
     const runtime = new SupervisorRuntime({
       workspaceRoot: getWorkspaceByNameOrId(workspaceId)?.rootPath ?? '',
-      ensureSupervisorSession: async (lane) => {
+      ensureSupervisorSession: async (lane, wakeSpec) => {
         const target = lane ?? 'task'
         // The lane's on-duty supervisor ('督导 · 用户' / '督导 · 任务') is the public
         // one: it finds the lane's session, renames legacy 督导 sessions, and
         // lazily creates the lane's hidden infrastructure session.
         try {
-          const created = await this.ensureSupervisorSession(workspaceId, target)
+          const created = await this.ensureSupervisorSession(workspaceId, target, wakeSpec)
           const managed = this.sessions.get(created.id)
           return {
             id: created.id,
@@ -9200,6 +9202,7 @@ ${request.prompt}`;
           return null
         }
       },
+      applyWakePermission: (sessionId, spec) => this.applyWakePermissionCeiling(sessionId, spec),
       getSession: (sessionId) => {
         const managed = this.sessions.get(sessionId)
         if (!managed) return null
@@ -9417,9 +9420,53 @@ ${request.prompt}`;
    * user should find in the list — forty copies named 督导 was the symptom of
    * every click creating a fresh one.
    */
+  /**
+   * Wake-boundary permission recompute (钉 3 / slice B): a channel wake re-derives
+   * the source narrowing + mode ceiling from the CURRENT config and applies it to
+   * the existing lane session. Persona/memory keep the create-time freeze — this
+   * touches neither. Source assembly (the `managed.enabledSourceSlugs` read at
+   * tool-assembly time) and the permission gate both read the live managed
+   * fields, so a no-change wake costs nothing; a changed one breaks the prompt
+   * cache once, which is the price 钉 3 accepts.
+   *
+   * Spec semantics (computeWakeNarrowing):
+   * - `enabledSourceSlugs === undefined` → restore the workspace default
+   * - `permissionMode === null` → restore the supervisor base mode (allow-all)
+   */
+  applyWakePermissionCeiling(sessionId: string, spec: WakePermissionSpec): void {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+    if (spec.enabledSourceSlugs !== undefined) {
+      managed.enabledSourceSlugs = spec.enabledSourceSlugs
+    } else {
+      managed.enabledSourceSlugs = undefined
+    }
+    if (spec.permissionMode === null) {
+      const base = 'allow-all'
+      if (managed.permissionMode !== base) {
+        managed.permissionMode = base
+        setPermissionMode(managed.id, base, { changedBy: 'channel-gate' })
+        managed.agent?.setPermissionMode(base)
+        sessionLog.info('channel-gate wake restored base permission mode', {
+          sessionId: managed.id,
+          permissionMode: base,
+        })
+      }
+    } else if (spec.permissionMode && managed.permissionMode !== spec.permissionMode) {
+      managed.permissionMode = spec.permissionMode
+      setPermissionMode(managed.id, spec.permissionMode, { changedBy: 'channel-gate' })
+      managed.agent?.setPermissionMode(spec.permissionMode)
+      sessionLog.info('channel-gate wake applied permission ceiling', {
+        sessionId: managed.id,
+        permissionMode: spec.permissionMode,
+      })
+    }
+  }
+
   async ensureSupervisorSession(
     workspaceId: string,
     lane: 'user' | 'task' = 'task',
+    wakeSpec?: WakePermissionSpec,
   ): Promise<Session> {
     const existing = this.findOnDutySupervisor(workspaceId, lane)
     if (existing) {
@@ -9458,6 +9505,16 @@ ${request.prompt}`;
       // edit / MCP, so 放行 cannot hand it hands. Leaving the gate on 探索 only
       // forced it to ask before reading tasks/ and plans/.
       permissionMode: 'allow-all',
+      // Slice B (钉 3): a wake that CARRIES the spec creates the session with it
+      // (the reuse path applies the same spec via applyWakePermissionCeiling).
+      // `enabledSourceSlugs: []` = 故意全禁 must pass through too — hence the
+      // `!== undefined` guard, not a truthiness check.
+      ...(wakeSpec && wakeSpec.enabledSourceSlugs !== undefined
+        ? { enabledSourceSlugs: wakeSpec.enabledSourceSlugs }
+        : {}),
+      ...(wakeSpec && wakeSpec.permissionMode !== null && wakeSpec.permissionMode !== undefined
+        ? { permissionMode: wakeSpec.permissionMode }
+        : {}),
     })
   }
 
@@ -15027,7 +15084,7 @@ ${request.prompt}`;
     transitionDisplay?: string
     modeVersion: number
     changedAt: string
-    changedBy: 'user' | 'system' | 'restore' | 'automation' | 'unknown'
+    changedBy: PermissionModeChangedBy
   } | null {
     const managed = this.sessions.get(sessionId)
     if (!managed) return null

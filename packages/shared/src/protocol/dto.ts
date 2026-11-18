@@ -17,6 +17,7 @@ import type {
   PermissionRequest as BasePermissionRequest,
 } from '@craft-agent/core/types'
 import type { PermissionMode } from '../agent/mode-types'
+import type { PermissionModeChangedBy } from '../agent/mode-manager'
 import type { ThinkingLevel } from '../agent/thinking-levels'
 import type { CustomEndpointConfig } from '../config/llm-connections'
 import type {
@@ -268,7 +269,7 @@ export interface PermissionModeState {
   transitionDisplay?: string
   modeVersion: number
   changedAt: string
-  changedBy: 'user' | 'system' | 'restore' | 'automation' | 'unknown'
+  changedBy: PermissionModeChangedBy
 }
 
 // ---------------------------------------------------------------------------

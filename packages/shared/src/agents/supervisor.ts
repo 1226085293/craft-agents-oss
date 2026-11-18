@@ -207,12 +207,27 @@ export function assertDispatchAllowed(params: {
  * pending" instead of being woken N times, which is what keeps a noisy source
  * from spending a turn per message.
  */
+/**
+ * One queued event. `channelKey`/`senderId` carry the channel-gate context
+ * (v6/v7 slice B) so the drain can recompute the wake-boundary permission
+ * narrowing without re-reading the event store:
+ *
+ * - `channelKey`: the `message://…` thread key when the event carries a message link
+ * - `senderId`:   the sender snapshot from the event meta (洞 3: who speaks, for D5 merge)
+ */
+export interface BacklogEventItem {
+  id: string;
+  summary: string;
+  channelKey?: string;
+  senderId?: string;
+}
+
 export class EventBacklog {
-  private items: Array<{ id: string; summary: string }> = [];
+  private items: BacklogEventItem[] = [];
   /** Running total of events dropped by the cap, reported in the next nudge. */
   private overflowed = 0;
 
-  push(item: { id: string; summary: string }): void {
+  push(item: BacklogEventItem): void {
     if (this.items.some((existing) => existing.id === item.id)) return;
     if (this.items.length >= MAX_QUEUED_EVENTS) {
       // Drop the oldest, but keep counting: the supervisor must know that the
@@ -224,7 +239,7 @@ export class EventBacklog {
   }
 
   /** Hand everything over and reset — the supervisor drains in one turn. */
-  drain(): Array<{ id: string; summary: string }> {
+  drain(): BacklogEventItem[] {
     const items = this.items;
     const dropped = this.overflowed;
     this.items = [];

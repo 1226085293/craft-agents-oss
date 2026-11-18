@@ -397,6 +397,21 @@ export interface SessionToolContext {
      * it relays the words as a follow-up to that task. The user lane never sees the other lane,
      * and the model never rewords what the person said.
      */
+    /**
+     * Stage 3: a channel-attached assistant hands one bounded job to a worker.
+     *
+     * Separate from `createTaskFromUser` because the two answer different
+     * questions: that one is "the person said this, register it", this one is
+     * "I read the request, now get it done". The result comes back to the
+     * originating channel, not to the person's user lane.
+     */
+    dispatchTask?(payload: {
+      task: string;
+      title?: string;
+      agentId?: string;
+      /** Channel this work came from; the worker's result is delivered back here. */
+      originChannelKey?: string;
+    }): Promise<{ taskId: string; message: string }>;
     createTaskFromUser?(payload: {
       /** The person's words, verbatim. */
       request: string;

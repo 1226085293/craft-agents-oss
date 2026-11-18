@@ -295,6 +295,33 @@ export const CreateTaskSchema = z.object({
 
 export type CreateTaskInput = z.infer<typeof CreateTaskSchema>;
 
+/**
+ * `dispatch_task` — stage 3: hand work to a temp worker from a channel session.
+ *
+ * Distinct from `create_task` on purpose. `create_task` is the person's door into
+ * the user lane (verbatim words, no interpretation). This one is the channel
+ * assistant's door: it has already read the request, and it is choosing a worker
+ * to do one bounded job. The words still travel verbatim in `task` — an assistant
+ * that summarises its own requester's instruction loses the boundary exactly the
+ * way the user-lane relay did.
+ */
+export const DispatchTaskSchema = z.object({
+  task: z
+    .string()
+    .min(1)
+    .describe('The work to do, in the requester own words. Copy what they asked for — do not summarise, do not add requirements.'),
+  title: z
+    .string()
+    .optional()
+    .describe('Short board label (a few words). Omit to let the board derive one from the task text.'),
+  agentId: z
+    .string()
+    .optional()
+    .describe('Which role profile should do it (id from the agent roster). Omit for the default worker role.'),
+})
+
+export type DispatchTaskInput = z.infer<typeof DispatchTaskSchema>;
+
 export const TaskUpdateSchema = z.object({
   identifier: z.string(),
   status: z.enum(['backlog', 'running', 'paused', 'completed', 'failed', 'canceled']).optional(),

@@ -14,6 +14,7 @@ import { describeCron } from '@craft-agent/shared/tasks/cron';
 import type {
   AskUserInput,
   CreateTaskInput,
+  DispatchTaskInput,
   DispatchInput,
   ListQuestionsInput,
   ReportResultInput,
@@ -288,6 +289,38 @@ export async function handleCreateTask(
     return successResponse(taskId ? `Task ${taskId} registered. ${message}` : message);
   } catch (error) {
     return errorResponse(`Failed to hand the request over: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}
+
+/**
+ * Hand one bounded job to a worker (stage 3, channel assistants only).
+ *
+ * The channel assistant has already read the request; what it must not do is
+ * reword it. `task` is copied through verbatim for the same reason `create_task`
+ * copies the person's words: a relay that paraphrases destroys the boundary the
+ * worker needs to know when it is done.
+ */
+export async function handleDispatchTask(
+  ctx: SessionToolContext,
+  args: DispatchTaskInput,
+): Promise<ToolResult> {
+  if (!ctx.agentTools?.dispatchTask) {
+    return errorResponse('dispatch_task is not available in this session.');
+  }
+  if (!args.task?.trim()) {
+    return errorResponse('task is required — copy what the requester asked for.');
+  }
+  try {
+    const result = await ctx.agentTools.dispatchTask({
+      task: args.task.trim(),
+      ...(args.title?.trim() ? { title: args.title.trim() } : {}),
+      ...(args.agentId?.trim() ? { agentId: args.agentId.trim() } : {}),
+    });
+    return successResponse(`Dispatched as ${result.taskId}. ${result.message}`);
+  } catch (error) {
+    return errorResponse(
+      `Failed to dispatch: ${error instanceof Error ? error.message : 'unknown error'}`,
+    );
   }
 }
 

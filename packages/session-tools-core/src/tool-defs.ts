@@ -41,6 +41,7 @@ import {
   handleDispatch,
   handleReportResult,
   handleCreateTask,
+  handleDispatchTask,
   handleTaskGet,
   handleTaskHandoff,
   handleTaskPlan,
@@ -53,6 +54,7 @@ import {
   DispatchSchema,
   ReportResultSchema,
   CreateTaskSchema,
+  DispatchTaskSchema,
   TaskGetSchema,
   TaskHandoffSchema,
   TaskListSchema,
@@ -407,6 +409,7 @@ export const TOOL_DESCRIPTIONS = {
   call_llm: `Get a secondary LLM for focused subtasks: parallel batch processing, efficiency gains, structured extraction (outputSchema), context isolation. Put text in the prompt param; use attachments only for file paths on disk (max 20 items; for files >2000 lines pass a startLine/endLine range).`,
   spawn_session: `Create an independent session running with its own prompt, connection, model, and sources. Useful for delegating research/analysis/drafts to parallel sessions. Use help=true first to list connections/models/sources. The prompt param is required; optional overrides: model, llmConnection, permissionMode, thinkingLevel, enabledSourceSlugs, workingDirectory. By default (subscribe=true) this session starts FOLLOWING the new session: every finished turn is posted back here as a message and you are woken. Pass subscribe=false for fire-and-forget work. This call returns as soon as the session starts (status 'started'); end your turn instead of polling.`,
 
+  dispatch_task: `Hand one bounded job to a worker and get the result back here. Use this when the person asked for something to be done rather than answered — 「让 B 把报表跑一下」, 「把这份清单整理成表格」. Copy the request in task verbatim: a rewording destroys the boundary the worker needs to know when it is finished. Tell the person the task id you got back, then stop — the worker reports to this channel when it is done. Do NOT use this to do the work yourself, and do NOT use it for a question you can answer directly.`,
   create_task: `User-facing supervisor only: the single door through which a person's words enter the system. Pass the user's request VERBATIM in \`request\` — never summarise or reword it (a relay that paraphrased 「只做 1.1，做完就停」 into a meta-instruction produced a task whose boundary existed nowhere). The system creates the task record and hands the words to the lane that analyses them into scope / directive / plan and dispatches. You do not see that lane and cannot message it. To add to an existing task, pass its taskId — nothing new is created, the words become a follow-up.`,
   task_list: `Supervisor-only: list tasks, newest activity first. Filter by status to find what is still running or waiting on a decision.`,
   task_get: `Supervisor-only: read one task, including its handoff trail and budget. Use includeJournal for the full event log.`,
@@ -531,6 +534,16 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   // in the lane audit: `getSessionToolDefs({ role: 'worker' })` returned `create_task`.
   //
   { name: 'create_task', description: TOOL_DESCRIPTIONS.create_task, inputSchema: CreateTaskSchema, executionMode: 'registry', safeMode: 'block', roles: ['supervisor'], handler: handleCreateTask },
+  /**
+   * Stage 3: channel assistant -> worker.
+   *
+   * `roles` covers the working assistant (not 'supervisor'): the supervisor lane
+   * coordinates tasks that already exist, and giving it a second creation door is
+   * how the two would drift. It is also deliberately absent from
+   * SUPERVISOR_TOOL_NAMES below — that is the actual enforcement, this list only
+   * decides which role may see the definition.
+   */
+  { name: 'dispatch_task', description: TOOL_DESCRIPTIONS.dispatch_task, inputSchema: DispatchTaskSchema, executionMode: 'registry', safeMode: 'block', roles: ['worker'], handler: handleDispatchTask },
   { name: 'task_list', description: TOOL_DESCRIPTIONS.task_list, inputSchema: TaskListSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskList },
   { name: 'task_get', description: TOOL_DESCRIPTIONS.task_get, inputSchema: TaskGetSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskGet },
   { name: 'task_update', description: TOOL_DESCRIPTIONS.task_update, inputSchema: TaskUpdateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskUpdate },

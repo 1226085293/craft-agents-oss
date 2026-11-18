@@ -6503,6 +6503,55 @@ export class SessionManager implements ISessionManager {
             })
             return { taskId: task.id, message: 'The working lane has been woken to analyse the request and dispatch.' }
           },
+          /**
+           * Stage 3: the channel assistant's door.
+           *
+           * Creates the record, tags it with the role that should do it, and wakes
+           * that role. What it does NOT do is interpret: `task` arrives as the
+           * requester's own words, and the worker reads them directly. The assistant
+           * that took the request keeps the reply — the worker reports back to this
+           * channel, so the person hears the answer where they asked.
+           */
+          dispatchTask: async (payload) => {
+            const taskText = payload.task.trim()
+            if (!taskText) throw new Error('task is empty')
+            const tasks = this.getTasks(managed.workspace.id)
+            // Same-words dedupe: a retried tool call must not make a twin record.
+            const existing = tasks
+              .list()
+              .find(
+                (candidate) =>
+                  candidate.instruction.trim() === taskText &&
+                  candidate.status !== 'completed' &&
+                  candidate.status !== 'canceled',
+              )
+            if (existing) {
+              return { taskId: existing.id, message: '已经有同一个任务在跑了，直接用这个编号。' }
+            }
+            const name = payload.title?.trim()
+              || (taskText.length > 40 ? `${taskText.slice(0, 40)}…` : taskText)
+            const task = tasks.create({
+              name,
+              instruction: taskText,
+              supervisorSessionId: managed.id,
+              toolCallId: randomUUID(),
+              ...(payload.agentId?.trim() ? { assigneeAgentId: payload.agentId.trim() } : {}),
+            })
+            void this.sendMessage(
+              managed.id,
+              [
+                `【任务 ${task.id} 已建好，由你（本渠道助手）转达发起人。】`,
+                '',
+                '发起人的原话：',
+                taskText,
+                '',
+                '工作由被指派的 worker 负责，结果会回到本渠道；你不需要自己动手，也不要改写这件事。',
+              ].join('\n'),
+            ).catch((error) => {
+              sessionLog.warn('dispatch_task: notifying the channel assistant failed', { taskId: task.id, error })
+            })
+            return { taskId: task.id, message: 'worker 已经开始处理，结果会回到这个渠道。' }
+          },
           continueTask: (taskId) => {
             // The worker reported that its context is close to the limit. Compact
             // this session rather than starting a new one: the thread — what was

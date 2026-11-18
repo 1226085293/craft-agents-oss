@@ -58,6 +58,18 @@ export interface AgentToolBindingsDeps {
     taskId?: string;
     message: string;
   }>;
+  /**
+   * Stage 3: a channel-attached assistant hands one bounded job to a worker.
+   *
+   * Returns the task id so the assistant can tell the requester what to quote.
+   * The worker's result is delivered back to the originating channel, not to the
+   * person's user lane — the assistant that took the request owns the reply.
+   */
+  dispatchTask?: (payload: {
+    task: string;
+    title?: string;
+    agentId?: string;
+  }) => Promise<{ taskId: string; message: string }>;
   /** Supervisor runtime, for dispatch guards. */
   dispatchViaSupervisor?: (params: {
     target:
@@ -177,5 +189,6 @@ export function buildAgentToolBindings(deps: AgentToolBindingsDeps) {
 
     /** Absent in lanes that should not have the door; the tool refuses itself then. */
     ...(deps.createTaskFromUser ? { createTaskFromUser: deps.createTaskFromUser } : {}),
+    ...(deps.dispatchTask ? { dispatchTask: deps.dispatchTask } : {}),
   };
 }

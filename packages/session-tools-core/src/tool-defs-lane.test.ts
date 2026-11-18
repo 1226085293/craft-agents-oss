@@ -58,9 +58,26 @@ describe('supervisor lanes', () => {
     const tools = taskLaneTools()
     expect(tools.has('task_create')).toBe(false)
     expect(tools.has('create_task')).toBe(false)
+    /**
+     * Stage 3 keeps the two creation doors apart on purpose: `create_task` is the
+     * person's door into the user lane, `dispatch_task` is the channel
+     * assistant's door. Neither supervisor lane may hold the other's door.
+     */
+    expect(tools.has('dispatch_task')).toBe(false)
+    expect(userLaneTools().has('dispatch_task')).toBe(false)
     for (const name of ['task_update', 'task_plan', 'dispatch', 'task_handoff']) {
       expect(tools.has(name)).toBe(true)
     }
+  })
+
+  it('gives the worker role the channel dispatch door', () => {
+    // Stage 3: a channel-attached assistant hands one bounded job to a worker.
+    // The tool exists for the worker role so channel sessions can use it, and is
+    // absent from both supervisor lanes (asserted above) so the two creation
+    // doors cannot be confused with each other.
+    const workerTools = new Set(getSessionToolNames({ role: 'worker' }))
+    expect(workerTools.has('dispatch_task')).toBe(true)
+    expect(workerTools.has('create_task')).toBe(false)
   })
 
   it('narrows the JSON-schema path the Pi proxy defs use', () => {

@@ -176,6 +176,7 @@ const EXPECTED_CHANNELS: string[] = [
   "memory:trash:deleteMany", 
   "memory:update", 
   "memoryDomains:list", 
+  "memoryDomains:read", 
   "menu:copy", 
   "menu:cut", 
   "menu:keyboardShortcuts", 

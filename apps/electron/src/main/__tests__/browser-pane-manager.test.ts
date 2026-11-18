@@ -74,6 +74,15 @@ function createMockWebContents() {
     },
     _listeners: listeners,
     _emit: (event: string, ...args: any[]) => {
+      // Real Electron updates getURL() the moment did-navigate / did-navigate-in-page
+      // fire — keep the mock's internal URL in sync, or getURL()-preferring handlers
+      // (they trust getURL() over the event's url argument) would see a stale value.
+      if (
+        (event === 'did-navigate' || event === 'did-navigate-in-page') &&
+        typeof args[0] === 'string'
+      ) {
+        currentUrl = args[0]
+      }
       // Most Electron webContents events pass an Event object first, but
       // 'did-create-window' is the exception: its first callback argument IS
       // the popup BrowserWindow (no event object). Injecting one there shifts

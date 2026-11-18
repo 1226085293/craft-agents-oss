@@ -9,8 +9,18 @@ import { describe, it, expect, mock, beforeAll } from 'bun:test';
 
 // mention-menu.tsx transitively imports pdfjs-dist via renderer component chain.
 // Vite's ?url suffix isn't supported by bun — mock before dynamic import.
+//
+// react-pdf is mocked too: its dist entry evaluates `window.location.protocol`
+// at module top level, which crashes whenever another test file in the same
+// run has polluted the global with a partial `window` shim (no location).
+// Mocking the specifier keeps the real dist from loading at all.
 mock.module('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }));
 mock.module('pdfjs-dist', () => ({ GlobalWorkerOptions: { workerSrc: '' }, getDocument: () => ({}) }));
+mock.module('react-pdf', () => ({
+  Document: () => null,
+  Page: () => null,
+  pdfjs: { version: '0.0.0-mock', GlobalWorkerOptions: { workerSrc: '' } },
+}));
 
 let isValidMentionTrigger: (text: string, position: number) => boolean;
 

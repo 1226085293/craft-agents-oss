@@ -36,6 +36,10 @@ export interface SettingsPageDefinition {
  */
 export const SETTINGS_PAGES = [
   { id: 'agents' as const, labelKey: 'settings.agents.title', descriptionKey: 'settings.agents.description' },
+  // Memory domains: the registry + the 记忆 wiki (each domain's MEMORY.md).
+  // Sits right after agents because a domain is an agent's memory, and the
+  // 助手卡「记忆域」下拉 is where the user first meets the concept.
+  { id: 'memory' as const, labelKey: 'settings.memory.title', descriptionKey: 'settings.memory.description' },
   { id: 'app' as const, labelKey: 'settings.app.title', descriptionKey: 'settings.app.description' },
   // One entry for the whole in-process LLM gateway. Its four views live behind
   // a segmented control inside the page rather than as four more nav rows — the

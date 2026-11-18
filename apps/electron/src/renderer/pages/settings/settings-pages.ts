@@ -15,6 +15,7 @@ import type { ComponentType } from 'react'
 import type { SettingsSubpage } from '../../../shared/settings-registry'
 
 import AgentsSettingsPage from './AgentsSettingsPage'
+import MemorySettingsPage from './MemorySettingsPage'
 import AppSettingsPage from './AppSettingsPage'
 import LlmSettingsPage from './LlmSettingsPage'
 import AppearanceSettingsPage from './AppearanceSettingsPage'
@@ -30,6 +31,7 @@ import ShortcutsPage from './ShortcutsPage'
  */
 export const SETTINGS_PAGE_COMPONENTS: Record<SettingsSubpage, ComponentType> = {
   agents: AgentsSettingsPage,
+  memory: MemorySettingsPage,
   app: AppSettingsPage,
   llm: LlmSettingsPage,
   appearance: AppearanceSettingsPage,

@@ -380,6 +380,7 @@ export interface SettingsMenuItem {
  */
 const SETTINGS_ICONS: Record<SettingsSubpage, string> = {
   agents: 'Users',
+  memory: 'Brain',
   app: 'ToggleRight',
   llm: 'Route',
   appearance: 'Palette',

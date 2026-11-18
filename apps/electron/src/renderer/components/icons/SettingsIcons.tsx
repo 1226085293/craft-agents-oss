@@ -7,6 +7,7 @@
  */
 
 import {
+  Brain,
   Users,
   Building2,
   Keyboard,
@@ -29,6 +30,7 @@ export const WorkspaceIcon = ({ className }: IconProps) => <Building2 className=
 export const PermissionsIcon = ({ className }: IconProps) => <ShieldCheck className={className} />
 export const LabelsIcon = ({ className }: IconProps) => <Tag className={className} />
 export const AgentsSettingsIcon = ({ className }: IconProps) => <Users className={className} />
+export const MemorySettingsIcon = ({ className }: IconProps) => <Brain className={className} />
 export const MessagingSettingsIcon = ({ className }: IconProps) => <MessageSquare className={className} />
 export const ServerSettingsIcon = ({ className }: IconProps) => <Server className={className} />
 export const ShortcutsIcon = ({ className }: IconProps) => <Keyboard className={className} />
@@ -39,6 +41,7 @@ export const ShortcutsIcon = ({ className }: IconProps) => <Keyboard className={
  */
 export const SETTINGS_ICONS: Record<SettingsSubpage, React.ComponentType<IconProps>> = {
   agents: AgentsSettingsIcon,
+  memory: MemorySettingsIcon,
   app: AppSettingsIcon,
   llm: Route,
   appearance: AppearanceIcon,

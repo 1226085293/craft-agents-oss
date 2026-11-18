@@ -641,14 +641,16 @@ export class PiAgent extends BaseAgent {
    * phase attached: both would otherwise read the intentional silence as a
    * dead turn and abort a request the gateway is still holding.
    */
-  setGatewayCooldownWaiting(waiting: boolean, info?: { phase?: string; seconds?: number }): void {
+  setGatewayCooldownWaiting(waiting: boolean, info?: { phase?: string; seconds?: number; refresh?: boolean }): void {
     const phase = waiting ? (info?.phase ?? 'cooldown') : undefined;
-    if (this.gatewayCooldownWaiting === waiting && this.gatewayCooldownPhase === phase) return;
+    // A refresh re-arms the same phase (a dispatch hold ticks through the
+    // client's stall watchdog); the dedup guard must not swallow it.
+    if (!info?.refresh && this.gatewayCooldownWaiting === waiting && this.gatewayCooldownPhase === phase) return;
     this.gatewayCooldownWaiting = waiting;
     this.gatewayCooldownPhase = phase;
-    this.send({ type: 'gateway_cooldown_wait', waiting, phase, seconds: info?.seconds });
+    this.send({ type: 'gateway_cooldown_wait', waiting, phase, seconds: info?.seconds, refresh: info?.refresh });
     this.debug(
-      `[gateway] ${phase ?? 'cooldown'} wait ${waiting ? `started${info?.seconds ? ` (~${info.seconds}s)` : ''}` : 'ended'}`,
+      `[gateway] ${phase ?? 'cooldown'} wait ${info?.refresh ? `refreshed${info?.seconds ? ` (~${info.seconds}s)` : ''}` : waiting ? `started${info?.seconds ? ` (~${info.seconds}s)` : ''}` : 'ended'}`,
     );
     if (waiting) this.clearTurnIdleWatchdog();
     else this.refreshTurnIdleWatchdog();

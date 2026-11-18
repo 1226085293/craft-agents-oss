@@ -52,6 +52,38 @@ export interface PluginAction {
    * prompt cache and leave the model describing tools it no longer has.
    */
   asTool?: boolean;
+  /**
+   * What this action can do to the world (H2, stage 6).
+   *
+   * Three classes, and the permission mode decides which are offered:
+   * - `read`  — observing; allowed in every mode, exploration included.
+   * - `write` — changing state; withheld from exploration, gated in ask.
+   * - `reply` — sending a message back to whoever caused the turn. Allowed in
+   *   every mode on purpose: whether a channel may speak at all is the judge's
+   *   and the daily-limit's business. The mode gate is about *doing things*, and
+   *   a gate that also mutes the answer produces a bot that reads a request and
+   *   then says nothing — which is indistinguishable from being broken.
+   *
+   * Omitted means `write`: the conservative reading for a plugin written before
+   * this field existed, and the one that fails towards "asked first" instead of
+   * "did it silently".
+   */
+  effect?: 'read' | 'write' | 'reply';
+}
+
+/**
+ * Resolve an action's effect class, defaulting to `write`.
+ *
+ * `repliesToOrigin` is honoured as `reply` even without an explicit `effect`:
+ * a plugin that already declares "this answers the event origin" has told us
+ * what the action is for, and re-labelling it `write` would mute every existing
+ * messaging plugin the moment the compile table went live.
+ */
+export function resolveActionEffect(
+  action: Pick<PluginAction, 'effect' | 'repliesToOrigin'>,
+): 'read' | 'write' | 'reply' {
+  if (action.effect) return action.effect;
+  return action.repliesToOrigin === true ? 'reply' : 'write';
 }
 
 export interface ListenerRestartPolicy {

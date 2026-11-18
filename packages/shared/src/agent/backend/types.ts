@@ -504,13 +504,15 @@ export interface AgentBackend {
   resumeTurn?(): Promise<boolean>;
 
   /**
-   * Tells the backend that the gateway is parked in waitForCooldown.
+   * Tells the backend that the gateway is parked in an internal wait
+   * (cooldown hold or retry backoff).
    *
    * No model events are produced during that wait, so the turn watchdog must
    * not interpret the silence as a dead stream. Backends without a watchdog
-   * may ignore it.
+   * may ignore it. `info` carries the gateway-side phase details for logs and
+   * the subprocess's own watchdog.
    */
-  setGatewayCooldownWaiting?(waiting: boolean): void;
+  setGatewayCooldownWaiting?(waiting: boolean, info?: { phase?: string; seconds?: number }): void;
 
   /**
    * Force abort with specific reason.

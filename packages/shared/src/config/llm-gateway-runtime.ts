@@ -27,7 +27,7 @@
 import { loadLlmConfig, LLM_CONFIG_PATH } from './llm-config-loader.ts';
 import type { LlmConfig } from './llm-config.ts';
 import { LlmConfigWatcher } from './llm-config-watcher.ts';
-import { LlmGateway, type LlmGatewayStatus, type LlmRouteChange } from './llm-gateway.ts';
+import { LlmGateway, type GatewayWaitEvent, type LlmGatewayStatus, type LlmRouteChange } from './llm-gateway.ts';
 import { appendLlmUsage, clearLlmUsageTemp, pruneDayFiles } from './llm-usage-store.ts';
 
 export interface GatewayRuntimeOptions {
@@ -79,9 +79,7 @@ export class GatewayRuntime {
    * reload; the runtime outlives it and re-supplies the same closure.
    */
   private routeChangeHandler: ((event: LlmRouteChange) => void) | null = null;
-  private cooldownWaitHandler:
-    | ((event: { sessionId?: string; waiting: boolean; seconds?: number }) => void)
-    | null = null;
+  private cooldownWaitHandler: ((event: GatewayWaitEvent) => void) | null = null;
 
   constructor(options: GatewayRuntimeOptions = {}) {
     this.log = options.log ?? (() => {});
@@ -96,10 +94,8 @@ export class GatewayRuntime {
     this.routeChangeHandler = handler;
   }
 
-  /** Install the listener told when a request enters/leaves a cooldown wait. */
-  setCooldownWaitHandler(
-    handler: ((event: { sessionId?: string; waiting: boolean; seconds?: number }) => void) | null,
-  ): void {
+  /** Install the listener told when a request enters/leaves a gateway-internal wait. */
+  setCooldownWaitHandler(handler: ((event: GatewayWaitEvent) => void) | null): void {
     this.cooldownWaitHandler = handler;
   }
 

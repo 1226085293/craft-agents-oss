@@ -133,7 +133,7 @@ import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, normalizeUnderscorePrefixedArgs, stripCraftMetadata } from './craft-metadata-schema.ts';
 import { enrichUnknownToolResult } from './unknown-tool-result.ts';
 import { wrapMidTurnGuidance } from './steer-guidance.ts';
-import { settleStreamingSessionBeforePrompt } from './prompt-settle.ts';
+import { abortAndWaitForIdle, settleStreamingSessionBeforePrompt } from './prompt-settle.ts';
 import { scheduleQueuedFollowUpDrain, type DrainableSession } from './queued-followup-drain.ts';
 import { applySystemPromptOverride, applySystemPromptOverrideWithDefense } from './system-prompt-override.ts';
 import { adaptCredentialForPiSdk, type PiCredential } from './adapt-credential.ts';
@@ -300,8 +300,8 @@ type InboundMessage =
   | { type: 'set_thinking_level'; level: string }
   | { type: 'compact'; id: string; customInstructions?: string }
   | { type: 'set_auto_compaction'; id: string; enabled: boolean }
-  /** The gateway is parked in waitForCooldown; silence is expected. */
-  | { type: 'gateway_cooldown_wait'; waiting: boolean }
+  /** The gateway is parked in a gateway-internal wait (cooldown or retry backoff); silence is expected. */
+  | { type: 'gateway_cooldown_wait'; waiting: boolean; phase?: string; seconds?: number }
   | RuntimeConfigUpdateMessage
   | SwitchConnectionMessage
   | { type: 'steer'; message: string }
@@ -3681,10 +3681,6 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     // later legitimate retry in this subprocess.
     lastAbortReason = null;
 
-    const promptPromise = session.prompt(msg.message, {
-      images: msg.images && msg.images.length > 0 ? msg.images : undefined,
-    });
-    lastTurnActivityAt = Date.now();
     const activeToolDeadline = (): number | null => {
       let latest: number | null = null;
       for (const d of activeToolSilenceDeadlines.values()) {
@@ -3692,12 +3688,24 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
       }
       return latest;
     };
-    try {
-      await awaitTurnWithStallDetection(promptPromise, activeToolDeadline);
-      while (gatewayStreamRetryRequested && !userAbortRequested) {
-        await runGatewayRetry('prompt-loop');
-      }
-    } catch (stallErr) {
+    // 2026-11-16 (busy-prompt self-heal): when the SDK answers prompt() with
+    // a busy rejection, the previous run is still unwinding inside the SDK
+    // (its adapter state may already read idle — see prompt-settle.ts). One
+    // self-heal is allowed: abort + bounded wait for real idle, then re-issue
+    // once. Only a SECOND failure is reported (and becomes the terminal
+    // prompt_error).
+    let busyPromptRetried = false;
+    const runPromptOnce = async (): Promise<void> => {
+      const promptPromise = session.prompt(msg.message, {
+        images: msg.images && msg.images.length > 0 ? msg.images : undefined,
+      });
+      lastTurnActivityAt = Date.now();
+      try {
+        await awaitTurnWithStallDetection(promptPromise, activeToolDeadline);
+        while (gatewayStreamRetryRequested && !userAbortRequested) {
+          await runGatewayRetry('prompt-loop');
+        }
+      } catch (stallErr) {
       debugLog(`[prompt] stalled or failed: ${stallErr instanceof Error ? stallErr.message : stallErr}; aborting session to reset state`);
       // SYSTEM-initiated abort, NOT a user stop: set the flag BEFORE abort()
       // so the defense evaluation on the aborted agent_end (which fires
@@ -3748,18 +3756,47 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
       }
       stallRetryExpected = true;
       throw finalError;
+      }
+    };
+
+    let promptError: unknown = null;
+    try {
+      await runPromptOnce();
+    } catch (error) {
+      promptError = error;
+      const errorMsg = error instanceof Error ? error.message : String(error);
+
+      // 2026-11-16 (busy-prompt self-heal): "already processing" from prompt()
+      // means the previous run is still unwinding inside the SDK while its
+      // adapter state already reads idle. That previous run is not this turn's
+      // owner: abort it, wait for a REAL settle (bounded), then re-issue once.
+      // Without this, the message bounced straight to the user as
+      // "Pi subprocess error: Agent is already processing…".
+      if (isSdkBusyRejection(errorMsg) && !busyPromptRetried) {
+        busyPromptRetried = true;
+        debugLog(`[prompt] busy rejection (${errorMsg}) — settling the previous run, then re-issuing once`);
+        if (await abortAndWaitForIdle(session, { log: debugLog })) {
+          try {
+            await runPromptOnce();
+            return;
+          } catch (retryErr) {
+            promptError = retryErr;
+          }
+        }
+      }
+      throw promptError ?? error;
     }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
 
-    // No wrapper-side overflow recovery here. The Pi SDK's _checkCompaction
-    // already runs `_runAutoCompaction("overflow", true)` on overflow and
-    // calls agent.continue() to retry once. Running our own session.compact()
-    // in parallel raced against the SDK and is the documented cause of the
-    // AbortController crash in `_runAutoCompaction` (see
-    // plans/fix-pi-gpt-compaction.md). PiEventAdapter holds the Craft event
-    // queue open across the SDK's recovery flow so the recovered turn
-    // reaches the UI.
+      // No wrapper-side overflow recovery here. The Pi SDK's _checkCompaction
+      // already runs `_runAutoCompaction("overflow", true)` on overflow and
+      // calls agent.continue() to retry once. Running our own session.compact()
+      // in parallel raced against the SDK and is the documented cause of the
+      // AbortController crash in `_runAutoCompaction` (see
+      // plans/fix-pi-gpt-compaction.md). PiEventAdapter holds the Craft event
+      // queue open across the SDK's recovery flow so the recovered turn
+      // reaches the UI.
 
     debugLog(`Prompt failed: ${errorMsg}`);
     // NOTE: deliberately do NOT reject pending tool executions here. A prompt
@@ -4661,7 +4698,11 @@ async function processMessage(msg: InboundMessage): Promise<void> {
       // A wait end is movement again: give the turn a fresh idle window so the
       // elapsed wait seconds cannot be charged to the next upstream attempt.
       lastTurnActivityAt = Date.now();
-      debugLog(`[gateway-retry] cooldown wait ${msg.waiting ? 'started' : 'ended'}`);
+      debugLog(
+        msg.waiting
+          ? `[gateway-retry] ${msg.phase ?? 'cooldown'} wait started${msg.seconds != null && msg.seconds > 0 ? ` (~${msg.seconds}s)` : ''}`
+          : `[gateway-retry] ${msg.phase ?? 'cooldown'} wait ended`,
+      );
       break;
 
     case 'update_runtime_config':

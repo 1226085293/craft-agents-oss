@@ -122,6 +122,12 @@ export interface EventServiceOptions {
   /** Override for tests; 0 disables. */
   retentionDays?: number;
   retentionRows?: number;
+  /**
+   * Judge batch window in ms (default {@link BATCH_WINDOW_MS}). Injectable so
+   * the time-close path — the one a mention never exercises — is testable
+   * without waiting five minutes.
+   */
+  batchWindowMs?: number;
 }
 
 export interface EventServiceStatus {
@@ -406,6 +412,10 @@ export class EventService {
     if (decision.action === 'append') {
       const current = this.judgeBatches.get(channelKey);
       if (current) {
+        // `addToBatch` returned a fresh state object; the entry must adopt it
+        // or the window-close timer would read the stale one and judge a
+        // batch missing the message that was just appended.
+        current.state = decision.batch;
         current.envelopes.set(event.id, event);
         this.scheduleJudgeBatchClose(channelKey, current);
       }
@@ -442,11 +452,16 @@ export class EventService {
    */
   private scheduleJudgeBatchClose(channelKey: string, entry: JudgeBatchEntry): void {
     if (entry.timer) clearTimeout(entry.timer);
-    const delay = Math.max(0, entry.state.openedAt + BATCH_WINDOW_MS - Date.now());
+    const windowMs = this.options.batchWindowMs ?? BATCH_WINDOW_MS;
+    const delay = Math.max(0, entry.state.openedAt + windowMs - Date.now());
     const timer = setTimeout(() => {
-      entry.timer = null;
+      // Guard FIRST, then clear: nulling `entry.timer` before the check would
+      // make `current.timer !== timer` true for the very timer that fired, and
+      // the window would silently never run. (Live acceptance caught this: a
+      // plain-message batch sat past its 5-minute close and never got judged.)
       const current = this.judgeBatches.get(channelKey);
       if (current !== entry || current.timer !== timer) return; // a newer batch owns the slot now
+      entry.timer = null;
       const closed = entry.state;
       const envelopes = entry.envelopes;
       this.judgeBatches.delete(channelKey);

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
-import { getEventService, resetEventServicesForTest } from './event-service.ts';
+import { EventService, getEventService, resetEventServicesForTest } from './event-service.ts';
 import { loadOutbox, recordOutboxCall } from '@craft-agent/shared/events/outbox.ts';
 import { bindThread } from '@craft-agent/shared/events/thread-bindings.ts';
 import { generatePairingCode, isChannelPaired, markChannelPaired, updateChannelGate } from '@craft-agent/shared/events/pairings.ts';
@@ -516,6 +516,45 @@ describe('channel judge (stage 5)', () => {
     await tickUntil(() => judgeRouted(service).length === 1);
     const skipped = judgeRouted(service)[0]!;
     expect(skipped.routing!.find((entry) => entry.via === 'judge')!.outcome).toContain('skipped');
+  });
+
+  it('closes a plain-message batch on the time window and judges it', async () => {
+    const root = makeRoot();
+    markChannelPaired(root, GROUP_KEY);
+    updateChannelGate(root, GROUP_KEY, { ingestMode: 'all' });
+    const prompts: string[] = [];
+    const unclaimed: unknown[] = [];
+    // Constructed directly (not via the shared factory) so the five-minute
+    // window is compressible: the time-close path is the one a mention never
+    // exercises, and a live acceptance showed it can silently die.
+    const service = new EventService({
+      workspaceId: 'ws-judge-window',
+      workspaceRoot: root,
+      dispatchTarget: okDispatchTarget,
+      onUnclaimed: (event) => unclaimed.push(event),
+      judge: {
+        callModel: async (prompt) => {
+          prompts.push(prompt);
+          return '{"action":"ignore","reason":"窗口关闭"}';
+        },
+      },
+      batchWindowMs: 300,
+    });
+    await service.start();
+
+    await postGroupMessage(service, '第一条普通消息');
+    await postGroupMessage(service, '第二条普通消息');
+    // Nothing is judged or published while the window is open.
+    expect(prompts).toHaveLength(0);
+    expect(unclaimed).toHaveLength(0);
+
+    await tickUntil(() => prompts.length === 1, 5000);
+    expect(prompts[0]).toContain('第一条普通消息');
+    expect(prompts[0]).toContain('第二条普通消息');
+
+    await tickUntil(() => judgeRouted(service).length === 2, 5000);
+    expect(unclaimed).toHaveLength(0);
+    expect(judgeRouted(service).every((meta) => meta.handledAt !== undefined)).toBe(true);
   });
 
   it('never holds at_only channels: immediate publish, no judge call', async () => {

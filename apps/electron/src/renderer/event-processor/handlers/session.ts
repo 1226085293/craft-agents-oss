@@ -43,6 +43,9 @@ import type {
 import type { Message, Session } from '../../../shared/types'
 import { generateMessageId, appendMessage, updateMessageAt, dropCompactingStatus } from '../helpers'
 
+// Re-exported for consumers that import it from this module (tests included).
+export type { SessionState } from '../types'
+
 /**
  * Handle complete - agent loop finished
  *

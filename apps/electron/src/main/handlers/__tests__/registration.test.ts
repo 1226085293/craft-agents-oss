@@ -94,10 +94,13 @@ async function getExpectedChannels(): Promise<Set<string>> {
     auth,
     folders,
     files,
-    labels,
     llm,
     llmGateway,
     memory,
+    memoryDomains,
+    agents,
+    events,
+    tasks,
     oauth,
     sessions,
     coreSettings,
@@ -115,10 +118,13 @@ async function getExpectedChannels(): Promise<Set<string>> {
     import('@craft-agent/server-core/handlers/rpc/auth'),
     import('@craft-agent/server-core/handlers/rpc/folders'),
     import('@craft-agent/server-core/handlers/rpc/files'),
-    import('@craft-agent/server-core/handlers/rpc/labels'),
     import('@craft-agent/server-core/handlers/rpc/llm-connections'),
     import('@craft-agent/server-core/handlers/rpc/llm-gateway'),
     import('@craft-agent/server-core/handlers/rpc/memory'),
+    import('@craft-agent/server-core/handlers/rpc/memory-domains'),
+    import('@craft-agent/server-core/handlers/rpc/agents'),
+    import('@craft-agent/server-core/handlers/rpc/events'),
+    import('@craft-agent/server-core/handlers/rpc/tasks'),
     import('@craft-agent/server-core/handlers/rpc/oauth'),
     import('@craft-agent/server-core/handlers/rpc/sessions'),
     import('@craft-agent/server-core/handlers/rpc/settings'),
@@ -147,10 +153,13 @@ async function getExpectedChannels(): Promise<Set<string>> {
     ...auth.HANDLED_CHANNELS,
     ...folders.HANDLED_CHANNELS,
     ...files.HANDLED_CHANNELS,
-    ...labels.HANDLED_CHANNELS,
     ...llm.HANDLED_CHANNELS,
     ...llmGateway.HANDLED_CHANNELS,
     ...memory.HANDLED_CHANNELS,
+    ...memoryDomains.HANDLED_CHANNELS,
+    ...agents.HANDLED_CHANNELS,
+    ...events.HANDLED_CHANNELS,
+    ...tasks.HANDLED_CHANNELS,
     ...oauth.HANDLED_CHANNELS,
     ...sessions.HANDLED_CHANNELS,
     ...coreSettings.HANDLED_CHANNELS,
@@ -164,8 +173,6 @@ async function getExpectedChannels(): Promise<Set<string>> {
     ...projects.HANDLED_CHANNELS,
     ...pages.HANDLED_CHANNELS,
     ...usage.HANDLED_CHANNELS,
-    'tasks:getOutput',
-    'tasks:stop',
     ...browser.HANDLED_CHANNELS,
     ...pageWindow.HANDLED_CHANNELS,
     ...guiSystem.GUI_HANDLED_CHANNELS,
@@ -181,6 +188,10 @@ describe('RPC handler registration', () => {
 
   it('registers all declared handled channels exactly once', async () => {
     const expected = await getExpectedChannels()
+    // Push-only channels (delivered via pushTyped, never registered through
+    // handle()) do not take part in the handle() coverage assertion.
+    expected.delete('agents:changed')
+    expected.delete('taskboard:changed')
     const { registerAllRpcHandlers } = await import('../index')
 
     registerAllRpcHandlers(createMockServer(), createMockDeps())

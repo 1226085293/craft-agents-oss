@@ -366,13 +366,13 @@ export function AgentsSettingsPanel({
         setMemoryDomainOptions([
           {
             value: '',
-            label: t('settings.agents.memoryDomainNone', { defaultValue: '未指定' }),
+            label: t('settings.agents.memoryDomainNone', { defaultValue: '未指定 · 默认个人域' }),
           },
           ...file.domains.map((domain) => ({
             value: domain.slug,
             label: `${
               domain.kind === 'project'
-                ? t('settings.agents.memoryDomainShared', { defaultValue: '共享' })
+                ? t('settings.agents.memoryDomainShared', { defaultValue: '共享 · 只读 · 阶段 4' })
                 : t('settings.agents.memoryDomainPersonal', { defaultValue: '个人' })
             } · ${domain.slug}`,
           })),

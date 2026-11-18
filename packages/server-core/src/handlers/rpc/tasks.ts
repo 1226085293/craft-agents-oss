@@ -37,6 +37,7 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.taskboard.DELETE,
   RPC_CHANNELS.taskboard.UPDATE_TRIGGER,
   RPC_CHANNELS.taskboard.CHANGED,
+  RPC_CHANNELS.tasks.LIST,
 ] as const;
 
 type ManagerWithTasks = { getTasks?: (workspaceId: string) => TaskService };

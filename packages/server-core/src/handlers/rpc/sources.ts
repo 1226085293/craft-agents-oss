@@ -72,6 +72,12 @@ export function registerSourcesHandlers(server: RpcServer, deps: HandlerDeps): v
         const cleaned = (patch.labels ?? [])
           .map((label) => (typeof label === 'string' ? label.trim() : ''))
           .filter((label) => label.length > 0)
+        if (cleaned.length > 0) {
+          // 词表闸（v7 §九③）：直写词表外标签被拒——UI 路径 = 先 sources:labels
+          // add 建标签，再回来打标签；管理面不漂移。
+          const { assertLabelsInVocabulary } = await import('@craft-agent/shared/events/permissions.ts')
+          assertLabelsInVocabulary(workspace.rootPath, cleaned)
+        }
         config.labels = cleaned.length > 0 ? cleaned : undefined
       }
       if (patch?.readOnly !== undefined) {

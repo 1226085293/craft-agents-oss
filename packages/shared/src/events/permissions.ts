@@ -99,6 +99,21 @@ export function removePermissionLabel(
 }
 
 /**
+ * saveConfig 词表闸（v7 §九③）：labels ⊆ 词表，否则拒绝。
+ * UI「先建标签（sources:labels add）再打标签」是唯一合法引入新标签的路径；
+ * RPC 直写词表外标签会让管理面漂移——词表 UI 看不到它、
+ * canDeletePermissionLabel「被引用阻止删」也查不到它。
+ */
+export function assertLabelsInVocabulary(workspaceRoot: string, labels: readonly string[]): void {
+  if (labels.length === 0) return;
+  const known = new Set(loadPermissionLabels(workspaceRoot).labels.map((entry) => entry.name));
+  const unknown = [...new Set(labels)].filter((label) => !known.has(label));
+  if (unknown.length > 0) {
+    throw new Error(`Unknown permission label(s): ${unknown.join(', ')}`);
+  }
+}
+
+/**
  * 删除校验（纯函数）：
  *  - 内置标签锁死（reason: 'builtin'）
  *  - 有源或通道引用 → 阻止删除，防孤儿引用（reason: 'in_use'）

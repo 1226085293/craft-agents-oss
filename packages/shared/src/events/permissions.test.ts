@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import {
   BUILTIN_PRIVATE_LABEL,
   addPermissionLabel,
+  assertLabelsInVocabulary,
   canDeletePermissionLabel,
   computeWakeNarrowing,
   gateSourceSlugs,
@@ -275,5 +276,25 @@ describe('computeWakeNarrowing（钉 3 唤醒边界）', () => {
     const spec = computeWakeNarrowing(records, [{ channelKey: G, senderId: 'S' }], baseline, labels);
     // 有效放行 = ['public','private'] → s2/s3（private）过
     expect(spec.enabledSourceSlugs).toEqual(['s2', 's3']);
+  });
+});
+
+describe('assertLabelsInVocabulary（saveConfig 词表闸，v7 §九③）', () => {
+  it('词表内标签（含内置 private）放行', () => {
+    addPermissionLabel(root, 'company');
+    expect(() => assertLabelsInVocabulary(root, ['company', BUILTIN_PRIVATE_LABEL])).not.toThrow();
+  });
+
+  it('空列表放行（= 清除标签，不是打标签）', () => {
+    expect(() => assertLabelsInVocabulary(root, [])).not.toThrow();
+  });
+
+  it('词表外标签拒绝且报错点名', () => {
+    addPermissionLabel(root, 'company');
+    expect(() => assertLabelsInVocabulary(root, ['ghost-label'])).toThrow('ghost-label');
+  });
+
+  it('重复/混合未知标签各报一次', () => {
+    expect(() => assertLabelsInVocabulary(root, ['ghost', 'ghost', 'phantom'])).toThrow('ghost, phantom');
   });
 });

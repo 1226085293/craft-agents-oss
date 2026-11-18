@@ -50,6 +50,44 @@ describe('updateChannelGate', () => {
     expect(updateChannelGate(root, 'message://telegram/-9999', { gateEnabled: true })).toBeNull();
   });
 
+  it('全字段 save→load 往返一致（字段名与 B 切片唤醒重算读取的一致）', () => {
+    seed([{ channelKey: G, pairedAt: 1 }]);
+    updateChannelGate(root, G, {
+      agentId: 'a1',
+      gateEnabled: true,
+      allowedLabels: ['company', 'private'],
+      permissionMode: 'safe',
+      ingestMode: 'at_only',
+      triggerPrompt: '先看日志',
+      recordOnly: true,
+      memoryFeed: false,
+    });
+    const reloaded = loadPairings(root).channels.find((entry) => entry.channelKey === G);
+    expect(reloaded?.agentId).toBe('a1');
+    expect(reloaded?.gateEnabled).toBe(true);
+    expect(reloaded?.allowedLabels).toEqual(['company', 'private']);
+    expect(reloaded?.permissionMode).toBe('safe');
+    expect(reloaded?.ingestMode).toBe('at_only');
+    expect(reloaded?.triggerPrompt).toBe('先看日志');
+    expect(reloaded?.recordOnly).toBe(true);
+    expect(reloaded?.memoryFeed).toBe(false);
+    // null 化再读：键不存在（不是 null 落盘）
+    updateChannelGate(root, G, { agentId: null, triggerPrompt: null });
+    const again = loadPairings(root).channels.find((entry) => entry.channelKey === G);
+    expect(Object.keys(again ?? {})).not.toContain('agentId');
+    expect(Object.keys(again ?? {})).not.toContain('triggerPrompt');
+  });
+
+  it('v1 老记录打补丁后不回填无关字段（H1：缺省=未启用，键保持缺失）', () => {
+    seed([{ channelKey: G, pairedAt: 1 }]);
+    updateChannelGate(root, G, { gateEnabled: true });
+    const reloaded = loadPairings(root).channels.find((entry) => entry.channelKey === G);
+    expect(reloaded?.gateEnabled).toBe(true);
+    for (const key of ['agentId', 'allowedLabels', 'permissionMode', 'ingestMode', 'triggerPrompt', 'recordOnly', 'memoryFeed']) {
+      expect(Object.keys(reloaded ?? {})).not.toContain(key);
+    }
+  });
+
   it('写入后文件升 v2 且其他记录不受影响', () => {
     seed([
       { channelKey: G, pairedAt: 1 },

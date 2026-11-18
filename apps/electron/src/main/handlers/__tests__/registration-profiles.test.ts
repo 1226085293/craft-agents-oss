@@ -93,7 +93,6 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     auth,
     folders,
     files,
-    labels,
     llmConnections,
     llmGateway,
     oauth,
@@ -109,12 +108,15 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     resources,
     transfer,
     memory,
+    memoryDomains,
+    agents,
+    events,
+    tasks,
     usage,
   ] = await Promise.all([
     import('@craft-agent/server-core/handlers/rpc/auth'),
     import('@craft-agent/server-core/handlers/rpc/folders'),
     import('@craft-agent/server-core/handlers/rpc/files'),
-    import('@craft-agent/server-core/handlers/rpc/labels'),
     import('@craft-agent/server-core/handlers/rpc/llm-connections'),
     import('@craft-agent/server-core/handlers/rpc/llm-gateway'),
     import('@craft-agent/server-core/handlers/rpc/oauth'),
@@ -130,6 +132,10 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     import('@craft-agent/server-core/handlers/rpc/resources'),
     import('@craft-agent/server-core/handlers/rpc/transfer'),
     import('@craft-agent/server-core/handlers/rpc/memory'),
+    import('@craft-agent/server-core/handlers/rpc/memory-domains'),
+    import('@craft-agent/server-core/handlers/rpc/agents'),
+    import('@craft-agent/server-core/handlers/rpc/events'),
+    import('@craft-agent/server-core/handlers/rpc/tasks'),
     import('@craft-agent/server-core/handlers/rpc/usage'),
   ])
 
@@ -137,7 +143,6 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     ...auth.HANDLED_CHANNELS,
     ...folders.HANDLED_CHANNELS,
     ...files.HANDLED_CHANNELS,
-    ...labels.HANDLED_CHANNELS,
     ...llmConnections.HANDLED_CHANNELS,
     ...llmGateway.HANDLED_CHANNELS,
     ...oauth.HANDLED_CHANNELS,
@@ -153,9 +158,11 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     ...resources.HANDLED_CHANNELS,
     ...transfer.HANDLED_CHANNELS,
     ...memory.HANDLED_CHANNELS,
+    ...memoryDomains.HANDLED_CHANNELS,
+    ...agents.HANDLED_CHANNELS,
+    ...events.HANDLED_CHANNELS,
+    ...tasks.HANDLED_CHANNELS,
     ...usage.HANDLED_CHANNELS,
-    'tasks:getOutput',
-    'tasks:stop',
   ])
 }
 
@@ -184,6 +191,10 @@ describe('RPC handler profile registration', () => {
 
   it('registerCoreRpcHandlers registers only core channels', async () => {
     const expected = await getExpectedCoreChannels()
+    // Push-only channels (delivered via pushTyped, never registered through
+    // handle()) do not take part in the handle() coverage assertion.
+    expected.delete('agents:changed')
+    expected.delete('taskboard:changed')
     const { registerCoreRpcHandlers } = await import('../index')
 
     registerCoreRpcHandlers(createMockServer(), createMockDeps())

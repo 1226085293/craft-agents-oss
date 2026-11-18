@@ -1,6 +1,7 @@
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol';
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config';
-import { loadMemoryDomains, type MemoryDomainsFile } from '@craft-agent/shared/memory';
+import { loadAgents } from '@craft-agent/shared/agents';
+import { ensureAgentMemoryDomain, loadMemoryDomains, type MemoryDomainsFile } from '@craft-agent/shared/memory';
 import type { RpcServer } from '@craft-agent/server-core/transport';
 import type { HandlerDeps } from '../handler-deps';
 
@@ -21,6 +22,11 @@ export function registerMemoryDomainsHandlers(server: RpcServer, deps: HandlerDe
       log.error(`MEMORY_DOMAINS_LIST: Workspace not found: ${workspaceId}`);
       return { version: 1, domains: [] };
     }
-    return loadMemoryDomains(workspace.rootPath);
+    // 每个助手自动注册一个可写个人域（幂等；v7 §九④ 最小动作——缺省兜底语义在
+    // resolveAgentMemoryDomain：memoryDomain 未设/失效 → 个人域，查询时兜底不落库）
+    for (const agent of loadAgents(workspace.rootPath).agents) {
+      ensureAgentMemoryDomain(workspace.rootPath, agent.id);
+    }
+    return loadMemoryDomains(workspace.rootPath, false);
   });
 }

@@ -566,7 +566,19 @@ export interface ElectronAPI {
     pauseReason?: string | null
   }>>
   tasksGet(workspaceId: string, id: string, includeJournal?: boolean): Promise<unknown>
-  tasksUpdate(workspaceId: string, id: string, status: string): Promise<unknown>
+  tasksUpdate(
+    workspaceId: string,
+    id: string,
+    status: string,
+    /** Same patch surface the task supervisor can write (see the taskboard.UPDATE handler). */
+    options?: {
+      pauseReason?: string
+      error?: string
+      scope?: string
+      directive?: string
+      name?: string
+    },
+  ): Promise<unknown>
   tasksRun(workspaceId: string, id: string): Promise<{ started: boolean; reason?: string }>
   tasksDelete(workspaceId: string, id: string): Promise<{ ok: boolean; reason?: string }>
   /**

@@ -82,20 +82,4 @@ export function addToBatch(batch: BatchState | undefined, message: BatchMessage)
   return { action: 'append', batch: appended };
 }
 
-/**
- * Should this batch be judged at all, or dropped?
- *
- * A batch of one plain message in a group the bot was not addressed in is
- * ambient chatter. Judging it spends a model call to be told "not for me" — the
- * single largest cost in the design. Mentions and private messages are always
- * judged; group messages need either a mention or an already-open batch.
- *
- * `atOnly` is the channel's ingest mode (`at_only` = only @ matters, which is the
- * default). A channel deliberately set to receive everything bypasses this.
- */
-export function shouldJudge(batch: BatchState, opts: { isGroup: boolean; atOnly: boolean }): boolean {
-  if (batch.messages.length === 0) return false;
-  if (!opts.isGroup) return true;
-  if (!opts.atOnly) return true;
-  return batch.messages.some((message) => message.mentionsBot === true);
-}
+

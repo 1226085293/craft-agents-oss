@@ -13,7 +13,6 @@ import {
   addToBatch,
   isBatchExpired,
   openBatch,
-  shouldJudge,
   type BatchMessage,
 } from './batch-window.ts';
 
@@ -63,28 +62,5 @@ describe('batch window', () => {
     const decision = addToBatch(batch, msg('b', 10, true));
     expect(decision.action).toBe('close');
     if (decision.action === 'close') expect(decision.closed.messages).toHaveLength(2);
-  });
-});
-
-describe('shouldJudge', () => {
-  it('judges private messages always', () => {
-    expect(shouldJudge(openBatch(msg('a', 0)), { isGroup: false, atOnly: true })).toBe(true);
-  });
-
-  it('drops ambient group chatter under at_only', () => {
-    expect(shouldJudge(openBatch(msg('a', 0)), { isGroup: true, atOnly: true })).toBe(false);
-  });
-
-  it('judges a group batch once the bot was mentioned', () => {
-    const batch = { messages: [msg('a', 0), msg('b', 10, true)], openedAt: 0 };
-    expect(shouldJudge(batch, { isGroup: true, atOnly: true })).toBe(true);
-  });
-
-  it('judges everything when the channel opted out of at_only', () => {
-    expect(shouldJudge(openBatch(msg('a', 0)), { isGroup: true, atOnly: false })).toBe(true);
-  });
-
-  it('never judges an empty batch', () => {
-    expect(shouldJudge({ messages: [], openedAt: 0 }, { isGroup: false, atOnly: false })).toBe(false);
   });
 });

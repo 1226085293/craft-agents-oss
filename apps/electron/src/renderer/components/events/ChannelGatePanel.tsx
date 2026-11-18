@@ -252,7 +252,11 @@ export function ChannelGatePanel({
             type="checkbox"
             checked={gateEnabled}
             onChange={(e) => {
-              setGateEnabled(e.target.checked)
+              const next = e.target.checked
+              setGateEnabled(next)
+              // 关闸即清标签（与盘上 patch.allowedLabels=[] 保持同步）：重开闸必须显式重选，
+              // 直接红警；否则本地残留的旧标签会被静默恢复，fail-safe 失效。
+              if (!next) setAllowedLabels([])
               markDirty()
             }}
           />

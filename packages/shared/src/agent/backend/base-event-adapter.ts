@@ -14,9 +14,18 @@
  * - Turn lifecycle (reset on new turn)
  */
 
+import { redactBashOutput } from '../bash-redaction.ts';
 import type { AgentEvent } from '@craft-agent/core/types';
 import { parseReadCommand, type ReadCommandInfo } from './read-patterns.ts';
 import { createLogger } from '../../utils/debug.ts';
+
+/**
+ * Tools whose output is shell text (stage 10).
+ *
+ * `script_sandbox` runs commands too, so it is in scope for the same reason as
+ * `bash`: both can print whatever the machine has in its environment.
+ */
+const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set(['bash', 'script_sandbox']);
 /** MCP server name used by the pool server */
 const POOL_SERVER_MCP_NAME = 'sources';
 
@@ -229,7 +238,12 @@ export abstract class BaseEventAdapter {
       type: 'tool_result',
       toolUseId: id,
       toolName,
-      result,
+      // Stage 10: shell output is the place secrets leak into a transcript (an
+      // `env` dump, a token pasted into a command, a key printed by accident).
+      // String-level only — it cannot catch a shape nobody anticipated, and it is
+      // not meant to; it keeps the common leaks out of session.jsonl and out of
+      // the model's context. Other tools keep their output untouched.
+      result: SHELL_TOOL_NAMES.has(toolName) ? redactBashOutput(result) : result,
       isError,
       turnId: this.currentTurnId || undefined,
       parentToolUseId,

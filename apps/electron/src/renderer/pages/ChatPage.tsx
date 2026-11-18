@@ -908,7 +908,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
         <button
           type="button"
           aria-label="切换督导会话"
-          title="督导会话有两个：任务通道做活，用户通道只放需要你读的消息"
+          title="督导会话有两个：用户通道处理需要你读的消息；任务通道是只读档案（任务执行已迁到任务会话）"
           className="flex min-w-0 max-w-full items-center gap-1 rounded px-1 py-0.5 text-left text-sm font-semibold transition-colors hover:bg-foreground/[0.06] focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <span className="min-w-0 truncate">{supervisorTitle}</span>
@@ -919,6 +919,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
         {(['task', 'user'] as const).map((lane) => (
           <StyledDropdownMenuItem key={lane} onClick={() => void handleLaneChange(lane)}>
             <span className="flex-1">{lane === 'task' ? '督导·任务' : '督导·用户'}</span>
+            {lane === 'task' ? (
+              <span className="text-[10px] text-muted-foreground/70">只读</span>
+            ) : null}
             {currentLane === lane ? (
               <span className="text-[11px] text-muted-foreground">当前</span>
             ) : null}
@@ -999,6 +1002,18 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
         <>
           <div className="h-full flex flex-col" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
             <PanelHeader  hidden={hideChatHeader} title={headerTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
+            {/* 任务车道 = 只读壳（v7 §三）：工具层已剥离派活工具，UI 同步——
+                保留记录可查（可提问），不再宣称“做活”。 */}
+            {isSupervisorSession && currentLane === 'task' ? (
+              <div className="flex items-center gap-2 border-b border-border/40 bg-muted/40 px-4 py-1.5 text-[11px] text-muted-foreground">
+                <Info className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                <span>
+                  {t('chat.supervisorTaskLaneReadOnly', {
+                    defaultValue: '任务车道现为只读档案：任务执行已迁移到任务会话（worker 车道）。这里保留历史记录供查阅，仍可提问，但不能再派活。',
+                  })}
+                </span>
+              </div>
+            ) : null}
             <div className="flex-1 flex flex-col min-h-0">
               <ChatDisplay
                 ref={setChatDisplayRef}

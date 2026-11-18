@@ -29,11 +29,15 @@ export function SourceLabelsEditor({
   const [newLabel, setNewLabel] = React.useState('')
   const [readOnly, setReadOnly] = React.useState(source.config.readOnly === true)
   const [busy, setBusy] = React.useState(false)
+  // 本地 draft（收口验收 #1 发现）：快速连勾多个 chip 时若以陈的 source prop 做
+  // read-modify-write 基底会丢失更新（两次 save 竞争、后写覆盖先写）——
+  // 勾选一律基于本地 draft，refetch 落地后由下方 effect 与盘面对账。
+  const [draftLabels, setDraftLabels] = React.useState<string[]>(source.config.labels ?? [])
+  React.useEffect(() => {
+    setDraftLabels(source.config.labels ?? [])
+  }, [source])
 
-  const current = React.useMemo(
-    () => (source.config.labels && source.config.labels.length > 0 ? source.config.labels : []),
-    [source.config.labels],
-  )
+  const current = draftLabels
 
   React.useEffect(() => {
     setReadOnly(source.config.readOnly === true)
@@ -59,8 +63,8 @@ export function SourceLabelsEditor({
       .catch(() => undefined)
 
   const toggle = async (label: string, on: boolean): Promise<void> => {
-    const base = source.config.labels ?? []
-    const next = on ? [...new Set([...base, label])] : base.filter((entry) => entry !== label)
+    const next = on ? [...new Set([...draftLabels, label])] : draftLabels.filter((entry) => entry !== label)
+    setDraftLabels(next)
     setBusy(true)
     try {
       // 空集合 = 保存 undefined（回到「无标签 → 查询时按 private」默认语义）

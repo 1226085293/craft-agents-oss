@@ -78,12 +78,15 @@ export function ChannelGatePanel({
   const [claimResult, setClaimResult] = React.useState<string | null>(null)
   const [preview, setPreview] = React.useState<ChannelGatePreview | null>(null)
   const [savedFlash, setSavedFlash] = React.useState(false)
+  // 保存成功后 +1：预览 RPC 读盘，本地 draft 领先 600ms 去抖，保存落地后重取才对得齐
+  const [previewNonce, setPreviewNonce] = React.useState(0)
 
   const isGroup = row.channelKind === 'group'
   // 预览的「全禁」红警与标签区的全禁红警是同一状态的两处呈现，
   // 标签区已经给了 fullDeny 警告，这里不重复渲染。
 
-  // 源可见性预览（阶段 1 半成品：只有标签交集）
+  // 源可见性预览（阶段 1 半成品：只有标签交集）。依赖闸字段：保存后 row 换引用但
+  // channelKey 不变，只依赖 key 的话预览会停在旧值（收口验收 #3 发现）。
   React.useEffect(() => {
     let cancelled = false
     void window.electronAPI
@@ -101,7 +104,7 @@ export function ChannelGatePanel({
     return () => {
       cancelled = true
     }
-  }, [workspaceId, row.channelKey])
+  }, [workspaceId, row.channelKey, gateEnabled, allowedLabels, previewNonce])
 
   // 自动保存（首渲染不算；row 引用变化=外部已刷新，重置基线）
   const baseline = React.useRef({
@@ -125,6 +128,7 @@ export function ChannelGatePanel({
         .then(() => {
           setSavedFlash(true)
           setTimeout(() => setSavedFlash(false), 1500)
+          setPreviewNonce((n) => n + 1)
           onSaved()
         })
         .catch(() => undefined)

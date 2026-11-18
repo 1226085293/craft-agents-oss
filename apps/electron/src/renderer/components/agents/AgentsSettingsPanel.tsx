@@ -365,7 +365,9 @@ export function AgentsSettingsPanel({
         if (cancelled) return
         setMemoryDomainOptions([
           {
-            value: '',
+            // Radix Select.Item 拒空字符串 value（会让整个 agents 页崩到错误边界，
+            // 活体验收 11-18 抓到）——照下方 defaultStrategy 的 __follow 哨兵范式
+            value: '__none__',
             label: t('settings.agents.memoryDomainNone', { defaultValue: '未指定 · 默认个人域' }),
           },
           ...file.domains.map((domain) => ({
@@ -744,9 +746,9 @@ export function AgentsSettingsPanel({
                   </div>
                   <SettingsSelectRow
                     label={t('settings.agents.memoryDomain', { defaultValue: '记忆域' })}
-                    value={draft.memoryDomain ?? ''}
+                    value={draft.memoryDomain ?? '__none__'}
                     onValueChange={(next) =>
-                      setDraft({ ...draft, memoryDomain: next || undefined })
+                      setDraft({ ...draft, memoryDomain: next === '__none__' ? undefined : next })
                     }
                     options={memoryDomainOptions}
                   />

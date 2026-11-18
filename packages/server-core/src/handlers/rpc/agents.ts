@@ -149,6 +149,13 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
             defaults: { ...EMPTY_DEFAULTS, ...file.defaults.defaults, ...(input.defaults ?? {}) },
             sources: input.sources ? normalizeScope(input.sources) : file.defaults.sources,
             skills: input.skills ? normalizeScope(input.skills) : file.defaults.skills,
+            // 渠道闸门（v6/v7）：default agent 卡上的开关/记忆域也落 defaults 块
+            // （同读侧白名单，漏了就是「保存后刷新丢值」）。memoryDomain 空串=未指定，
+            // 不写 key（JSON 无法表达显式 undefined，清除旧值留待域体系阶段 4 一起接）
+            ...(input.assignable !== undefined ? { assignable: input.assignable } : {}),
+            ...(typeof input.memoryDomain === 'string' && input.memoryDomain.trim()
+              ? { memoryDomain: input.memoryDomain.trim() }
+              : {}),
           },
         });
         broadcast(workspaceId);
@@ -168,9 +175,12 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
         defaults: { ...EMPTY_DEFAULTS, ...(input.defaults ?? {}) },
         sources: normalizeScope(input.sources),
         skills: normalizeScope(input.skills),
-        // 渠道闸门（v6/v7）：可分配开关 + 记忆域（缺省=不进入派活名单/未接域体系）
+        // 渠道闸门（v6/v7）：可分配开关 + 记忆域（缺省=不进入派活名单/未接域体系）。
+        // memoryDomain 归一化：非空才写，空串=未指定（不落 ''，与读侧白名单同语义）
         ...(input.assignable !== undefined ? { assignable: input.assignable } : {}),
-        ...(input.memoryDomain !== undefined ? { memoryDomain: input.memoryDomain } : {}),
+        ...(typeof input.memoryDomain === 'string' && input.memoryDomain.trim()
+          ? { memoryDomain: input.memoryDomain.trim() }
+          : {}),
         builtin: false,
         createdAt: existingAt >= 0 ? file.agents[existingAt].createdAt : now,
         updatedAt: now,

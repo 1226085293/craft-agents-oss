@@ -245,3 +245,41 @@ describe('v0 → v1 migration', () => {
     expect(loadAgents(ws).defaults.defaults.strategy).toBe('already-set');
   });
 });
+
+describe('channel-gate fields survive the read-side whitelist（11-18 活体验收：SAVE 白名单修了、读侧 normalizeProfile 没修 → 每次 load 都把 assignable/memoryDomain 剥掉，GET/水合丢值 → 自动保存回写污染）', () => {
+  it('profile 行：save→load 往返两字段不丢', () => {
+    const ws = workspace();
+    const file = loadAgents(ws);
+    saveAgents(ws, {
+      ...file,
+      agents: [{ ...profile(), assignable: true, memoryDomain: 'agent-frontend' }],
+    });
+    const reloaded = loadAgents(ws);
+    expect(reloaded.agents[0]?.assignable).toBe(true);
+    expect(reloaded.agents[0]?.memoryDomain).toBe('agent-frontend');
+  });
+
+  it('memoryDomain 空串/纯空白 = 未指定，读时剥除（H1 缺省语义，不落 "" 进库）', () => {
+    const ws = workspace();
+    const file = loadAgents(ws);
+    saveAgents(ws, { ...file, agents: [{ ...profile(), memoryDomain: '   ' }] });
+    expect(loadAgents(ws).agents[0]?.memoryDomain).toBeUndefined();
+  });
+
+  it('assignable=false 显式落盘（关 vs 缺省 读时同 false，但字段保留）', () => {
+    const ws = workspace();
+    const file = loadAgents(ws);
+    saveAgents(ws, { ...file, agents: [{ ...profile(), assignable: false }] });
+    expect(loadAgents(ws).agents[0]?.assignable).toBe(false);
+  });
+
+  it('defaults 块（default agent 卡）两字段同样不丢', () => {
+    const ws = workspace();
+    const file = loadAgents(ws);
+    file.defaults = { ...file.defaults, assignable: true, memoryDomain: 'shared-domain' };
+    saveAgents(ws, file);
+    const reloaded = loadAgents(ws);
+    expect(reloaded.defaults.assignable).toBe(true);
+    expect(reloaded.defaults.memoryDomain).toBe('shared-domain');
+  });
+});

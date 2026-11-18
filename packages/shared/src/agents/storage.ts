@@ -71,6 +71,13 @@ function normalizeProfile(raw: unknown, now: number): AgentProfile | null {
     defaults: normalizeDefaults(v.defaults),
     sources: normalizeScope(v.sources, ALL_SCOPE),
     skills: normalizeScope(v.skills, ALL_SCOPE),
+    // 渠道闸门（v6/v7）：可分配开关 + 记忆域。读侧白名单漏掉这两字段会被
+    // 每次 loadAgents 剥掉（11-18 活体验收抓到：SAVE 写入 → 下次 load 丢 →
+    // GET/水合丢 → 自动保存回写丢值）——与 SAVE 白名单同类坑。
+    ...(typeof v.assignable === 'boolean' ? { assignable: v.assignable } : {}),
+    ...(typeof v.memoryDomain === 'string' && v.memoryDomain.trim()
+      ? { memoryDomain: v.memoryDomain.trim() }
+      : {}),
     builtin: v.builtin === true,
     createdAt: typeof v.createdAt === 'number' ? v.createdAt : now,
     updatedAt: typeof v.updatedAt === 'number' ? v.updatedAt : now,
@@ -113,6 +120,11 @@ export function loadAgents(workspaceRoot: string): AgentsFile {
       defaults: normalizeDefaults(defaultsRaw.defaults),
       sources: normalizeScope(defaultsRaw.sources, ALL_SCOPE),
       skills: normalizeScope(defaultsRaw.skills, ALL_SCOPE),
+      // 与 profile 白名单同补：default agent 卡上的开关/记忆域也在 defaults 块里
+      ...(typeof defaultsRaw.assignable === 'boolean' ? { assignable: defaultsRaw.assignable } : {}),
+      ...(typeof defaultsRaw.memoryDomain === 'string' && defaultsRaw.memoryDomain.trim()
+        ? { memoryDomain: defaultsRaw.memoryDomain.trim() }
+        : {}),
     },
     agents,
   };

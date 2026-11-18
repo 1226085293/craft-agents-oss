@@ -342,6 +342,9 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.events.PAIRING_LIST,
   RPC_CHANNELS.events.PAIRING_UNPAIR,
   RPC_CHANNELS.events.CHANNEL_LABELS,
+  RPC_CHANNELS.events.CHANNEL_GATE,
+  RPC_CHANNELS.events.CHANNEL_GATE_PREVIEW,
+  RPC_CHANNELS.events.CHANNEL_CLAIM,
   // taskboard — tasks are workspace state, not renderer state
   RPC_CHANNELS.taskboard.RUN,
   RPC_CHANNELS.taskboard.DELETE,
@@ -428,12 +431,17 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   // sources — source config per-workspace
   RPC_CHANNELS.sources.GET,
   RPC_CHANNELS.sources.CREATE,
+  RPC_CHANNELS.sources.SAVE_CONFIG,
+  RPC_CHANNELS.sources.LABELS,
   RPC_CHANNELS.sources.DELETE,
   RPC_CHANNELS.sources.START_OAUTH,
   RPC_CHANNELS.sources.SAVE_CREDENTIALS,
   RPC_CHANNELS.sources.CHANGED,
   RPC_CHANNELS.sources.GET_PERMISSIONS,
   RPC_CHANNELS.sources.GET_MCP_TOOLS,
+
+  // memoryDomains — per-workspace memory domain registry (config/memory-domains.json)
+  RPC_CHANNELS.memoryDomains.LIST,
 
   // oauth — OAuth state management
   RPC_CHANNELS.oauth.START,

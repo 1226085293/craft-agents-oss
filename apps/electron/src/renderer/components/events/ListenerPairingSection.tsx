@@ -17,6 +17,7 @@
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { Plus } from 'lucide-react'
+import { ChannelGatePanel, type ChannelGateAgent, type ChannelGateRow } from './ChannelGatePanel'
 
 export interface ListenerPairingSectionProps {
   workspaceId: string
@@ -28,46 +29,74 @@ export function ListenerPairingSection({
   listenerId,
 }: ListenerPairingSectionProps): React.ReactElement {
   const { t } = useTranslation()
-  const [channels, setChannels] = React.useState<Array<{ channelKey: string; pairedAt: number }>>([])
+  // pairings v2：行上带通道闸字段（老记录全缺省 = 闸关/无天花板/写保护未启用）
+  const [channels, setChannels] = React.useState<ChannelGateRow[]>([])
   const [code, setCode] = React.useState<{ value: string; expiresAt: number } | null>(null)
   const [now, setNow] = React.useState(0)
   /** Display names the plugin itself resolves for its channel keys. */
   const [labels, setLabels] = React.useState<Record<string, string>>({})
+  /** 通道闸面板的助手下拉数据（agentsList 扁平表，带分工说明预览） */
+  const [agentOptions, setAgentOptions] = React.useState<ChannelGateAgent[]>([])
+  /** 标签词表（config/permission-labels.json；「私有」内置锁定） */
+  const [labelVocab, setLabelVocab] = React.useState<string[]>([])
+  /** 展开闸设置面板的渠道（一次只展开一个） */
+  const [expandedKey, setExpandedKey] = React.useState<string | null>(null)
+
+  const refreshVocabulary = React.useCallback((): void => {
+    void window.electronAPI
+      .sourceLabels(workspaceId, { action: 'list' })
+      .then((file) => setLabelVocab(file.labels.map((entry) => entry.name)))
+      .catch(() => undefined)
+  }, [workspaceId])
+
+  React.useEffect(() => {
+    void window.electronAPI
+      .agentsList(workspaceId)
+      .then((list) =>
+        setAgentOptions(
+          list.map((agent) => ({
+            id: agent.id,
+            name: agent.name,
+            icon: agent.icon,
+            dispatchHint: agent.dispatchHint,
+            assignable: agent.assignable,
+          })),
+        ),
+      )
+      .catch(() => undefined)
+    refreshVocabulary()
+  }, [workspaceId, refreshVocabulary])
 
   // Pairing happens in-chat (`/pair <code>`), not on this page — so the
   // list must keep refreshing like the outbox does: five-second poll,
   // the same cadence the dispatcher uses. Channel display names come from
   // the plugin's control service in the same pass — the host never learns
   // platform vocabulary, it just renders what the plugin answers.
+  const load = React.useCallback((): void => {
+    void window.electronAPI
+      .pairingList(workspaceId)
+      .then((rows) => {
+        setChannels(rows)
+        const keys = rows
+          .filter((row) => row.pairedAt > 0 && row.channelKey.startsWith(`message://${listenerId}/`))
+          .map((row) => row.channelKey)
+        if (keys.length === 0) {
+          setLabels({})
+          return
+        }
+        window.electronAPI
+          .channelLabels(workspaceId, listenerId, keys)
+          .then(setLabels)
+          .catch(() => setLabels({}))
+      })
+      .catch(() => undefined)
+  }, [workspaceId, listenerId])
+
   React.useEffect(() => {
-    let cancelled = false
-    const load = () => {
-      window.electronAPI
-        .pairingList(workspaceId)
-        .then((rows) => {
-          if (cancelled) return
-          setChannels(rows)
-          const keys = rows
-            .filter((row) => row.pairedAt > 0 && row.channelKey.startsWith(`message://${listenerId}/`))
-            .map((row) => row.channelKey)
-          if (keys.length === 0) {
-            setLabels({})
-            return
-          }
-          window.electronAPI
-            .channelLabels(workspaceId, listenerId, keys)
-            .then(setLabels)
-            .catch(() => setLabels({}))
-        })
-        .catch(() => undefined)
-    }
     load()
     const timer = setInterval(load, 5000)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [workspaceId, listenerId])
+    return () => clearInterval(timer)
+  }, [load])
 
   React.useEffect(() => {
     if (!code) return
@@ -137,26 +166,48 @@ export function ListenerPairingSection({
           <h3 className="mb-1.5 text-xs text-muted-foreground">{t('events.listener.pairing.pairedChannels')}</h3>
           <ul className="space-y-1.5">
             {ownChannels.map((row) => (
-              <li key={row.channelKey} className="flex min-w-0 items-center gap-2 text-[13px] leading-5">
-                {labels[row.channelKey] ? (
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-foreground" title={row.channelKey}>
-                      {labels[row.channelKey]}
+              <li key={row.channelKey} className="text-[13px] leading-5">
+                <div className="flex min-w-0 items-center gap-2">
+                  {labels[row.channelKey] ? (
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-foreground" title={row.channelKey}>
+                        {labels[row.channelKey]}
+                      </div>
+                      <div className="truncate font-mono text-[11px] text-muted-foreground/70">{row.channelKey}</div>
                     </div>
-                    <div className="truncate font-mono text-[11px] text-muted-foreground/70">{row.channelKey}</div>
-                  </div>
-                ) : (
-                  <span className="min-w-0 flex-1 truncate font-mono text-foreground/90" title={row.channelKey}>
-                    {row.channelKey}
-                  </span>
+                  ) : (
+                    <span className="min-w-0 flex-1 truncate font-mono text-foreground/90" title={row.channelKey}>
+                      {row.channelKey}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setExpandedKey(expandedKey === row.channelKey ? null : row.channelKey)}
+                    className="shrink-0 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    title={t('events.channelGate.settingsTitle', { defaultValue: '通道闸门设置' })}
+                  >
+                    {expandedKey === row.channelKey
+                      ? t('events.channelGate.collapse', { defaultValue: '收起设置' })
+                      : t('events.channelGate.settings', { defaultValue: '设置' })}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => unpair(row.channelKey)}
+                    className="ml-auto shrink-0 text-xs text-muted-foreground transition-colors hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {t('events.listener.pairing.unpair')}
+                  </button>
+                </div>
+                {expandedKey === row.channelKey && (
+                  <ChannelGatePanel
+                    workspaceId={workspaceId}
+                    row={row}
+                    agents={agentOptions}
+                    labelVocabulary={labelVocab}
+                    onSaved={load}
+                    onVocabularyChange={refreshVocabulary}
+                  />
                 )}
-                <button
-                  type="button"
-                  onClick={() => unpair(row.channelKey)}
-                  className="ml-auto shrink-0 text-xs text-muted-foreground transition-colors hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  {t('events.listener.pairing.unpair')}
-                </button>
               </li>
             ))}
           </ul>

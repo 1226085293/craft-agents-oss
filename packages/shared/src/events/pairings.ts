@@ -240,6 +240,77 @@ export function parsePairingAttempt(text: string | undefined): string | null {
  * defaults to the registry's base language; wire the app language through
  * when it gains a server-side home.
  */
+/**
+ * 通道闸配置补丁（v6/v7 切片 C，全部落在配对记录上）。
+ * `undefined` = 不动该字段；`null`/空 = 显式清空（gateEnabled 用 false 表达「关」）。
+ */
+export interface ChannelGatePatch {
+  agentId?: string | null;
+  gateEnabled?: boolean;
+  allowedLabels?: string[];
+  permissionMode?: PermissionModeCeiling | null;
+  ingestMode?: IngestMode;
+  triggerPrompt?: string | null;
+  recordOnly?: boolean;
+  memoryFeed?: boolean;
+}
+
+/**
+ * 更新通道闸配置（配对后也可改）。未配对/不存在的渠道返回 null。
+ * 只动补丁里出现的字段；缺省字段保持原值（老记录零回归不变）。
+ */
+export function updateChannelGate(
+  workspaceRoot: string,
+  channelKey: string,
+  patch: ChannelGatePatch,
+): PairedChannelRecord | null {
+  const file = loadPairings(workspaceRoot);
+  const record = file.channels.find((entry) => entry.channelKey === channelKey && entry.pairedAt > 0);
+  if (!record) return null;
+  const next: PairedChannelRecord = { ...record };
+  if (patch.agentId !== undefined) next.agentId = patch.agentId || undefined;
+  if (patch.gateEnabled !== undefined) next.gateEnabled = patch.gateEnabled;
+  if (patch.allowedLabels !== undefined) next.allowedLabels = [...patch.allowedLabels];
+  if (patch.permissionMode !== undefined) next.permissionMode = patch.permissionMode || undefined;
+  if (patch.ingestMode !== undefined) next.ingestMode = patch.ingestMode;
+  if (patch.triggerPrompt !== undefined) next.triggerPrompt = patch.triggerPrompt || undefined;
+  if (patch.recordOnly !== undefined) next.recordOnly = patch.recordOnly;
+  if (patch.memoryFeed !== undefined) next.memoryFeed = patch.memoryFeed;
+  file.channels = file.channels.map((entry) => (entry.channelKey === channelKey ? next : entry));
+  savePairings(workspaceRoot, file);
+  return next;
+}
+
+/**
+ * 认领（修 2：启用写保护，不是解锁——缺省语义 = 保护未开，见 PairedChannelRecord.pairedBy）。
+ * pairedBy 取**同平台私聊配对记录**的 senderId（channelKind 进记录就是为对得上）；
+ * 同平台无私聊配对 → 降级重新配对（reason: 'no_private_pairing'）。
+ * 桌面端操作者即本人，点击是可信输入，不加额外验证。
+ */
+export function claimChannelOwnership(
+  workspaceRoot: string,
+  channelKey: string,
+): { ok: boolean; pairedBy?: string; reason?: 'not_paired' | 'no_private_pairing' } {
+  const file = loadPairings(workspaceRoot);
+  const record = file.channels.find((entry) => entry.channelKey === channelKey && entry.pairedAt > 0);
+  if (!record) return { ok: false, reason: 'not_paired' };
+  const platform = channelKey.split('/')[2]; // `message://<platform>/<chatId>`
+  if (!platform) return { ok: false, reason: 'no_private_pairing' };
+  const prefix = `message://${platform}/`;
+  const donor = file.channels.find(
+    (entry) =>
+      entry.pairedAt > 0 &&
+      entry.channelKey !== channelKey &&
+      entry.channelKey.startsWith(prefix) &&
+      entry.channelKind === 'private' &&
+      Boolean(entry.pairedBy),
+  );
+  if (!donor?.pairedBy) return { ok: false, reason: 'no_private_pairing' };
+  record.pairedBy = donor.pairedBy;
+  savePairings(workspaceRoot, file);
+  return { ok: true, pairedBy: donor.pairedBy };
+}
+
 export function pairingTexts(language?: string): { prompt: string; paired: string; codeInvalid: string } {
   const code = (language && language in LOCALE_REGISTRY ? language : 'en') as LanguageCode;
   const messages = LOCALE_REGISTRY[code].messages as Record<string, string>;

@@ -68,6 +68,9 @@ function toOption(agent: AgentProfile) {
     icon: agent.icon,
     description: (hint ?? firstLine)?.slice(0, 80) || undefined,
     dispatchHint: hint,
+    // 渠道闸门（v6/v7）：可分配开关（缺省 false）——通道助手下拉 + 派活名单用
+    assignable: agent.assignable === true,
+    memoryDomain: agent.memoryDomain,
     builtin: agent.builtin === true,
   };
 }
@@ -165,6 +168,9 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
         defaults: { ...EMPTY_DEFAULTS, ...(input.defaults ?? {}) },
         sources: normalizeScope(input.sources),
         skills: normalizeScope(input.skills),
+        // 渠道闸门（v6/v7）：可分配开关 + 记忆域（缺省=不进入派活名单/未接域体系）
+        ...(input.assignable !== undefined ? { assignable: input.assignable } : {}),
+        ...(input.memoryDomain !== undefined ? { memoryDomain: input.memoryDomain } : {}),
         builtin: false,
         createdAt: existingAt >= 0 ? file.agents[existingAt].createdAt : now,
         updatedAt: now,

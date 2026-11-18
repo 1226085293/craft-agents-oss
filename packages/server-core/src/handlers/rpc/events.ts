@@ -24,7 +24,17 @@ import { runInstallCommand, type InstallResult } from '../../events/dependency-i
 import { installMcp, type McpInstallResult } from '../../events/mcp-registry';
 import { fetchReportedDeps, postDepAction, callPluginAction, fetchChannelLabels } from '../../events/listener-control';
 import { recordOutboxCall } from '@craft-agent/shared/events/outbox.ts';
-import { generatePairingCode, listPairedChannels, unpairChannel } from '@craft-agent/shared/events/pairings.ts';
+import {
+  claimChannelOwnership,
+  generatePairingCode,
+  listPairedChannels,
+  loadPairings,
+  unpairChannel,
+  updateChannelGate,
+  type ChannelGatePatch,
+} from '@craft-agent/shared/events/pairings.ts';
+import { computeWakeNarrowing, sourceLabelSet } from '@craft-agent/shared/events/permissions.ts';
+import { getEnabledSources } from '@craft-agent/shared/sources';
 import {
   loadSubscriptions,
   saveSubscriptions,
@@ -65,6 +75,9 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.events.OUTBOX_PURGE,
   RPC_CHANNELS.events.OUTBOX_REMOVE,
   RPC_CHANNELS.events.DELETE,
+  RPC_CHANNELS.events.CHANNEL_GATE,
+  RPC_CHANNELS.events.CHANNEL_GATE_PREVIEW,
+  RPC_CHANNELS.events.CHANNEL_CLAIM,
 ] as const;
 
 function requireWorkspace(workspaceId: string) {
@@ -444,6 +457,49 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
     if (!channelKey) throw new Error('channelKey is required');
     const workspace = requireWorkspace(workspaceId);
     return { success: unpairChannel(workspace.rootPath, channelKey) };
+  });
+
+  // --- Channel gate (v6/v7 slice C) ------------------------------------------
+  // Per-channel agent/labels/mode config lives on the pairing record (pairings v2).
+
+  server.handle(RPC_CHANNELS.events.CHANNEL_GATE, async (_ctx, workspaceId: string, channelKey: string, patch: ChannelGatePatch) => {
+    if (!channelKey) throw new Error('channelKey is required');
+    const workspace = requireWorkspace(workspaceId);
+    const record = updateChannelGate(workspace.rootPath, channelKey, patch ?? {});
+    if (!record) throw new Error('Channel is not paired');
+    return record;
+  });
+
+  /**
+   * 源可见性预览（阶段 1 半成品：只有标签交集；模式裁剪阶段 6 才生效）。
+   * gateEnabled=false → visibleSlugs = allSlugs（零回归）；[] = 故意全禁。
+   */
+  server.handle(RPC_CHANNELS.events.CHANNEL_GATE_PREVIEW, async (_ctx, workspaceId: string, channelKey: string) => {
+    if (!channelKey) throw new Error('channelKey is required');
+    const root = requireWorkspace(workspaceId).rootPath;
+    const records = loadPairings(root).channels;
+    const enabled = getEnabledSources(root);
+    const allSlugs = enabled.map((source) => source.config.slug);
+    const labelsBySlug = new Map(enabled.map((source) => [source.config.slug, sourceLabelSet(source.config.labels)]));
+    const spec = computeWakeNarrowing(records, [{ channelKey }], allSlugs, labelsBySlug);
+    const record = records.find((entry) => entry.channelKey === channelKey && entry.pairedAt > 0);
+    return {
+      gateEnabled: record?.gateEnabled === true,
+      allowedLabels: record?.gateEnabled === true ? [...(record.allowedLabels ?? [])] : [],
+      permissionMode: record?.permissionMode ?? null,
+      pairedBy: record?.pairedBy ?? null,
+      channelKind: record?.channelKind ?? null,
+      agentId: record?.agentId ?? null,
+      allSlugs,
+      visibleSlugs: spec.enabledSourceSlugs === undefined ? allSlugs : spec.enabledSourceSlugs,
+    };
+  });
+
+  /** 认领（修 2）：启用写保护，pairedBy 取同平台私聊配对记录。 */
+  server.handle(RPC_CHANNELS.events.CHANNEL_CLAIM, async (_ctx, workspaceId: string, channelKey: string) => {
+    if (!channelKey) throw new Error('channelKey is required');
+    const workspace = requireWorkspace(workspaceId);
+    return claimChannelOwnership(workspace.rootPath, channelKey);
   });
 
   // --- Subscriptions -------------------------------------------------------

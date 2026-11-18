@@ -473,6 +473,17 @@ export interface ElectronAPI {
   // Sources
   getSources(workspaceId: string): Promise<LoadedSource[]>
   createSource(workspaceId: string, config: Partial<FolderSourceConfig>): Promise<FolderSourceConfig>
+  /** Patch-save one source config (stage 1: labels/readOnly; round-trips the full object). */
+  saveSourceConfig(
+    workspaceId: string,
+    sourceSlug: string,
+    patch: { labels?: string[]; readOnly?: boolean }
+  ): Promise<FolderSourceConfig>
+  /** Permission-label vocabulary (config/permission-labels.json; "private" is built-in & locked). */
+  sourceLabels(
+    workspaceId: string,
+    request: { action: 'list' | 'add' | 'delete'; name?: string }
+  ): Promise<{ version: number; labels: Array<{ name: string; builtin?: boolean }> }>
   deleteSource(workspaceId: string, sourceSlug: string): Promise<void>
   startSourceOAuth(workspaceId: string, sourceSlug: string): Promise<{ success: boolean; error?: string }>
   saveSourceCredentials(workspaceId: string, sourceSlug: string, credential: string): Promise<void>
@@ -530,10 +541,16 @@ export interface ElectronAPI {
     name: string
     icon?: string
     description?: string
+    dispatchHint?: string
+    /** 可分配任务开关（缺省 false）：只有开启的助手进派活名单。 */
+    assignable?: boolean
+    /** 记忆域（memory-domains.json 的 slug；阶段 4 域解析启用前仅为存档） */
+    memoryDomain?: string
     builtin?: boolean
   }>>
   agentsGet(workspaceId: string, id: string): Promise<Record<string, unknown>>
   agentsSave(workspaceId: string, agent: Record<string, unknown>): Promise<{ id: string }>
+
   agentsDelete(workspaceId: string, id: string): Promise<{ ok: boolean }>
   onAgentsChanged(callback: (payload: { workspaceId: string }) => void): () => void
 
@@ -831,9 +848,59 @@ export interface ElectronAPI {
   /** One-minute, single-use pairing code. Send `/pair <code>` in a chat to unlock it. */
   pairingGenerate(workspaceId: string): Promise<{ code: string; expiresAt: number }>
   /** Channels that are currently paired and allowed to send events. */
+  /**
+   * Paired channels (pairings v2): the gate fields are optional — legacy
+   * records have none of them (缺省 = 闸关/无天花板/写保护未启用, 零回归).
+   */
   pairingList(
     workspaceId: string
-  ): Promise<Array<{ channelKey: string; pairedAt: number }>>
+  ): Promise<Array<{
+    channelKey: string
+    pairedAt: number
+    pairedBy?: string
+    channelKind?: 'private' | 'group' | 'channel'
+    agentId?: string
+    gateEnabled?: boolean
+    allowedLabels?: string[]
+    permissionMode?: 'safe' | 'ask' | 'allow-all'
+    ingestMode?: 'at_only' | 'all'
+    triggerPrompt?: string
+    recordOnly?: boolean
+    memoryFeed?: boolean
+  }>>
+  /** Update one channel's gate config (stored on the pairing record; missing fields keep). */
+  channelGate(
+    workspaceId: string,
+    channelKey: string,
+    patch: {
+      agentId?: string | null
+      gateEnabled?: boolean
+      allowedLabels?: string[]
+      permissionMode?: 'safe' | 'ask' | 'allow-all' | null
+      ingestMode?: 'at_only' | 'all'
+      triggerPrompt?: string | null
+      recordOnly?: boolean
+      memoryFeed?: boolean
+    }
+  ): Promise<{ channelKey: string; pairedAt: number; [key: string]: unknown }>
+  /** 源可见性预览（阶段 1 半成品：只有标签交集；模式裁剪阶段 6 生效）。 */
+  channelGatePreview(workspaceId: string, channelKey: string): Promise<{
+    gateEnabled: boolean
+    allowedLabels: string[]
+    permissionMode: 'safe' | 'ask' | 'allow-all' | null
+    pairedBy: string | null
+    channelKind: 'private' | 'group' | 'channel' | null
+    agentId: string | null
+    allSlugs: string[]
+    visibleSlugs: string[]
+  }>
+  /** 认领（启用写保护）：pairedBy 取同平台私聊配对记录；无私聊配对 → 需重新配对。 */
+  channelClaim(workspaceId: string, channelKey: string): Promise<{ ok: boolean; pairedBy?: string; reason?: 'not_paired' | 'no_private_pairing' }>
+  /** Memory domains (table + auto-registered project domains; 阶段 4 读它做域解析). */
+  memoryDomains(workspaceId: string): Promise<{
+    version: number
+    domains: Array<{ slug: string; kind: 'personal' | 'project'; path?: string; mattersMost?: string }>
+  }>
   /** Unpair a channel; its next message gets the pairing prompt again. */
   pairingUnpair(workspaceId: string, channelKey: string): Promise<{ success: boolean }>
   /**

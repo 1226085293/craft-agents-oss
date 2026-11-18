@@ -40,6 +40,10 @@ interface AgentDraft {
    */
   dispatchHint: string
   persona: string
+  /** 可分配任务开关（渠道闸门 v6/v7）：缺省 false，显式开启才进派活名单 */
+  assignable?: boolean
+  /** 记忆域（memory-domains.json 的 slug；阶段 4 域解析启用前仅为存档） */
+  memoryDomain?: string
   defaults: {
     strategy?: string | null
     model?: string | null
@@ -72,6 +76,8 @@ function contentKey(draft: AgentDraft): string {
     icon: draft.icon ?? null,
     dispatchHint: draft.dispatchHint,
     persona: draft.persona,
+    assignable: draft.assignable ?? false,
+    memoryDomain: draft.memoryDomain ?? '',
     defaults: draft.defaults,
     sources: draft.sources,
     skills: draft.skills,
@@ -83,12 +89,16 @@ function contentKey(draft: AgentDraft): string {
  * bundle does not import that package, so the number is repeated here; the
  * server caps again on write, so a drift can never produce an oversized hint.
  */
-const MAX_HINT_CHARS = 120
+// Mirrors MAX_DISPATCH_HINT_CHARS (raised 120→200 with the 渠道闸门 work: a
+// working description that fits 擅长+不接+边界 needs the room).
+const MAX_HINT_CHARS = 200
 
 const EMPTY: AgentDraft = {
   name: '',
   dispatchHint: '',
   persona: '',
+  assignable: false,
+  memoryDomain: '',
   defaults: { strategy: null, model: null, permissionMode: null, thinkingLevel: null },
   sources: { mode: 'all', slugs: [] },
   skills: { mode: 'all', slugs: [] },
@@ -342,6 +352,37 @@ export function AgentsSettingsPanel({
   const flashRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const selected = agents.find((a) => a.id === selectedId)
+
+  // 记忆域下拉数据源（memory-domains 最小版：表 + 自动注册的 project 共享域）
+  const [memoryDomainOptions, setMemoryDomainOptions] = React.useState<
+    Array<{ value: string; label: string }>
+  >([])
+  React.useEffect(() => {
+    let cancelled = false
+    void window.electronAPI
+      .memoryDomains(workspaceId)
+      .then((file) => {
+        if (cancelled) return
+        setMemoryDomainOptions([
+          {
+            value: '',
+            label: t('settings.agents.memoryDomainNone', { defaultValue: '未指定' }),
+          },
+          ...file.domains.map((domain) => ({
+            value: domain.slug,
+            label: `${
+              domain.kind === 'project'
+                ? t('settings.agents.memoryDomainShared', { defaultValue: '共享' })
+                : t('settings.agents.memoryDomainPersonal', { defaultValue: '个人' })
+            } · ${domain.slug}`,
+          })),
+        ])
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [workspaceId, t])
 
   React.useEffect(() => {
     // The picker list is flat; load the full profile for the selected id.
@@ -674,6 +715,41 @@ export function AgentsSettingsPanel({
                       onChange={(e) => setDraft({ ...draft, persona: e.target.value })}
                     />
                   </div>
+                </SettingsCard>
+              </SettingsSection>
+
+              <SettingsSection
+                title={t('settings.agents.dispatchAndMemory', { defaultValue: '派活与记忆' })}
+                description={t('settings.agents.dispatchAndMemoryHint', {
+                  defaultValue: '控制这个角色出现在谁的派活名单里、它的记忆归哪个家。',
+                })}
+              >
+                <SettingsCard>
+                  <div className="flex items-center gap-2 p-3 text-[13px]">
+                    <input
+                      type="checkbox"
+                      id="agent-assignable"
+                      className="h-4 w-4"
+                      checked={draft.assignable === true}
+                      onChange={(e) => setDraft({ ...draft, assignable: e.target.checked })}
+                    />
+                    <label htmlFor="agent-assignable" className="cursor-pointer">
+                      {t('settings.agents.assignable', { defaultValue: '可分配任务' })}
+                    </label>
+                    <span className="text-xs text-muted-foreground">
+                      {t('settings.agents.assignableHint', {
+                        defaultValue: '开启后才会出现在任务派活名单里（分工说明给督导看）',
+                      })}
+                    </span>
+                  </div>
+                  <SettingsSelectRow
+                    label={t('settings.agents.memoryDomain', { defaultValue: '记忆域' })}
+                    value={draft.memoryDomain ?? ''}
+                    onValueChange={(next) =>
+                      setDraft({ ...draft, memoryDomain: next || undefined })
+                    }
+                    options={memoryDomainOptions}
+                  />
                 </SettingsCard>
               </SettingsSection>
 

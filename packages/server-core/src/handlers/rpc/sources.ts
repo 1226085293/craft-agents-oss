@@ -16,6 +16,8 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.workspace.GET_PERMISSIONS,
   RPC_CHANNELS.permissions.GET_DEFAULTS,
   RPC_CHANNELS.sources.GET_MCP_TOOLS,
+  RPC_CHANNELS.sources.SAVE_CONFIG,
+  RPC_CHANNELS.sources.LABELS,
 ] as const
 
 export function registerSourcesHandlers(server: RpcServer, deps: HandlerDeps): void {
@@ -49,6 +51,71 @@ export function registerSourcesHandlers(server: RpcServer, deps: HandlerDeps): v
       ...(config.readOnly !== undefined ? { readOnly: config.readOnly } : {}),
     })
   })
+
+  // Patch-save one source config (stage 1: labels/readOnly). Read-modify-write the whole
+  // object, then save through the zod schema gate — no field is lost on round-trip.
+  server.handle(
+    RPC_CHANNELS.sources.SAVE_CONFIG,
+    async (
+      _ctx,
+      workspaceId: string,
+      slug: string,
+      patch: { labels?: string[]; readOnly?: boolean }
+    ) => {
+      const workspace = getWorkspaceByNameOrId(workspaceId)
+      if (!workspace) throw new Error(`Workspace ${workspaceId} not found`)
+      if (!slug) throw new Error('slug is required')
+      const { loadSourceConfig, saveSourceConfig } = await import('@craft-agent/shared/sources')
+      const config = loadSourceConfig(workspace.rootPath, slug)
+      if (!config) throw new Error(`Source ${slug} not found`)
+      if (patch?.labels !== undefined) {
+        const cleaned = (patch.labels ?? [])
+          .map((label) => (typeof label === 'string' ? label.trim() : ''))
+          .filter((label) => label.length > 0)
+        config.labels = cleaned.length > 0 ? cleaned : undefined
+      }
+      if (patch?.readOnly !== undefined) {
+        config.readOnly = patch.readOnly || undefined
+      }
+      config.updatedAt = Date.now()
+      saveSourceConfig(workspace.rootPath, config)
+      return config
+    }
+  )
+
+  // Permission-label vocabulary (config/permission-labels.json; "private" built-in & locked,
+  // deletion blocked while any source or channel still references the label).
+  server.handle(
+    RPC_CHANNELS.sources.LABELS,
+    async (_ctx, workspaceId: string, request: { action: 'list' | 'add' | 'delete'; name?: string }) => {
+      const workspace = getWorkspaceByNameOrId(workspaceId)
+      if (!workspace) throw new Error(`Workspace ${workspaceId} not found`)
+      const { loadPermissionLabels, addPermissionLabel, removePermissionLabel } = await import(
+        '@craft-agent/shared/events/permissions.ts'
+      )
+      const { loadPairings } = await import('@craft-agent/shared/events/pairings.ts')
+      if (request?.action === 'add') {
+        const ok = addPermissionLabel(workspace.rootPath, request.name ?? '')
+        if (!ok) throw new Error('Label already exists, or "private" is built-in and cannot be created')
+        return loadPermissionLabels(workspace.rootPath)
+      }
+      if (request?.action === 'delete') {
+        const sources = loadWorkspaceSources(workspace.rootPath).map((source) => ({
+          slug: source.config.slug,
+          labels: source.config.labels,
+        }))
+        const channels = loadPairings(workspace.rootPath).channels
+        const result = removePermissionLabel(workspace.rootPath, request.name ?? '', sources, channels)
+        if (!result.ok) {
+          if (result.reason === 'builtin') throw new Error('The built-in "private" label cannot be deleted')
+          if (result.reason === 'in_use') throw new Error('Label is in use by a source or channel; remove it first')
+          throw new Error('Label not found')
+        }
+        return loadPermissionLabels(workspace.rootPath)
+      }
+      return loadPermissionLabels(workspace.rootPath)
+    }
+  )
 
   // Delete a source
   server.handle(RPC_CHANNELS.sources.DELETE, async (_ctx, workspaceId: string, sourceSlug: string) => {

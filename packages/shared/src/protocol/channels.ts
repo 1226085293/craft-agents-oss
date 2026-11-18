@@ -244,6 +244,10 @@ export const RPC_CHANNELS = {
     CHANGED: 'sources:changed',
     GET_PERMISSIONS: 'sources:getPermissions',
     GET_MCP_TOOLS: 'sources:getMcpTools',
+    /** Patch-save one source config (stage 1: labels/readOnly; full object round-trips). */
+    SAVE_CONFIG: 'sources:saveConfig',
+    /** Permission-label vocabulary (config/permission-labels.json): list/add/delete. */
+    LABELS: 'sources:labels',
   },
   oauth: {
     START: 'oauth:start',
@@ -402,6 +406,11 @@ export const RPC_CHANNELS = {
     DELETE: 'folders:delete',
     CHANGED: 'folders:changed',
   },
+  /** Memory domains (v6/v7 slice C minimal: the table + auto-registered project domains). */
+  memoryDomains: {
+    /** List domains, auto-registering existing projects as shared domains. */
+    LIST: 'memoryDomains:list',
+  },
   agents: {
     /** Role profiles for the picker (built-in default first). */
     LIST: 'agents:list',
@@ -521,6 +530,16 @@ export const RPC_CHANNELS = {
      * the plugin says a channel is called; an empty map means "use the key".
      */
     CHANNEL_LABELS: 'events:channelLabels',
+
+    /**
+     * Channel gate config (v6/v7): per-channel agent/labels/mode/receive settings,
+     * stored in the pairing record (pairings v2). Patch semantics: missing = keep.
+     */
+    CHANNEL_GATE: 'events:channelGate',
+    /** Which source slugs this channel currently sees (label intersection, H1 semantics). */
+    CHANNEL_GATE_PREVIEW: 'events:channelGatePreview',
+    /** Claim ownership of an unclaimed channel (enables write protection, 修 2). */
+    CHANNEL_CLAIM: 'events:channelClaim',
 
     /** This session's subscriptions. */
     LIST_SUBSCRIPTIONS: 'events:listSubscriptions',

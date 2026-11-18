@@ -102,3 +102,13 @@ export {
   type MemoryConsolidationSessionResult,
 } from './consolidation.ts';
 export { MemoryConsolidationScheduler, type MemorySchedule } from './scheduler.ts';
+
+// Memory domains (v6/v7 slice C minimal: the table + auto-registered project domains)
+export {
+  loadMemoryDomains,
+  saveMemoryDomains,
+  addPersonalMemoryDomain,
+  memoryDomainsPath,
+  type MemoryDomainDef,
+  type MemoryDomainsFile,
+} from './domains.ts';

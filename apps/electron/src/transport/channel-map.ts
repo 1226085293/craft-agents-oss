@@ -202,6 +202,8 @@ export const CHANNEL_MAP = {
   startSourceOAuth: invoke(RPC_CHANNELS.sources.START_OAUTH),
   saveSourceCredentials: invoke(RPC_CHANNELS.sources.SAVE_CREDENTIALS),
   getSourcePermissionsConfig: invoke(RPC_CHANNELS.sources.GET_PERMISSIONS),
+  saveSourceConfig: invoke(RPC_CHANNELS.sources.SAVE_CONFIG),
+  sourceLabels: invoke(RPC_CHANNELS.sources.LABELS),
   getWorkspacePermissionsConfig: invoke(RPC_CHANNELS.workspace.GET_PERMISSIONS),
   getDefaultPermissionsConfig: invoke(RPC_CHANNELS.permissions.GET_DEFAULTS),
   onDefaultPermissionsChanged: listener(RPC_CHANNELS.permissions.DEFAULTS_CHANGED),
@@ -391,6 +393,7 @@ export const CHANNEL_MAP = {
   agentsGet: invoke(RPC_CHANNELS.agents.GET),
   agentsSave: invoke(RPC_CHANNELS.agents.SAVE),
   agentsDelete: invoke(RPC_CHANNELS.agents.DELETE),
+  memoryDomains: invoke(RPC_CHANNELS.memoryDomains.LIST),
   tasksList: invoke(RPC_CHANNELS.taskboard.LIST),
   tasksGet: invoke(RPC_CHANNELS.taskboard.GET),
   tasksUpdate: invoke(RPC_CHANNELS.taskboard.UPDATE),
@@ -478,6 +481,9 @@ export const CHANNEL_MAP = {
   pairingGenerate: invoke(RPC_CHANNELS.events.PAIRING_GENERATE),
   pairingList: invoke(RPC_CHANNELS.events.PAIRING_LIST),
   pairingUnpair: invoke(RPC_CHANNELS.events.PAIRING_UNPAIR),
+  channelGate: invoke(RPC_CHANNELS.events.CHANNEL_GATE),
+  channelGatePreview: invoke(RPC_CHANNELS.events.CHANNEL_GATE_PREVIEW),
+  channelClaim: invoke(RPC_CHANNELS.events.CHANNEL_CLAIM),
   channelLabels: invoke(RPC_CHANNELS.events.CHANNEL_LABELS),
 
   // Pages

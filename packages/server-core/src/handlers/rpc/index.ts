@@ -20,6 +20,7 @@ import { registerProjectsHandlers } from './projects'
 import { registerPagesHandlers } from './pages'
 import { registerSkillsHandlers } from './skills'
 import { registerSourcesHandlers } from './sources'
+import { registerMemoryDomainsHandlers } from './memory-domains'
 import { registerSystemCoreHandlers } from './system'
 import { registerTransferHandlers } from './transfer'
 import { registerWorkspaceCoreHandlers } from './workspace'
@@ -53,6 +54,7 @@ registerLlmConnectionsHandlers(server, deps)
   registerTransferHandlers(server)
   registerWorkspaceCoreHandlers(server, deps)
   registerMemoryHandlers(server, deps)
+  registerMemoryDomainsHandlers(server, deps)
   registerUsageHandlers(server, deps)
   registerEventsHandlers(server, deps)
   registerTasksHandlers(server, deps)

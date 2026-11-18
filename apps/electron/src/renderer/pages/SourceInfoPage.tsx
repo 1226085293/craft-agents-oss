@@ -17,6 +17,7 @@ import { routes, navigate } from '@/lib/navigate'
 import { useNavigation } from '@/contexts/NavigationContext'
 import { toast } from 'sonner'
 import { UsageHistorySection } from '@/components/app-shell/UsageHistorySection'
+import { SourceLabelsEditor } from '@/components/app-shell/SourceLabelsEditor'
 import {
   Info_Page,
   Info_Section,
@@ -458,6 +459,27 @@ export default function SourceInfoPage({ sourceSlug, workspaceId, onDelete }: So
               )}
               <Info_Table.Row label={t('sourceInfo.lastTested')} value={formatRelativeTime(source.config.lastTestedAt, t)} />
             </Info_Table>
+          </Info_Section>
+
+          {/* Permission labels (渠道闸门 v6/v7) — applies to all three source types */}
+          <Info_Section
+            title={t('sourceInfo.labels', { defaultValue: '权限标签' })}
+            description={t('sourceInfo.labelsDesc', {
+              defaultValue: '该源挂的权限标签（未打标 = 查询时按「私有」处理）。通道标签闸放行「源标签 ∩ 通道放行」的源。',
+            })}
+          >
+            <SourceLabelsEditor
+              workspaceId={workspaceId}
+              source={source}
+              onSourceUpdated={() => {
+                void window.electronAPI
+                  .getSources(workspaceId)
+                  .then((list) => {
+                    const found = list.find((s) => s.config.slug === sourceSlug)
+                    if (found) setSource(found)
+                  })
+              }}
+            />
           </Info_Section>
 
           {/* Permissions - for API and local sources */}

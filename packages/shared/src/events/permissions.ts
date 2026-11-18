@@ -78,6 +78,27 @@ export function addPermissionLabel(workspaceRoot: string, name: string): boolean
 }
 
 /**
+ * 删除标签（先过 canDeletePermissionLabel：内置锁死 / 被源或通道引用阻止）。
+ * @param sources 各源现标签（FolderSourceConfig.labels，缺省=没打）
+ * @param channels 配对记录（allowedLabels）
+ */
+export function removePermissionLabel(
+  workspaceRoot: string,
+  name: string,
+  sources: ReadonlyArray<{ slug: string; labels?: string[] }> = [],
+  channels: ReadonlyArray<{ allowedLabels?: string[] }> = [],
+): { ok: boolean; reason?: 'builtin' | 'in_use' | 'not_found' } {
+  const check = canDeletePermissionLabel(name, sources, channels);
+  if (!check.ok) return check;
+  const file = loadPermissionLabels(workspaceRoot);
+  const next = file.labels.filter((label) => label.name !== name);
+  if (next.length === file.labels.length) return { ok: false, reason: 'not_found' };
+  file.labels = next;
+  savePermissionLabels(workspaceRoot, file);
+  return { ok: true };
+}
+
+/**
  * 删除校验（纯函数）：
  *  - 内置标签锁死（reason: 'builtin'）
  *  - 有源或通道引用 → 阻止删除，防孤儿引用（reason: 'in_use'）

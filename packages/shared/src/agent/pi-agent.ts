@@ -1051,6 +1051,9 @@ export class PiAgent extends BaseAgent {
     toolName: string;
   }> = new Map();
 
+  // Refusal reasons that are not "the person said no" (see respondToPermission)
+  private permissionDenialReasons = new Map<string, string>();
+
   // Pending tool executions (correlation map for subprocess tool_execute_request -> main process -> tool_execute_response)
   private pendingToolExecutions: Map<string, {
     resolve: (result: { content: string; isError: boolean }) => void;
@@ -2637,7 +2640,10 @@ export class PiAgent extends BaseAgent {
         this.pendingPermissions.delete(permRequestId);
 
         if (!allowed) {
-          this.send({ type: 'pre_tool_use_response', requestId, action: 'block', reason: 'Permission denied by user.' });
+          const denialReason =
+            this.permissionDenialReasons.get(permRequestId) ?? 'Permission denied by user.';
+          this.permissionDenialReasons.delete(permRequestId);
+          this.send({ type: 'pre_tool_use_response', requestId, action: 'block', reason: denialReason });
           return;
         }
 
@@ -4236,10 +4242,20 @@ ${agentSnapshot.persona.trim()}
    * Respond to a pending permission request.
    * Permission checking now happens in the main process, so this resolves locally.
    */
-  respondToPermission(requestId: string, allowed: boolean, _alwaysAllow?: boolean): void {
+  /**
+   * Answer a parked pre-tool-use question.
+   *
+   * `reason` exists for refusals that are not the person saying no: an
+   * unattended session (channel wake, scheduled work) has no one to ask, and
+   * telling the model "Permission denied by user." makes it believe a person
+   * refused — it then stops asking for anything else. The reason travels with
+   * the answer so the block message says what actually happened.
+   */
+  respondToPermission(requestId: string, allowed: boolean, _alwaysAllow?: boolean, reason?: string): void {
     const pending = this.pendingPermissions.get(requestId);
     if (pending) {
       this.pendingPermissions.delete(requestId);
+      if (!allowed && reason) this.permissionDenialReasons.set(requestId, reason);
       pending.resolve(allowed);
     }
   }

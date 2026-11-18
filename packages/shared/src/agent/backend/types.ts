@@ -791,7 +791,11 @@ export interface AgentBackend {
    * @param allowed - Whether permission was granted
    * @param alwaysAllow - Whether to remember this permission for session
    */
-  respondToPermission(requestId: string, allowed: boolean, alwaysAllow?: boolean): void;
+  /**
+   * `reason` carries refusals that are not a person saying no (e.g. an
+   * unattended session has nobody to ask); the block message uses it verbatim.
+   */
+  respondToPermission(requestId: string, allowed: boolean, alwaysAllow?: boolean, reason?: string): void;
 
   // ============================================================
   // Callbacks (set by facade after construction)

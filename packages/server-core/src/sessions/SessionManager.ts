@@ -229,6 +229,7 @@ import { getDefaultSummarizationModel, resolveModelContextWindow } from '@craft-
 import type { SummarizeCallback } from '@craft-agent/shared/sources'
 import { type ThinkingLevel, DEFAULT_THINKING_LEVEL, normalizeThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import { parseError } from '@craft-agent/shared/agent/errors'
+import { isUnattended, UNATTENDED_REFUSAL_REASON } from '@craft-agent/shared/agent/unattended-approval'
 import { copyTurnLogsForBranch } from '@craft-agent/shared/agent/turn-log'
 import { buildBackendRuntimeSignature, buildRestartRequiredSignature, filterAttachmentsForModelInput } from './runtime-config'
 import { validateArchiveTarget } from './archive-guards'
@@ -7106,6 +7107,26 @@ export class SessionManager implements ISessionManager {
         }
 
         const effectiveCommandHash = brokerMetadata.commandHash ?? request.commandHash
+
+        // Stage 2（动手前先问，不阻塞）：渠道唤醒/定时任务的会话没人看着界面，
+        // 挂起等待会把整轮拖到 stall 看门狗杀掉——发起人什么也看不到，工作静默死掉。
+        // 策略集中在 shared/agent/unattended-approval.ts：有人看就照旧挂起等批准，
+        // 没人看就拒绝这一次调用并给出可转述的理由（绝不在无人监督时自动放行）。
+        const approvalCtx = {
+          // A channel-woken or scheduled turn is the unattended case: work started
+          // with nobody at the window. Anything else is an interactive turn.
+          unattendedOrigin: this.replyOrigins.has(managed.id),
+          attended: !this.replyOrigins.has(managed.id),
+        }
+        if (isUnattended(approvalCtx)) {
+          sessionLog.warn(`Refusing prompt-class permission ${request.requestId}: no person is attending this session`, {
+            sessionId: managed.id,
+            toolName: request.toolName,
+            unattendedOrigin: approvalCtx.unattendedOrigin,
+          })
+          managed.agent?.respondToPermission(request.requestId, false, false, UNATTENDED_REFUSAL_REASON)
+          return
+        }
 
         this.pendingPermissionRequests.set(request.requestId, {
           sessionId: managed.id,

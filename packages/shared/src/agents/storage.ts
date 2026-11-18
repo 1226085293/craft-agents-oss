@@ -15,76 +15,17 @@ import { dirname, join } from 'path';
 import {
   AGENTS_FILE_VERSION,
   DEFAULT_AGENT_ID,
-  EMPTY_DEFAULTS,
-  ALL_SCOPE,
-  MAX_DISPATCH_HINT_CHARS,
   emptyAgentsFile,
-  type AgentDefaults,
   type AgentProfile,
-  type AgentScope,
   type AgentsFile,
 } from './types.ts';
+import { normalizeAgentDefaultsBlock, normalizeAgentProfile } from './schema.ts';
 
 export function getAgentsFilePath(workspaceRoot: string): string {
   return join(workspaceRoot, 'agents.json');
 }
 
-function normalizeScope(value: unknown, fallback: AgentScope): AgentScope {
-  if (!value || typeof value !== 'object') return { ...fallback };
-  const v = value as Partial<AgentScope>;
-  const mode = v.mode === 'allowlist' ? 'allowlist' : 'all';
-  const slugs = Array.isArray(v.slugs)
-    ? Array.from(new Set(v.slugs.filter((s): s is string => typeof s === 'string' && s.trim() !== '')))
-    : [];
-  return { mode, slugs };
-}
-
-function normalizeDefaults(value: unknown): AgentDefaults {
-  if (!value || typeof value !== 'object') return { ...EMPTY_DEFAULTS };
-  const v = value as Partial<AgentDefaults>;
-  const str = (x: unknown) => (typeof x === 'string' && x.trim() !== '' ? x : null);
-  const permission = v.permissionMode;
-  return {
-    strategy: str(v.strategy),
-    model: str(v.model),
-    permissionMode:
-      permission === 'safe' || permission === 'ask' || permission === 'allow-all' ? permission : null,
-    thinkingLevel: str(v.thinkingLevel),
-  };
-}
-
-function normalizeProfile(raw: unknown, now: number): AgentProfile | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const v = raw as Partial<AgentProfile>;
-  if (typeof v.id !== 'string' || !v.id.trim()) return null;
-  // The default id is reserved: it lives in `defaults`, never in `agents[]`.
-  if (v.id === DEFAULT_AGENT_ID) return null;
-  return {
-    id: v.id,
-    name: typeof v.name === 'string' && v.name.trim() ? v.name : v.id,
-    icon: typeof v.icon === 'string' ? v.icon : undefined,
-    color: typeof v.color === 'string' ? v.color : undefined,
-    persona: typeof v.persona === 'string' ? v.persona : '',
-    ...(typeof v.dispatchHint === 'string' && v.dispatchHint.trim()
-      ? { dispatchHint: v.dispatchHint.trim().slice(0, MAX_DISPATCH_HINT_CHARS) }
-      : {}),
-    defaults: normalizeDefaults(v.defaults),
-    sources: normalizeScope(v.sources, ALL_SCOPE),
-    skills: normalizeScope(v.skills, ALL_SCOPE),
-    // 渠道闸门（v6/v7）：可分配开关 + 记忆域。读侧白名单漏掉这两字段会被
-    // 每次 loadAgents 剥掉（11-18 活体验收抓到：SAVE 写入 → 下次 load 丢 →
-    // GET/水合丢 → 自动保存回写丢值）——与 SAVE 白名单同类坑。
-    ...(typeof v.assignable === 'boolean' ? { assignable: v.assignable } : {}),
-    ...(typeof v.memoryDomain === 'string' && v.memoryDomain.trim()
-      ? { memoryDomain: v.memoryDomain.trim() }
-      : {}),
-    builtin: v.builtin === true,
-    createdAt: typeof v.createdAt === 'number' ? v.createdAt : now,
-    updatedAt: typeof v.updatedAt === 'number' ? v.updatedAt : now,
-    deletedAt: typeof v.deletedAt === 'number' ? v.deletedAt : null,
-  };
-}
-
+/** Read + normalize. Field list lives in `schema.ts` — do not re-list fields here. */
 /** Read + normalize. Never throws on a missing/corrupt file. */
 export function loadAgents(workspaceRoot: string): AgentsFile {
   const path = getAgentsFilePath(workspaceRoot);
@@ -103,29 +44,15 @@ export function loadAgents(workspaceRoot: string): AgentsFile {
   const raw = parsed as Partial<AgentsFile>;
   const now = Date.now();
   const agents = Array.isArray(raw.agents)
-    ? (raw.agents.map((a) => normalizeProfile(a, now)).filter(Boolean) as AgentProfile[])
+    ? (raw.agents.map((a) => normalizeAgentProfile(a, now)).filter(Boolean) as AgentProfile[])
     : [];
-  const defaultsRaw = (raw.defaults ?? {}) as Partial<AgentsFile['defaults']>;
   return {
     version: typeof raw.version === 'number' ? raw.version : 0,
     defaultAgentId:
       typeof raw.defaultAgentId === 'string' && raw.defaultAgentId.trim()
         ? raw.defaultAgentId
         : DEFAULT_AGENT_ID,
-    defaults: {
-      persona: typeof defaultsRaw.persona === 'string' ? defaultsRaw.persona : '',
-      ...(typeof defaultsRaw.dispatchHint === 'string' && defaultsRaw.dispatchHint.trim()
-        ? { dispatchHint: defaultsRaw.dispatchHint.trim().slice(0, MAX_DISPATCH_HINT_CHARS) }
-        : {}),
-      defaults: normalizeDefaults(defaultsRaw.defaults),
-      sources: normalizeScope(defaultsRaw.sources, ALL_SCOPE),
-      skills: normalizeScope(defaultsRaw.skills, ALL_SCOPE),
-      // 与 profile 白名单同补：default agent 卡上的开关/记忆域也在 defaults 块里
-      ...(typeof defaultsRaw.assignable === 'boolean' ? { assignable: defaultsRaw.assignable } : {}),
-      ...(typeof defaultsRaw.memoryDomain === 'string' && defaultsRaw.memoryDomain.trim()
-        ? { memoryDomain: defaultsRaw.memoryDomain.trim() }
-        : {}),
-    },
+    defaults: normalizeAgentDefaultsBlock(raw.defaults),
     agents,
   };
 }

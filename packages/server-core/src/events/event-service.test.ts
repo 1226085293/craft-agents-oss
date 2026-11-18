@@ -6,7 +6,7 @@ import { request as httpRequest } from 'node:http';
 import { getEventService, resetEventServicesForTest } from './event-service.ts';
 import { loadOutbox, recordOutboxCall } from '@craft-agent/shared/events/outbox.ts';
 import { bindThread } from '@craft-agent/shared/events/thread-bindings.ts';
-import { generatePairingCode, isChannelPaired, markChannelPaired } from '@craft-agent/shared/events/pairings.ts';
+import { generatePairingCode, isChannelPaired, markChannelPaired, updateChannelGate } from '@craft-agent/shared/events/pairings.ts';
 import { existsSync } from 'node:fs';
 import type { EventMeta, EventRecord } from '@craft-agent/shared/events/event-store.ts';
 
@@ -401,6 +401,165 @@ describe('host pairing gate', () => {
 
     expect(isChannelPaired(root, 'message://telegram/42')).toBe(false);
     expect(service.list({}).length).toBe(0);
+  });
+});
+
+/**
+ * Stage 5 judge wiring: a group channel set to `all` ingest holds its
+ * messages in a batch window, and the (fake) model call decides what reaches
+ * a session. The decision module itself is tested elsewhere; these pin the
+ * host wiring: who is held, who is published, who is marked handled, and
+ * what happens when the model route fails or the owner flips the channel.
+ */
+describe('channel judge (stage 5)', () => {
+  const GROUP_KEY = 'message://telegram/-5095098301';
+
+  async function makeJudgeService(
+    root: string,
+    workspaceId: string,
+    callModel: (prompt: string) => Promise<string>,
+  ) {
+    const unclaimed: unknown[] = [];
+    const service = await getEventService(
+      workspaceId,
+      root,
+      undefined,
+      okDispatchTarget,
+      (event) => unclaimed.push(event),
+    );
+    service.setJudgeOptions({ callModel });
+    markChannelPaired(root, GROUP_KEY);
+    updateChannelGate(root, GROUP_KEY, { ingestMode: 'all' });
+    return { service, unclaimed };
+  }
+
+  let messageNo = 0;
+  async function postGroupMessage(
+    service: Awaited<ReturnType<typeof getEventService>>,
+    body: string,
+    extraMeta: Record<string, string> = {},
+  ): Promise<void> {
+    messageNo += 1;
+    const env = service.listenerEnv('telegram');
+    const response = await postJson(env.CRAFT_EVENTS_URL!, env.CRAFT_EVENTS_TOKEN!, {
+      type: 'telegram.message',
+      title: body,
+      body,
+      dedupeKey: `msg-${messageNo}`,
+      links: [{ rel: 'reply', url: `${GROUP_KEY}/${100 + messageNo}` }],
+      meta: { channelKind: 'group', sender: 'Bob', ...extraMeta },
+    });
+    expect(response.status).toBe(200);
+  }
+
+  function judgeRouted(
+    service: Awaited<ReturnType<typeof getEventService>>,
+  ): import('@craft-agent/shared/events/event-store.ts').EventMeta[] {
+    return service
+      .list({})
+      .filter((meta) => (meta.routing ?? []).some((entry) => entry.via === 'judge'));
+  }
+
+  it('holds an all-ingest batch until the judge runs; ignore marks both handled and dispatches nothing', async () => {
+    const root = makeRoot();
+    const prompts: string[] = [];
+    const { service, unclaimed } = await makeJudgeService(root, 'ws-judge-ignore', async (prompt) => {
+      prompts.push(prompt);
+      return '{"action":"ignore","reason":"闲聊"}';
+    });
+
+    // A plain message with no mention stays in the open batch: nothing is
+    // judged or published while the window is open.
+    await postGroupMessage(service, '今天天气不错');
+    expect(prompts).toHaveLength(0);
+    expect(unclaimed).toHaveLength(0);
+
+    // The mention closes the batch immediately; one call judges both.
+    await postGroupMessage(service, '@bot 现在几点了', { mentionsBot: 'true' });
+    await tickUntil(() => prompts.length === 1);
+    expect(prompts[0]).toContain('今天天气不错');
+    expect(prompts[0]).toContain('现在几点了');
+
+    // Ignore: neither reaches a session, but both stay visible in the store
+    // with a judge entry in the routing trail and a handled stamp, so the
+    // unclaimed funnel never re-picks them.
+    await tickUntil(() => judgeRouted(service).length === 2);
+    expect(unclaimed).toHaveLength(0);
+    expect(judgeRouted(service).every((meta) => meta.handledAt !== undefined)).toBe(true);
+    expect(service.list({}).length).toBe(2);
+  });
+
+  it('publishes the whole batch when the judge says respond', async () => {
+    const root = makeRoot();
+    const { service, unclaimed } = await makeJudgeService(root, 'ws-judge-respond', async () => {
+      return '{"action":"respond","reason":"在问助手"}';
+    });
+
+    await postGroupMessage(service, '这条在问助手');
+    await postGroupMessage(service, '@bot 看下上一条', { mentionsBot: 'true' });
+    await tickUntil(() => unclaimed.length === 2);
+    const titles = unclaimed.map((event) => (event as { title?: string }).title);
+    expect(titles).toEqual(['这条在问助手', '@bot 看下上一条']);
+  });
+
+  it('degrades a failed judge call to at_only: the mention survives, the chatter does not', async () => {
+    const root = makeRoot();
+    const { service, unclaimed } = await makeJudgeService(root, 'ws-judge-degrade', async () => {
+      throw new Error('no model route');
+    });
+
+    await postGroupMessage(service, '有人在吗');
+    await postGroupMessage(service, '@bot 帮个忙', { mentionsBot: 'true' });
+    await tickUntil(() => unclaimed.length === 1);
+    expect((unclaimed[0] as { title?: string }).title).toContain('帮个忙');
+
+    await tickUntil(() => judgeRouted(service).length === 1);
+    const skipped = judgeRouted(service)[0]!;
+    expect(skipped.routing!.find((entry) => entry.via === 'judge')!.outcome).toContain('skipped');
+  });
+
+  it('never holds at_only channels: immediate publish, no judge call', async () => {
+    const root = makeRoot();
+    let judgeCalls = 0;
+    const unclaimed: unknown[] = [];
+    const service = await getEventService(
+      'ws-judge-readonly',
+      root,
+      undefined,
+      okDispatchTarget,
+      (event) => unclaimed.push(event),
+    );
+    service.setJudgeOptions({
+      callModel: async () => {
+        judgeCalls++;
+        return '{"action":"ignore"}';
+      },
+    });
+    // No ingestMode set: the channel defaults to at_only — the judge must not
+    // intervene in any way (zero regression for channels the owner never touched).
+    markChannelPaired(root, GROUP_KEY);
+
+    await postGroupMessage(service, '普通消息');
+    await tickUntil(() => unclaimed.length === 1);
+    expect(judgeCalls).toBe(0);
+    expect(judgeRouted(service).length).toBe(0);
+  });
+
+  it('a channel flipped back to at_only mid-batch publishes instead of judging', async () => {
+    const root = makeRoot();
+    let judgeCalls = 0;
+    const { service, unclaimed } = await makeJudgeService(root, 'ws-judge-flip', async () => {
+      judgeCalls++;
+      return '{"action":"ignore"}';
+    });
+
+    await postGroupMessage(service, '第一条');
+    updateChannelGate(root, GROUP_KEY, { ingestMode: 'at_only' });
+    await postGroupMessage(service, '@bot 第二条', { mentionsBot: 'true' }); // closes the batch
+
+    await tickUntil(() => unclaimed.length === 2);
+    expect(judgeCalls).toBe(0);
+    expect(judgeRouted(service).length).toBe(0);
   });
 });
 

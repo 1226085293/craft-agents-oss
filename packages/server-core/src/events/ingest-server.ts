@@ -51,6 +51,14 @@ export interface EventIngestOptions {
    * Empty by default so a bare ingest server exposes nothing but events.
    */
   hostCommands?: HostCommand[];
+  /**
+   * The group channels currently receiving in `all` ingest mode. The
+   * listener polls `GET /events/<id>/config` for this list so it knows which
+   * of its own group chats to forward *every* message from; the host is the
+   * source of truth for the owner's per-channel choice, so no push channel
+   * is needed and a restarted plugin converges on its own.
+   */
+  allIngestChannelKeys?: () => string[];
   /** Bearer token. Generated when omitted (production path). */
   token?: string;
   /** Bind address. Defaults to loopback. */
@@ -196,13 +204,14 @@ export class EventIngestServer {
       });
       if (handled) return;
 
-      const match = /^\/events\/([A-Za-z0-9._-]{1,64})(\/health)?$/.exec(url.pathname);
+      const match = /^\/events\/([A-Za-z0-9._-]{1,64})(?:\/(health|config))?$/.exec(url.pathname);
       if (!match) {
         sendJson(res, 404, { error: 'not_found' });
         return;
       }
       const listenerId = match[1]!;
-      const isHealth = Boolean(match[2]);
+      const section = match[2];
+      const isHealth = section === 'health';
 
       // (2) Host: reject rebinding before anything else reads the body.
       if (!isLoopbackHostHeader(req.headers.host)) {
@@ -225,6 +234,15 @@ export class EventIngestServer {
         }
         this.options.onHealth?.(listenerId);
         sendJson(res, 200, { ok: true, listenerId });
+        return;
+      }
+
+      if (section === 'config') {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'method_not_allowed' });
+          return;
+        }
+        sendJson(res, 200, { allIngestChannelKeys: this.options.allIngestChannelKeys?.() ?? [] });
         return;
       }
 

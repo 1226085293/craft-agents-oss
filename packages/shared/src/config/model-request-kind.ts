@@ -30,6 +30,7 @@ export type ModelRequestKind =
   | 'steer_check'       // does new guidance conflict with a running tool
   | 'memory'            // memory extraction / consolidation / adjudication
   | 'compaction'        // session compaction (summarizing the transcript)
+  | 'judge'             // channel judge: is this group batch for the assistant
   | 'connection_test'   // settings-page key probe; logged, but never routed
 
 /** How a kind picks its strategy group. */
@@ -79,6 +80,11 @@ const SPECS: readonly KindSpec[] = [
   // Memory consolidation used to borrow a session's agent; it now has its own
   // backend and emits this kind.
   { kind: 'memory', label: '记忆', routing: 'dedicated' },
+  // The channel judge runs host-side with no session to inherit from, so it
+  // takes a dedicated group like memory does: the mini group first, then the
+  // first enabled group. Failing to route it just degrades the judge to
+  // at_only (fail-closed), never to replying.
+  { kind: 'judge', label: '消息判定', routing: 'dedicated' },
   // Not gateway traffic — the probe builds a synthetic connection and calls the
   // upstream directly, because testing the gateway would not test the key. It
   // is still logged (so "when was this key last tried, and did it work?" has an

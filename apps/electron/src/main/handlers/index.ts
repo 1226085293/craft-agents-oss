@@ -62,6 +62,26 @@ function warmUpEventCenter(deps: HandlerDeps): void {
           // host carrying a per-platform command table.
           deps.sessionManager?.createHostActions?.(),
         )
+        // Stage 5 judge: the decision core is injection-only (testable with a
+        // fake, no key); the host owns which model route answers it. A judge
+        // call that cannot resolve a route throws, and the judge module fails
+        // closed to at_only — it never degrades into replying.
+        service.setJudgeOptions({
+          callModel: async (prompt: string) => {
+            const manager = deps.sessionManager
+            if (!manager?.createAuxiliaryAgent) {
+              throw new Error('judge: the session manager has no auxiliary-agent route')
+            }
+            const agent = await manager.createAuxiliaryAgent({ kind: 'judge', workspace })
+            try {
+              const raw = await agent.runMiniCompletion(prompt)
+              if (raw === null) throw new Error('judge: the model returned no reply')
+              return raw
+            } finally {
+              agent.dispose()
+            }
+          },
+        })
         await service.startAllEnabled(workspace.rootPath)
       }
     } catch (error) {

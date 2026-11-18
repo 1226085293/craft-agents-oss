@@ -181,6 +181,40 @@ describe('EventIngestServer content handling', () => {
   });
 });
 
+describe('EventIngestServer listener config', () => {
+  it('answers GET /config with the all-ingest channel list', async () => {
+    const probe = new EventIngestServer({
+      sink,
+      token: TOKEN,
+      allIngestChannelKeys: () => ['message://telegram/-100', 'message://telegram/-200'],
+      now: () => 1_800_000_000_000,
+      newId: () => 'evt_fixed',
+    });
+    const address = await probe.start();
+    try {
+      const res = await call(address.port, { path: '/events/qqmail/config', method: 'GET' });
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({
+        allIngestChannelKeys: ['message://telegram/-100', 'message://telegram/-200'],
+      });
+    } finally {
+      await probe.stop();
+    }
+  });
+
+  it('defaults to an empty list when no callback is wired', async () => {
+    const res = await call(port, { path: '/events/qqmail/config', method: 'GET' });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ allIngestChannelKeys: [] });
+  });
+
+  it('rejects a non-GET /config and still requires the token', async () => {
+    expect((await call(port, { path: '/events/qqmail/config', method: 'POST', body: '{}' })).status).toBe(405);
+    const unauth = await call(port, { path: '/events/qqmail/config', method: 'GET', headers: { authorization: '' } });
+    expect(unauth.status).toBe(401);
+  });
+});
+
 describe('EventIngestServer normalisation', () => {
   it('takes the source from the URL and the identity fields from the server', async () => {
     const res = await call(port, {

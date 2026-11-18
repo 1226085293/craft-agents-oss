@@ -39,7 +39,9 @@ describe('kindRouting', () => {
   })
 
   test('only session-less work uses a dedicated group', () => {
-    expect(kindRouting('memory')).toBe('dedicated')
+    for (const kind of ['memory', 'judge']) {
+      expect(kindRouting(kind)).toBe('dedicated')
+    }
   })
 
   test('the connection probe is logged but never routed', () => {

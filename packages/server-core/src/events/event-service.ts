@@ -39,10 +39,25 @@ import { isMessagingListener } from '@craft-agent/shared/events/manifest.ts';
 import { parseSlashCommand } from '@craft-agent/shared/events/slash-commands.ts';
 import {
   isChannelPaired,
+  loadPairings,
   parsePairingAttempt,
   pairingTexts,
   redeemPairingCode,
 } from '@craft-agent/shared/events/pairings.ts';
+import {
+  judgeBatch,
+  emptyJudgeState,
+  type ChannelJudgeState,
+  type JudgeBatchMessage,
+  type JudgeInput,
+  type JudgeModelCall,
+} from '@craft-agent/shared/events/judge.ts';
+import {
+  addToBatch,
+  BATCH_WINDOW_MS,
+  type BatchMessage,
+  type BatchState,
+} from '@craft-agent/shared/events/batch-window.ts';
 import { commandReplyChannel, executeSlashCommand, slashCommandCatalogue } from './slash-command.ts';
 import type { CraftEventEnvelope } from '@craft-agent/shared/events/types.ts';
 import type { ListenerReportedDepsDto } from '@craft-agent/shared/protocol/dto';
@@ -71,6 +86,14 @@ export interface HostActions {
 export interface EventServiceOptions {
   workspaceId: string;
   workspaceRoot: string;
+  /**
+   * Channel judge wiring (stage 5). When present, group channels the owner
+   * set to `all` ingest hold their messages in a batch window and this call
+   * decides whether the batch is for the assistant before anything is
+   * dispatched. Absent = such channels publish immediately (today's
+   * behaviour); the host binds it once the model route is known.
+   */
+  judge?: { callModel: JudgeModelCall };
   /** Called after a non-duplicate insert so the host can push to renderers. */
   onChanged?: (event: EventRecord) => void;
   /** Called when a supervised listener changes state. */
@@ -109,6 +132,13 @@ export interface EventServiceStatus {
   baseUrl: string | null;
 }
 
+/** Stage 5 judge, per channel: the open batch and the envelopes it holds. */
+interface JudgeBatchEntry {
+  state: BatchState;
+  envelopes: Map<string, CraftEventEnvelope>;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 export class EventService {
   private readonly options: EventServiceOptions;
   private readonly store: EventStore;
@@ -116,6 +146,13 @@ export class EventService {
   private readonly supervisor: ListenerSupervisor;
   private dispatcher: EventDispatcher | null;
   private started = false;
+  private judgeOptions?: { callModel: JudgeModelCall };
+  /**
+   * A half-open batch never leaves the process open: its timer is unref'd.
+   */
+  private readonly judgeBatches = new Map<string, JudgeBatchEntry>();
+  /** Per-channel judge budget, with the local-day key that resets it at midnight. */
+  private readonly judgeStates = new Map<string, { state: ChannelJudgeState; dayKey: string }>();
   /**
    * Outbox dispatcher: one tick every few seconds claims due pending sends
    * and retries them through the plugin's control service. The timer lives
@@ -127,6 +164,7 @@ export class EventService {
 
   constructor(options: EventServiceOptions) {
     this.options = options;
+    this.judgeOptions = options.judge;
     const dbPath = options.dbPath ?? join(options.workspaceRoot, 'config', 'events.sqlite');
 
     this.store = new EventStore({
@@ -145,15 +183,20 @@ export class EventService {
       onInserted: (event) => {
         // Host-owned slash commands: Craft owns the meaning, so a command event
         // is consumed here (marked handled, answered, recorded in the routing
-        // trail) and never dispatched to a session. Everything else publishes
+        // trail) and never dispatched to a session. Group channels the owner
+        // set to `all` ingest hand off to the judge instead, which publishes
+        // or marks the messages handled itself. Everything else publishes
         // exactly as before.
         if (parseSlashCommand(event.body)) {
           void this.consumeSlashCommand(event, event.id);
+        } else if (this.holdForJudge(event)) {
+          // The judge owns this message's dispatch decision.
         } else {
           this.publish(event);
         }
       },
       hostCommands: buildHostCommands(options.hostActions),
+      allIngestChannelKeys: () => this.allIngestChannelKeys(),
     });
 
     this.dispatcher = options.dispatchTarget ? this.createDispatcher(options.dispatchTarget) : null;
@@ -295,6 +338,277 @@ export class EventService {
     // Strip the body: the dispatcher only formats a nudge.
     const { body: _body, ...meta } = record;
     this.dispatcher?.dispatch(meta);
+  }
+
+  /**
+   * Rebind the judge wiring after the service was created — the host learns
+   * its model route later, at the same moment it binds dispatch. Passing
+   * `undefined` unbinds: channels fall back to immediate publish.
+   */
+  setJudgeOptions(judge?: { callModel: JudgeModelCall }): void {
+    this.judgeOptions = judge;
+  }
+
+  /**
+   * The group channels currently receiving in `all` mode. The listener polls
+   * this over `GET /events/<id>/config`, so forwarding follows the owner's
+   * choice with no host push — a restarted plugin converges on its own.
+   */
+  allIngestChannelKeys(): string[] {
+    return loadPairings(this.options.workspaceRoot)
+      .channels.filter((channel) => channel.pairedAt > 0 && channel.ingestMode === 'all')
+      .map((channel) => channel.channelKey);
+  }
+
+  /**
+   * The stage-5 judge stage, run between insert and publish.
+   *
+   * Only group channels the owner set to `all` ingest hold messages: they are
+   * batched, and the judge decides per batch whether the batch is for the
+   * assistant. Everything else returns false and publishes exactly as before
+   * — an unwired judge and `at_only` channels keep zero-regression behaviour.
+   *
+   * Returns true when the message was taken into a batch (the judge will
+   * publish or mark it handled itself).
+   */
+  private holdForJudge(event: CraftEventEnvelope): boolean {
+    if (!this.judgeOptions) return false;
+    const channelKey = deriveThreadKey(event.links);
+    if (!channelKey) return false;
+    const record = loadPairings(this.options.workspaceRoot).channels.find(
+      (channel) => channel.channelKey === channelKey && channel.pairedAt > 0,
+    );
+    // A channel that stopped being judged while a batch was open is flushed
+    // right now, not on the 5-minute timer: the owner's flip back is the
+    // default behaviour winning, and holding at_only chatter for five minutes
+    // would look like a stuck bot.
+    const openEntry = this.judgeBatches.get(channelKey);
+    if (openEntry && openEntry.state.messages.length > 0 && (!record || record.ingestMode !== 'all')) {
+      this.flushJudgeBatch(channelKey, openEntry.state, openEntry.envelopes);
+    }
+    if (!record || record.ingestMode !== 'all') return false;
+    // Groups only: private chats are direct in both modes. Records paired
+    // before the kind snapshot was introduced fall back to the event's own
+    // meta, which the listener sets from the platform.
+    const isGroup =
+      record.channelKind === 'group' ||
+      (record.channelKind === undefined && event.meta?.channelKind === 'group');
+    if (!isGroup) return false;
+
+    const message: BatchMessage = {
+      eventId: event.id,
+      at: event.receivedAt,
+      ...(event.meta?.mentionsBot === 'true' ? { mentionsBot: true } : {}),
+    };
+    const entry = this.judgeBatches.get(channelKey);
+    const decision = addToBatch(entry?.state, message);
+
+    if (decision.action === 'append') {
+      const current = this.judgeBatches.get(channelKey);
+      if (current) {
+        current.envelopes.set(event.id, event);
+        this.scheduleJudgeBatchClose(channelKey, current);
+      }
+      return true;
+    }
+
+    // The closed batch is judged now; the next one starts fresh. Which side of
+    // the split the triggering message belongs to follows addToBatch: a mention
+    // or the cap CLOSES the old batch (the message is judged with it), while a
+    // first-ever or post-expiry message OPENS the next one instead.
+    const closedEnvelopes = new Map(entry?.envelopes);
+    const next: JudgeBatchEntry = { state: decision.next, envelopes: new Map(), timer: null };
+    if (decision.closed.messages.some((m) => m.eventId === event.id)) {
+      closedEnvelopes.set(event.id, event);
+    } else {
+      next.envelopes.set(event.id, event);
+    }
+    if (entry?.timer) clearTimeout(entry.timer);
+    this.judgeBatches.set(channelKey, next);
+    this.scheduleJudgeBatchClose(channelKey, next);
+    if (decision.closed.messages.length > 0) {
+      void this.decideJudgeBatch(channelKey, decision.closed, closedEnvelopes).catch((error) => {
+        eventLog.warn(
+          `judge: batch decision failed for ${channelKey}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
+    return true;
+  }
+
+  /**
+   * The 5-minute clock of the open batch. Every mutation reschedules from the
+   * batch's FIRST message, so the window never widens with chatter.
+   */
+  private scheduleJudgeBatchClose(channelKey: string, entry: JudgeBatchEntry): void {
+    if (entry.timer) clearTimeout(entry.timer);
+    const delay = Math.max(0, entry.state.openedAt + BATCH_WINDOW_MS - Date.now());
+    const timer = setTimeout(() => {
+      entry.timer = null;
+      const current = this.judgeBatches.get(channelKey);
+      if (current !== entry || current.timer !== timer) return; // a newer batch owns the slot now
+      const closed = entry.state;
+      const envelopes = entry.envelopes;
+      this.judgeBatches.delete(channelKey);
+      if (closed.messages.length > 0) {
+        void this.decideJudgeBatch(channelKey, closed, envelopes).catch((error) => {
+          eventLog.warn(
+            `judge: batch decision failed for ${channelKey}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }
+    }, delay);
+    timer.unref?.();
+    entry.timer = timer;
+  }
+
+  /**
+   * Judge one closed batch and apply the decision. Publishing is the only way
+   * a message reaches a session; everything not published is marked handled
+   * here so the unclaimed funnel never re-picks it.
+   */
+  private async decideJudgeBatch(
+    channelKey: string,
+    batch: BatchState,
+    envelopes: Map<string, CraftEventEnvelope>,
+  ): Promise<void> {
+    // The owner flipped the channel back to `at_only` while the batch sat
+    // open: the default behaviour wins over a stale judgement.
+    const record = loadPairings(this.options.workspaceRoot).channels.find(
+      (channel) => channel.channelKey === channelKey && channel.pairedAt > 0,
+    );
+    if (!record || record.ingestMode !== 'all' || !this.judgeOptions) {
+      this.flushJudgeBatch(channelKey, batch, envelopes);
+      return;
+    }
+
+    const judge = this.judgeOptions;
+    const slot = this.judgeStateFor(channelKey);
+    const input: JudgeInput = {
+      channelLabel: this.judgeChannelLabel(channelKey),
+      channelKind: 'group',
+      ...(record.triggerPrompt ? { assistantHint: record.triggerPrompt } : {}),
+      messages: batch.messages.map((message): JudgeBatchMessage => {
+        const envelope = envelopes.get(message.eventId);
+        return {
+          eventId: message.eventId,
+          text: envelope?.body ?? envelope?.title ?? '',
+          at: message.at,
+          ...(envelope?.meta?.sender ? { sender: envelope.meta.sender } : {}),
+          ...(message.mentionsBot === true ? { mentionsBot: true } : {}),
+        };
+      }),
+    };
+
+    const outcome = await judgeBatch(input, slot.state, judge.callModel);
+    slot.state = outcome.state;
+
+    if (outcome.action === 'judge') {
+      const { decision } = outcome;
+      if (decision.action === 'ignore') {
+        for (const message of batch.messages) {
+          this.markJudgeOutcome(message.eventId, 'ignored', decision.reason);
+        }
+      } else {
+        // respond / escalate: publish what the reply is about — the whole
+        // batch when the judge did not narrow it.
+        const narrow = decision.eventIds?.length ? new Set(decision.eventIds) : null;
+        let published = 0;
+        for (const message of batch.messages) {
+          if (narrow && !narrow.has(message.eventId)) {
+            this.markJudgeOutcome(message.eventId, 'ignored', `outside the ${decision.action} set`);
+            continue;
+          }
+          const envelope = envelopes.get(message.eventId);
+          if (envelope) {
+            this.publish(envelope);
+            published++;
+          } else {
+            this.markJudgeOutcome(message.eventId, 'skipped', 'envelope no longer available');
+          }
+        }
+        eventLog.info(`judge: ${decision.action} ${published}/${batch.messages.length} messages in ${channelKey}`);
+      }
+      return;
+    }
+
+    // degrade / skip: at_only fallback — an actual mention of the bot
+    // survives; everything else stays quiet. Silence would read as a broken
+    // bot, which is why the fallback keeps the mentions.
+    let published = 0;
+    for (const message of batch.messages) {
+      const envelope = envelopes.get(message.eventId);
+      if (message.mentionsBot === true && envelope) {
+        this.publish(envelope);
+        published++;
+      } else {
+        this.markJudgeOutcome(message.eventId, 'skipped', outcome.reason);
+      }
+    }
+    eventLog.warn(`judge: ${outcome.action} in ${channelKey} (${outcome.reason}) — at_only fallback, ${published} message(s) kept`);
+  }
+
+  /**
+   * Publish a whole batch without judging: the channel stopped being
+   * judge-eligible (flipped back to `at_only`, or the judge was unbound).
+   * Publishing rather than skipping is the conservative direction — a
+   * session seeing a few ambient messages is a small cost; losing them is
+   * not.
+   */
+  private flushJudgeBatch(
+    channelKey: string,
+    batch: BatchState,
+    envelopes: Map<string, CraftEventEnvelope>,
+  ): void {
+    if (batch.messages.length === 0) return;
+    const entry = this.judgeBatches.get(channelKey);
+    if (entry?.state === batch) {
+      if (entry.timer) clearTimeout(entry.timer);
+      this.judgeBatches.delete(channelKey);
+    }
+    for (const message of batch.messages) {
+      const envelope = envelopes.get(message.eventId);
+      if (envelope) this.publish(envelope);
+    }
+  }
+
+  /**
+   * A message the judge decided is not for the assistant. The routing trail
+   * keeps the why; `handled_at` keeps the unclaimed funnel from re-picking
+   * it — an ignored message must stay ignored, not resurface as a nudge.
+   */
+  private markJudgeOutcome(eventId: string, outcome: string, reason?: string): void {
+    const at = Date.now();
+    this.store.recordRouting(eventId, {
+      via: 'judge',
+      outcome: reason ? `${outcome} — ${reason}` : outcome,
+      at,
+    });
+    this.store.markHandled(eventId, 'judge', at);
+  }
+
+  /** The judge's per-channel budget slot, reset at local midnight. */
+  private judgeStateFor(channelKey: string): { state: ChannelJudgeState; dayKey: string } {
+    const dayKey = new Date().toLocaleDateString();
+    let entry = this.judgeStates.get(channelKey);
+    if (!entry || entry.dayKey !== dayKey) {
+      entry = { state: emptyJudgeState(), dayKey };
+      this.judgeStates.set(channelKey, entry);
+    }
+    return entry;
+  }
+
+  /** Best-effort display label for the prompt: the listener's label store, else the raw key. */
+  private judgeChannelLabel(channelKey: string): string {
+    try {
+      const match = /^message:\/\/([^/]+)\/(.+)$/.exec(channelKey);
+      if (!match) return channelKey;
+      const labelsPath = join(this.options.workspaceRoot, 'events-data', match[1]!, 'channel-labels.json');
+      const labels = JSON.parse(readFileSync(labelsPath, 'utf8')) as Record<string, string>;
+      return labels[match[2]!] ?? channelKey;
+    } catch {
+      return channelKey;
+    }
   }
 
   /**

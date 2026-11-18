@@ -458,6 +458,9 @@ export const FolderSourceConfigSchema = z.object({
   brand: SourceBrandSchema.optional(),
   isAuthenticated: z.boolean().optional(),
   lastTestedAt: z.number().int().min(0).optional(),
+  // 渠道闸门（v6/v7）：权限标签（缺省=查询时按 ['private'] 处理）+ 只读源开关（洞 2 第 2 层）
+  labels: z.array(z.string()).optional(),
+  readOnly: z.boolean().optional(),
   // Timestamps are optional - manually created configs may not have them
   // Storage functions add these automatically when saving
   createdAt: z.number().int().min(0).optional(),

@@ -465,7 +465,11 @@ export interface SourceBrand {
 // ============================================================================
 
 /**
- * Main source configuration (stored in config.json)
+ * Main source configuration (stored in config.json).
+ *
+ * **三种源类型（MCP/API/本地文件夹）共用此顶层结构**：`mcp`/`api`/`local` 只是
+ * 类型专属的子块，顶层字段（含渠道闸门的 `labels`/`readOnly`）对三类型同样生效。
+ * “Folder”是历史命名（≠ 仅文件夹源）——读过一次被骗的人不在少数，改名另议。
  */
 export interface FolderSourceConfig {
   id: string;

@@ -9,6 +9,7 @@ import {
   canDeletePermissionLabel,
   computeWakeNarrowing,
   gateSourceSlugs,
+  isPermissionModeStricter,
   loadPermissionLabels,
   resolveChannelPermission,
   sourceLabelSet,
@@ -38,7 +39,7 @@ const rec = (partial: Partial<PairedChannelRecord> & Pick<PairedChannelRecord, '
   ...partial,
 });
 
-describe('H1 空值语义四态（阶段 1 验收标准）', () => {
+describe('H1 空值语义四态 + ⑤ pairedBy（阶段 1 验收标准）', () => {
   it('① 老记录字段全缺 → 闸关，行为与升级前一致（全放行）', () => {
     const records = [rec({ channelKey: G })];
     const perm = resolveChannelPermission(records, G, 'someone');
@@ -77,6 +78,35 @@ describe('H1 空值语义四态（阶段 1 验收标准）', () => {
     expect(stricterPermissionMode('ask', 'allow-all')).toBe('ask');
     expect(stricterPermissionMode(undefined, undefined)).toBeUndefined();
     expect(stricterPermissionMode('allow-all', 'safe')).toBe('safe');
+  });
+
+  it('⑤ 老群无 pairedBy + 助手默认 allow-all → 写保护未启用（白名单关），写操作照旧放行（零回归）', () => {
+    const records = [rec({ channelKey: G, pairedAt: 1 })]; // pairedBy 未记录
+    const perm = resolveChannelPermission(records, G, 'ANYONE');
+    // 白名单未启用：不拒绝任何人的写（拒绝/escalation 规则挂阶段 2，本层不得引入全禁语义）
+    expect(perm.pairedBy).toBeUndefined();
+    expect(perm.gateEnabled).toBe(false);
+    expect(perm.permissionMode).toBeUndefined();
+    // 源全放行 + 模式回退助手默认 = 升级前行为
+    expect(gateSourceSlugs(['a', 'b'], new Map(), perm.gateEnabled, perm.allowedLabels)).toEqual(['a', 'b']);
+    expect(stricterPermissionMode(perm.permissionMode, 'allow-all')).toBe('allow-all');
+  });
+});
+
+describe('isPermissionModeStricter（新钉：会话内手动收紧保护）', () => {
+  it('更严值 = true（safe 最严；无值不算更严）', () => {
+    expect(isPermissionModeStricter('safe', 'ask')).toBe(true);
+    expect(isPermissionModeStricter('safe', 'allow-all')).toBe(true);
+    expect(isPermissionModeStricter('safe', undefined)).toBe(true);
+    expect(isPermissionModeStricter('ask', 'allow-all')).toBe(true);
+  });
+
+  it('更松/相等/无值 = false', () => {
+    expect(isPermissionModeStricter('allow-all', 'safe')).toBe(false);
+    expect(isPermissionModeStricter('ask', 'safe')).toBe(false);
+    expect(isPermissionModeStricter('safe', 'safe')).toBe(false);
+    expect(isPermissionModeStricter(undefined, 'safe')).toBe(false);
+    expect(isPermissionModeStricter(null, 'safe')).toBe(false);
   });
 });
 

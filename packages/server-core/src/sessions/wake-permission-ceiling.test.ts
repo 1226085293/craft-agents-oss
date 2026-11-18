@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionManager, createManagedSession } from './SessionManager.ts';
 import type { ManagedSession } from './SessionManager.ts';
-import { getPermissionModeDiagnostics, type PermissionMode } from '@craft-agent/shared/agent';
+import { getPermissionModeDiagnostics, setPermissionMode, type PermissionMode } from '@craft-agent/shared/agent';
 import type { WakePermissionSpec } from '@craft-agent/shared/events/permissions.ts';
 
 /**
@@ -18,6 +18,8 @@ describe('applyWakePermissionCeiling (H1 四态, SessionManager 层)', () => {
   let tmpRoot: string;
   let sm: SessionManager;
   let managed: ManagedSession;
+  // mode-manager 是进程级全局 store（按 session id 键控）：每用例唯一 id，防跨用例串味
+  let seq = 0;
 
   beforeEach(() => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'craft-wake-perm-'));
@@ -29,7 +31,7 @@ describe('applyWakePermissionCeiling (H1 四态, SessionManager 层)', () => {
       createdAt: Date.now(),
     };
     managed = createManagedSession(
-      { id: 'sess_gate', name: '督导 · 用户', role: 'supervisor' },
+      { id: `sess_gate_${++seq}`, name: '督导 · 用户', role: 'supervisor' },
       workspace as never,
       { messagesLoaded: true },
     );
@@ -74,12 +76,37 @@ describe('applyWakePermissionCeiling (H1 四态, SessionManager 层)', () => {
   });
 
   it('未知会话 id 不抛（唤醒与落盘竞态的兜底）', () => {
-    expect(() => sm.applyWakePermissionCeiling('sess_nope', { permissionMode: null })).not.toThrow();
+    expect(() => sm.applyWakePermissionCeiling('sess_nope_unused', { permissionMode: null })).not.toThrow();
   });
 
   it('spec 类型即 WakePermissionSpec（钉 3 契约面）', () => {
     const spec: WakePermissionSpec = { enabledSourceSlugs: undefined, permissionMode: null };
     sm.applyWakePermissionCeiling(managed.id, spec);
     expect(managed.enabledSourceSlugs).toBeUndefined();
+  });
+
+  it('新钉：用户会话内手动收紧（safe）→ 唤醒回落/天花板都不覆盖', () => {
+    managed.permissionMode = 'safe';
+    setPermissionMode(managed.id, 'safe', { changedBy: 'user' });
+    // 无天花板唤醒（null = 回落 allow-all）→ 用户 safe 更严，保持
+    sm.applyWakePermissionCeiling(managed.id, { permissionMode: null });
+    expect(managed.permissionMode as PermissionMode).toBe('safe');
+    // 天花板 ask（比用户 safe 松）→ 保持 safe
+    sm.applyWakePermissionCeiling(managed.id, { permissionMode: 'ask' });
+    expect(managed.permissionMode as PermissionMode).toBe('safe');
+  });
+
+  it('新钉：唤醒收紧比用户值更严 → 允许覆盖（配置驱动收紧即时生效）', () => {
+    managed.permissionMode = 'ask';
+    setPermissionMode(managed.id, 'ask', { changedBy: 'user' });
+    sm.applyWakePermissionCeiling(managed.id, { permissionMode: 'safe' });
+    expect(managed.permissionMode as PermissionMode).toBe('safe');
+  });
+
+  it('新钉：系统/restore 来源的值不受保护（可被唤醒重算覆盖）', () => {
+    managed.permissionMode = 'safe';
+    setPermissionMode(managed.id, 'safe', { changedBy: 'restore' });
+    sm.applyWakePermissionCeiling(managed.id, { permissionMode: null });
+    expect(managed.permissionMode as PermissionMode).toBe('allow-all');
   });
 });

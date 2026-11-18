@@ -348,6 +348,7 @@ export class EventService {
       if (attempt !== null) {
         // 洞 3：兑换时刻把配对人的身份快照写进记录（pairedBy/channelKind）。
         // 后续「群里只有配对成员能写」的判定用记录里的快照，不是比对消息自带 sender。
+        // 快照缺失（老记录）= 写保护未启用：群内写回退现有模式门禁（零回归，对齐 H1 缺省语义）。
         const meta = event.meta;
         const pairedBy = meta?.senderId || undefined;
         const channelKind =

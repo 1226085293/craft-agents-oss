@@ -11,7 +11,9 @@
  * H1 空值语义（钉死，实现者不得随手重定义）：
  *  - 记录字段缺省（老记录）= 闸未启用，行为与升级前一致（零回归）；
  *  - `gateEnabled=true` + 空 `allowedLabels` = 故意全禁（UI 红警）；
- *  - `permissionMode` 缺省 = 不设天花板（**严禁回填 'safe' 到老记录**）。
+ *  - `permissionMode` 缺省 = 不设天花板（**严禁回填 'safe' 到老记录**）；
+ *  - `pairedBy` 缺省（洞 3）= **写保护白名单未启用**：群内写回退现有
+ *    permissionMode 门禁（升级前怎样，升级后还怎样），不是「一律拒绝」。
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -131,6 +133,21 @@ const MODE_LADDER: readonly PermissionModeCeiling[] = ['safe', 'ask', 'allow-all
  * 取更严（B2）：通道天花板 ∩ 助手默认。
  * 双缺省 → undefined（不设天花板）。
  */
+/**
+ * `a` 是否比 `b` 更严（safe < ask < allow-all；undefined/null = 无天花板，按最松算）。
+ * 新钉「会话内手动收紧保护」用：唤醒重算时，当前值若是用户类来源且比重算值严 → 保持。
+ */
+export function isPermissionModeStricter(
+  a: PermissionModeCeiling | null | undefined,
+  b: PermissionModeCeiling | null | undefined,
+): boolean {
+  const ia = a ? MODE_LADDER.indexOf(a) : -1;
+  const ib = b ? MODE_LADDER.indexOf(b) : -1;
+  if (ia < 0) return false; // 无值不算「更严」
+  if (ib < 0) return true;
+  return ia < ib;
+}
+
 export function stricterPermissionMode(
   channel?: PermissionModeCeiling | null,
   agentDefault?: PermissionModeCeiling | null,
@@ -151,7 +168,7 @@ export interface ChannelPermission {
   allowedLabels: string[];
   /** 模式天花板；缺省 = 跟随助手默认。 */
   permissionMode?: PermissionModeCeiling;
-  /** 谁配对的（兑换时刻快照）；缺省 = 老记录，群内写 = 拒绝 + 上报私聊（洞 3）。 */
+  /** 谁配对的（兑换时刻快照）；缺省 = 写保护未启用，群内写回退现有模式门禁（洞 3，对齐 H1 缺省语义）。 */
   pairedBy?: string;
 }
 

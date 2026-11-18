@@ -42,7 +42,7 @@ import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
 import { assemblePluginTools } from '@craft-agent/shared/events/plugin-tools'
-import { type WakePermissionSpec } from '@craft-agent/shared/events/permissions'
+import { isPermissionModeStricter, type WakePermissionSpec } from '@craft-agent/shared/events/permissions'
 import { recordOutboxCall } from '@craft-agent/shared/events/outbox.ts'
 
 /** 6-hex id, used for collision-free attachment names. */
@@ -9432,6 +9432,10 @@ ${request.prompt}`;
    * Spec semantics (computeWakeNarrowing):
    * - `enabledSourceSlugs === undefined` → restore the workspace default
    * - `permissionMode === null` → restore the supervisor base mode (allow-all)
+   *
+   * 新钉（会话内手动收紧保护）：重算可以覆盖「上次重算的值」，但不能覆盖用户在
+   * 会话里手动设的**更严**值（changedBy=user/automation）——保持到会话结束；
+   * 重算本身的收紧（目标比用户值更严）不被阻挡。
    */
   applyWakePermissionCeiling(sessionId: string, spec: WakePermissionSpec): void {
     const managed = this.sessions.get(sessionId)
@@ -9441,25 +9445,25 @@ ${request.prompt}`;
     } else {
       managed.enabledSourceSlugs = undefined
     }
-    if (spec.permissionMode === null) {
-      const base = 'allow-all'
-      if (managed.permissionMode !== base) {
-        managed.permissionMode = base
-        setPermissionMode(managed.id, base, { changedBy: 'channel-gate' })
-        managed.agent?.setPermissionMode(base)
-        sessionLog.info('channel-gate wake restored base permission mode', {
+    // undefined = 不动模式（runtime 只在通道唤醒时调用，恒传值或 null）。
+    // null = 本唤醒无天花板 → 回落基线 allow-all；值 = 应用天花板。
+    if (spec.permissionMode !== undefined) {
+      const target: PermissionMode = spec.permissionMode === null ? 'allow-all' : spec.permissionMode
+      const current = managed.permissionMode
+      const diagnostics = getPermissionModeDiagnostics(managed.id)
+      const userLocked =
+        current !== undefined &&
+        (diagnostics.lastChangedBy === 'user' || diagnostics.lastChangedBy === 'automation') &&
+        isPermissionModeStricter(current, target)
+      if (!userLocked && current !== target) {
+        managed.permissionMode = target
+        setPermissionMode(managed.id, target, { changedBy: 'channel-gate' })
+        managed.agent?.setPermissionMode(target)
+        sessionLog.info('channel-gate wake applied permission mode', {
           sessionId: managed.id,
-          permissionMode: base,
+          permissionMode: target,
         })
       }
-    } else if (spec.permissionMode && managed.permissionMode !== spec.permissionMode) {
-      managed.permissionMode = spec.permissionMode
-      setPermissionMode(managed.id, spec.permissionMode, { changedBy: 'channel-gate' })
-      managed.agent?.setPermissionMode(spec.permissionMode)
-      sessionLog.info('channel-gate wake applied permission ceiling', {
-        sessionId: managed.id,
-        permissionMode: spec.permissionMode,
-      })
     }
   }
 

@@ -58,6 +58,20 @@ export interface ChannelGatePanelProps {
 
 const AUTO_SAVE_MS = 600
 
+/**
+ * Is this pairing a group channel?
+ *
+ * Legacy v1 records predate `channelKind` (H1 zero-backfill), so an old group
+ * record has no field at all. Telegram group channel keys carry a negative
+ * chat id (`message://telegram/-5095098301`); infer from the key when the
+ * record is silent, so 「群无「询问」」 keeps applying to old groups instead of
+ * offering a mode an unattended group can never answer.
+ */
+export function isGroupChannel(row: Pick<ChannelGateRow, 'channelKey' | 'channelKind'>): boolean {
+  if (row.channelKind) return row.channelKind === 'group'
+  return row.channelKey.startsWith('message://telegram/-')
+}
+
 export function ChannelGatePanel({
   workspaceId,
   row,
@@ -83,7 +97,7 @@ export function ChannelGatePanel({
   // 保存成功后 +1：预览 RPC 读盘，本地 draft 领先 600ms 去抖，保存落地后重取才对得齐
   const [previewNonce, setPreviewNonce] = React.useState(0)
 
-  const isGroup = row.channelKind === 'group'
+  const isGroup = isGroupChannel(row)
   // 预览的「全禁」红警与标签区的全禁红警是同一状态的两处呈现，
   // 标签区已经给了 fullDeny 警告，这里不重复渲染。
 

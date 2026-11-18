@@ -74,6 +74,7 @@ export function ChannelGatePanel({
   const [mode, setMode] = React.useState<'__default' | 'safe' | 'ask' | 'allow-all'>(
     row.permissionMode ?? '__default',
   )
+  const [ingestMode, setIngestMode] = React.useState<'at_only' | 'all'>(row.ingestMode ?? 'at_only')
   const [newLabel, setNewLabel] = React.useState('')
   const [claimResult, setClaimResult] = React.useState<string | null>(null)
   const [preview, setPreview] = React.useState<ChannelGatePreview | null>(null)
@@ -112,6 +113,7 @@ export function ChannelGatePanel({
     gateEnabled: row.gateEnabled === true,
     labels: [...(row.allowedLabels ?? [])],
     mode: (row.permissionMode ?? '__default') as typeof mode,
+    ingestMode: row.ingestMode ?? 'at_only',
   })
   const [dirty, setDirty] = React.useState(false)
   React.useEffect(() => {
@@ -122,6 +124,7 @@ export function ChannelGatePanel({
       patch.gateEnabled = gateEnabled
       patch.allowedLabels = gateEnabled ? allowedLabels : []
       patch.permissionMode = mode === '__default' ? null : mode
+      patch.ingestMode = ingestMode
       setDirty(false)
       void window.electronAPI
         .channelGate(workspaceId, row.channelKey, patch)
@@ -134,7 +137,7 @@ export function ChannelGatePanel({
         .catch(() => undefined)
     }, AUTO_SAVE_MS)
     return () => clearTimeout(timer)
-  }, [agentId, gateEnabled, allowedLabels, mode, dirty])
+  }, [agentId, gateEnabled, allowedLabels, mode, ingestMode, dirty])
 
   const markDirty = (): void => setDirty(true)
 
@@ -354,17 +357,53 @@ export function ChannelGatePanel({
         </div>
       </div>
 
-      {/* 接收模式（阶段 1 置灰；全收/触发提示词随阶段 6 判定器上） */}
-      <div className="flex items-center gap-2 text-xs text-muted-foreground/70">
-        <span>
-          {t('events.channelGate.receiveMode', { defaultValue: '接收模式' })}：
-        </span>
-        <span className="cursor-not-allowed rounded border border-border/40 px-1.5 py-0.5">
-          {t('events.channelGate.receiveAtOnly', { defaultValue: '只收@（默认）' })}
-        </span>
-        <span className="text-muted-foreground/50">
-          {t('events.channelGate.receiveComing', { defaultValue: '全收/触发提示词 随阶段 6 判定器上线' })}
-        </span>
+      {/*
+        接收模式（阶段 6）：判定器已上线，这里决定它的输入。
+        「只收@」= 没被点名的群消息不判定（默认，最省）；「全收」= 每条都过判定器，
+        由它判断该不该回。两种模式下私聊都直达，判定器只在群里分流。
+      */}
+      <div className="space-y-1">
+        <div className="text-xs text-muted-foreground">
+          {t('events.channelGate.receiveMode', { defaultValue: '接收模式' })}
+        </div>
+        <label className="flex items-start gap-2 text-[13px]">
+          <input
+            type="radio"
+            className="mt-0.5"
+            checked={ingestMode === 'at_only'}
+            onChange={() => {
+              setIngestMode('at_only')
+              markDirty()
+            }}
+          />
+          <span>
+            {t('events.channelGate.receiveAtOnly', { defaultValue: '只收@（默认）' })}
+            <span className="block text-[11px] text-muted-foreground">
+              {t('events.channelGate.receiveAtOnlyHint', {
+                defaultValue: '没被点名的群消息不处理。最省，也不会自说自话。',
+              })}
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-2 text-[13px]">
+          <input
+            type="radio"
+            className="mt-0.5"
+            checked={ingestMode === 'all'}
+            onChange={() => {
+              setIngestMode('all')
+              markDirty()
+            }}
+          />
+          <span>
+            {t('events.channelGate.receiveAll', { defaultValue: '全收（判定器分流）' })}
+            <span className="block text-[11px] text-muted-foreground">
+              {t('events.channelGate.receiveAllHint', {
+                defaultValue: '每条消息都过判定器，由它决定该不该回；判定不了时退回只收@。',
+              })}
+            </span>
+          </span>
+        </label>
       </div>
 
       {/* 源可见性预览（阶段 1 半成品：只有标签交集） */}

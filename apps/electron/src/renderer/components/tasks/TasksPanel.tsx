@@ -57,28 +57,20 @@ export function TasksListPanel({
   const { navigateToSession } = useNavigation()
 
   const cancel = (id: string) => {
-    void (window.electronAPI as unknown as {
-      tasksUpdate?: (workspaceId: string, id: string, status: string) => Promise<unknown>
-    }).tasksUpdate?.(workspaceId, id, 'canceled')
+    void window.electronAPI.tasksUpdate(workspaceId, id, 'canceled')
   }
 
   const run = (id: string) => {
-    void (window.electronAPI as unknown as {
-      tasksRun?: (workspaceId: string, id: string) => Promise<unknown>
-    }).tasksRun?.(workspaceId, id)
+    void window.electronAPI.tasksRun(workspaceId, id)
   }
 
   /** Pause keeps the task; cancelling ends it. They are different answers. */
   const pause = (id: string) => {
-    void (window.electronAPI as unknown as {
-      tasksUpdate?: (workspaceId: string, id: string, status: string, options?: unknown) => Promise<unknown>
-    }).tasksUpdate?.(workspaceId, id, 'paused', { pauseReason: 'waiting' })
+    void window.electronAPI.tasksUpdate(workspaceId, id, 'paused', { pauseReason: 'waiting' })
   }
 
   const remove = (id: string) => {
-    void (window.electronAPI as unknown as {
-      tasksDelete?: (workspaceId: string, id: string) => Promise<unknown>
-    }).tasksDelete?.(workspaceId, id)
+    void window.electronAPI.tasksDelete(workspaceId, id)
   }
 
   /**
@@ -155,14 +147,10 @@ export function TaskDetailPanel({
         }}
         onOpenSession={(sessionId) => navigateToSession(sessionId)}
         onResume={(id) => {
-          void (window.electronAPI as unknown as {
-            tasksRun?: (workspaceId: string, id: string) => Promise<unknown>
-          }).tasksRun?.(workspaceId, id)
+          void window.electronAPI.tasksRun(workspaceId, id)
         }}
         onRun={(id) => {
-          void (window.electronAPI as unknown as {
-            tasksRun?: (workspaceId: string, id: string) => Promise<unknown>
-          }).tasksRun?.(workspaceId, id)
+          void window.electronAPI.tasksRun(workspaceId, id)
         }}
         agents={agents}
         onUpdateTrigger={(id, triggers) => {
@@ -173,16 +161,10 @@ export function TaskDetailPanel({
            * the editor as an error instead of closing the panel and leaving the old schedule in
            * place.
            */
-          const api = window.electronAPI as unknown as {
-            tasksUpdateTrigger?: (
-              workspaceId: string,
-              id: string,
-              /** The whole list: a task may hold a cron rule and an event rule at once. */
-              triggers: unknown,
-            ) => Promise<unknown>
-          }
-          if (!api.tasksUpdateTrigger) throw new Error('这个版本不支持修改触发方式')
-          return api.tasksUpdateTrigger(workspaceId, id, triggers).then(() => undefined)
+          /**
+           * The whole list: a task may hold a cron rule and an event rule at once.
+           */
+          return window.electronAPI.tasksUpdateTrigger(workspaceId, id, triggers).then(() => undefined)
         }}
         onAnswer={(id, text, decisionId) => {
           /**
@@ -218,9 +200,7 @@ export function TaskDetailPanel({
           })()
         }}
         onCancel={(id) => {
-          void (window.electronAPI as unknown as {
-            tasksUpdate?: (workspaceId: string, id: string, status: string) => Promise<unknown>
-          }).tasksUpdate?.(workspaceId, id, 'canceled')
+          void window.electronAPI.tasksUpdate(workspaceId, id, 'canceled')
         }}
       />
     </div>

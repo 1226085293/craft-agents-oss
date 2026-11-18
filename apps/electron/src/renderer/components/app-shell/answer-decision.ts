@@ -36,35 +36,18 @@ export async function submitDecisionAnswer(answer: DecisionAnswer): Promise<Deci
   const text = answer.text.trim()
   if (!text) return { accepted: false, reason: '答复是空的' }
 
-  const api = window.electronAPI as unknown as {
-    tasksAnswer?: (
-      workspaceId: string,
-      taskId: string,
-      text: string,
-      askedBySessionId?: string,
-      decisionId?: string,
-    ) => Promise<DecisionAnswerResult>
-  }
-
-  if (api.tasksAnswer) {
-    const result = await api.tasksAnswer(
-      answer.workspaceId,
-      answer.taskId ?? '',
-      text,
-      answer.askedBySessionId,
-      answer.decisionId,
-    )
-    // The server knows which task it refused for; pass its reason through rather than
-    // inventing a generic one, because "no pending decision" and "no task to answer" are
-    // different facts and the person can act on the difference.
-    return { accepted: result?.accepted !== false, ...(result?.reason ? { reason: result.reason } : {}) }
-  }
-
-  // A build without the RPC: still deliver the words, but say so rather than pretending
-  // the task-level bookkeeping happened.
-  if (!answer.askedBySessionId) {
-    return { accepted: false, reason: '这个版本不支持任务答复通道' }
-  }
-  await window.electronAPI.sendMessage(answer.askedBySessionId, text)
-  return { accepted: true }
+  // The preload builds this method from CHANNEL_MAP, so it exists in every build that
+  // ships the map; the old `if (api.tasksAnswer)` guard was only hiding a missing
+  // declaration (the parity test caught it). No version skew to defend against.
+  const result = await window.electronAPI.tasksAnswer(
+    answer.workspaceId,
+    answer.taskId ?? '',
+    text,
+    answer.askedBySessionId,
+    answer.decisionId,
+  )
+  // The server knows which task it refused for; pass its reason through rather than
+  // inventing a generic one, because "no pending decision" and "no task to answer" are
+  // different facts and the person can act on the difference.
+  return { accepted: result?.accepted !== false, ...(result?.reason ? { reason: result.reason } : {}) }
 }

@@ -548,7 +548,7 @@ export interface ElectronAPI {
     memoryDomain?: string
     builtin?: boolean
   }>>
-  agentsGet(workspaceId: string, id: string): Promise<Record<string, unknown>>
+  agentsGet(workspaceId: string, id: string): Promise<import('@craft-agent/shared/agents').AgentProfile | null>
   agentsSave(workspaceId: string, agent: Record<string, unknown>): Promise<{ id: string }>
 
   agentsDelete(workspaceId: string, id: string): Promise<{ ok: boolean }>
@@ -557,13 +557,15 @@ export interface ElectronAPI {
   tasksList(workspaceId: string, status?: string): Promise<Array<{
     id: string
     name: string
-    status: string
+    status: import('@craft-agent/shared/tasks').TaskStatus
     priority: number
     updatedAt: number
     currentWorkerSessionId?: string
     sessionCount: number
     lastHandoff?: string
     pauseReason?: string | null
+    /** What a paused task is waiting for, when it is waiting on a person. */
+    decisionLabel?: string
   }>>
   tasksGet(workspaceId: string, id: string, includeJournal?: boolean): Promise<unknown>
   tasksUpdate(

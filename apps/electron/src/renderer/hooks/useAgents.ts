@@ -12,26 +12,6 @@ import * as React from 'react'
 import type { AgentOption } from '@/components/app-shell/input/AgentSelector'
 import type { TaskListItem } from '@/components/tasks/TaskBoardPanel'
 
-interface AgentsApi {
-  agentsList?: (workspaceId: string) => Promise<AgentOption[]>
-  onAgentsChanged?: (cb: (payload: { workspaceId: string }) => void) => () => void
-}
-
-interface TasksApi {
-  tasksList?: (workspaceId: string, status?: string) => Promise<TaskListItem[]>
-  tasksGet?: (workspaceId: string, id: string, includeJournal?: boolean) => Promise<unknown>
-  tasksUpdate?: (workspaceId: string, id: string, status: string) => Promise<unknown>
-  onTasksChanged?: (cb: (payload: { workspaceId: string }) => void) => () => void
-}
-
-function agentsApi(): AgentsApi {
-  return window.electronAPI as unknown as AgentsApi
-}
-
-function tasksApi(): TasksApi {
-  return window.electronAPI as unknown as TasksApi
-}
-
 export interface AgentsState {
   agents: AgentOption[]
   loading: boolean
@@ -54,7 +34,7 @@ export function useAgents(workspaceId: string | undefined): AgentsState {
     let cancelled = false
 
     const load = () => {
-      void agentsApi()
+      void window.electronAPI
         .agentsList?.(workspaceId)
         .then((list) => {
           if (!cancelled) setAgents(list ?? [])
@@ -68,7 +48,7 @@ export function useAgents(workspaceId: string | undefined): AgentsState {
     }
 
     load()
-    const off = agentsApi().onAgentsChanged?.((payload) => {
+    const off = window.electronAPI.onAgentsChanged?.((payload) => {
       if (!cancelled && payload?.workspaceId === workspaceId) load()
     })
 
@@ -99,7 +79,7 @@ export function useTasks(workspaceId: string | undefined): TasksState {
     let cancelled = false
 
     const load = () => {
-      void tasksApi()
+      void window.electronAPI
         .tasksList?.(workspaceId)
         .then((list) => {
           if (!cancelled) setTasks(list ?? [])
@@ -110,7 +90,7 @@ export function useTasks(workspaceId: string | undefined): TasksState {
     }
 
     load()
-    const off = tasksApi().onTasksChanged?.((payload) => {
+    const off = window.electronAPI.onTasksChanged?.((payload) => {
       if (!cancelled && payload?.workspaceId === workspaceId) load()
     })
 
@@ -138,7 +118,7 @@ export function useTaskDetail(workspaceId: string | undefined, id: string | unde
     setSettled(false)
 
     const load = () => {
-      void tasksApi()
+      void window.electronAPI
         .tasksGet?.(workspaceId, id, true)
         .then((result) => {
           if (cancelled) return
@@ -158,7 +138,7 @@ export function useTaskDetail(workspaceId: string | undefined, id: string | unde
     // The detail pane used to be fetched once and then never again, so a task
     // deleted from the navigator kept rendering its last-known contents. Any
     // change in the workspace re-reads it; the miss becomes a null.
-    const off = tasksApi().onTasksChanged?.((payload) => {
+    const off = window.electronAPI.onTasksChanged?.((payload) => {
       if (!cancelled && payload?.workspaceId === workspaceId) load()
     })
 

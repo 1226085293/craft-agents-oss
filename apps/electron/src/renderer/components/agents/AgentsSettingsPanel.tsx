@@ -398,10 +398,8 @@ export function AgentsSettingsPanel({
     // user is in the middle of editing.
     if (hydratedForRef.current === selectedId) return
     let cancelled = false
-    void (window.electronAPI as unknown as {
-      agentsGet?: (workspaceId: string, id: string) => Promise<AgentDraft | null>
-    })
-      .agentsGet?.(workspaceId, selectedId)
+    void window.electronAPI
+      .agentsGet(workspaceId, selectedId)
       .then((profile) => {
         if (cancelled || !profile) return
         // `dispatchHint` is optional on the wire (older rows have none), but the
@@ -447,10 +445,8 @@ export function AgentsSettingsPanel({
     const timer = setTimeout(() => {
       const payload = { ...draft, id: draft.id ?? selectedId ?? undefined }
       setStatus('saving')
-      void (window.electronAPI as unknown as {
-        agentsSave?: (workspaceId: string, agent: unknown) => Promise<{ id: string }>
-      })
-        .agentsSave?.(workspaceId, payload)
+      void window.electronAPI
+        .agentsSave(workspaceId, payload)
         .then((result) => {
           // The key recorded is the one that was actually sent: if a keystroke
           // landed while the request was in flight, the effect fires again
@@ -473,9 +469,7 @@ export function AgentsSettingsPanel({
 
   const remove = async () => {
     if (!selectedId) return
-    await (window.electronAPI as unknown as {
-      agentsDelete?: (workspaceId: string, id: string) => Promise<unknown>
-    }).agentsDelete?.(workspaceId, selectedId)
+    await window.electronAPI.agentsDelete(workspaceId, selectedId)
     setSelectedId(null)
     await reload()
   }

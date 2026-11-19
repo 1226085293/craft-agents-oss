@@ -163,6 +163,8 @@ const EXPECTED_CHANNELS: string[] = [
   "memory:consolidate:state", 
   "memory:delete", 
   "memory:deleteMany", 
+  "memory:enabled:get", 
+  "memory:enabled:set", 
   "memory:extract", 
   "memory:getStats", 
   "memory:getTrash", 

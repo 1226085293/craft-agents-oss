@@ -40,7 +40,6 @@ export const ShortcutsIcon = ({ className }: IconProps) => <Keyboard className={
  * Used by both AppMenu and SettingsNavigator for consistent icons.
  */
 export const SETTINGS_ICONS: Record<SettingsSubpage, React.ComponentType<IconProps>> = {
-  agents: AgentsSettingsIcon,
   memory: MemorySettingsIcon,
   app: AppSettingsIcon,
   llm: Route,

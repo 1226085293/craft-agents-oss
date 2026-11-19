@@ -35,10 +35,10 @@ export interface SettingsPageDefinition {
  * time via t(). Do NOT call i18n.t() here — this module loads before i18n init.
  */
 export const SETTINGS_PAGES = [
-  { id: 'agents' as const, labelKey: 'settings.agents.title', descriptionKey: 'settings.agents.description' },
-  // Memory domains: the registry + the 记忆 wiki (each domain's MEMORY.md).
-  // Sits right after agents because a domain is an agent's memory, and the
-  // 助手卡「记忆域」下拉 is where the user first meets the concept.
+  // 智能体已迁到主窗口左侧导航（数据源上方）：设置页不再挂 agents 项，
+  // 深链 settings/agents 失效后回落裸 settings。
+  // Memory: global switch + 记忆整理策略组 + 做梦调度 + 嵌入模型（域视图
+  // 已拆到助手详情/项目详情，这里只剩全局设置）。
   { id: 'memory' as const, labelKey: 'settings.memory.title', descriptionKey: 'settings.memory.description' },
   { id: 'app' as const, labelKey: 'settings.app.title', descriptionKey: 'settings.app.description' },
   // One entry for the whole in-process LLM gateway. Its four views live behind

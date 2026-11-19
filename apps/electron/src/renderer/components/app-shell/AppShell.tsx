@@ -42,6 +42,7 @@ import {
   ChevronLeft,
   ArrowLeft,
   Send,
+  Users,
 } from "lucide-react"
 import { SourceAvatar } from "@/components/ui/source-avatar"
 import { TopBar } from "./TopBar"
@@ -118,6 +119,7 @@ import { getEnteredProjectDetailScopeId } from "./project-navigation"
 import * as storage from "@/lib/local-storage"
 import { toast } from "sonner"
 import { navigate, routes } from "@/lib/navigate"
+import { useAgents } from "@/hooks/useAgents"
 import { openSettingsWindow } from "@/lib/settings-window"
 import {
   useNavigation,
@@ -134,6 +136,7 @@ import {
   isEventInboxNavigation,
   isEventOutboxNavigation,
   isTasksNavigation,
+  isAgentsNavigation,
   type NavigationState,
 } from "@/contexts/NavigationContext"
 import type { SettingsSubpage } from "../../../shared/types"
@@ -680,13 +683,36 @@ function AppShellContent({
   React.useEffect(() => {
     void refreshMemoryCount()
   }, [refreshMemoryCount])
+  // Global memory switch: when off the 记忆 nav item (and the agent/project
+  // memory sections) stay hidden; the pipeline skips on the server side.
+  const [memoryEnabled, setMemoryEnabled] = React.useState(true)
+  const refreshMemoryEnabled = React.useCallback(async () => {
+    const root = activeWorkspace?.rootPath
+    if (!root) return
+    try {
+      const res = await window.electronAPI.memoryEnabledGet?.(root)
+      if (res) setMemoryEnabled(res.enabled)
+    } catch {
+      // best-effort: keep the last known value
+    }
+  }, [activeWorkspace?.rootPath])
+  React.useEffect(() => {
+    void refreshMemoryEnabled()
+  }, [refreshMemoryEnabled])
+
   React.useEffect(() => {
     const cleanup = window.electronAPI.onMemoryChanged((workspaceId) => {
       if (workspaceId !== activeWorkspaceId) return
       void refreshMemoryCount()
+      // The 记忆开关 toggle is a memory-store write → this broadcast carries
+      // it to the main window (settings can live in a separate window).
+      void refreshMemoryEnabled()
     })
     return cleanup
-  }, [activeWorkspaceId, refreshMemoryCount])
+  }, [activeWorkspaceId, refreshMemoryCount, refreshMemoryEnabled])
+
+  // Role count for the nav:agents badge (same pattern as the memory badge).
+  const { agents: agentProfiles } = useAgents(activeWorkspaceId ?? undefined)
 
   // Send to Workspace dialog state (driven by sendToWorkspaceAtom set from SessionMenu/BatchSessionMenu)
   const sendToWorkspaceIds = useAtomValue(sendToWorkspaceAtom)
@@ -2585,6 +2611,17 @@ function AppShellContent({
                       onClick: handleEventListenersClick,
                     },
                     {
+                      // Roles sit above sources: who does the work comes
+                      // before what they touch. Migrated from 设置/智能体 to
+                      // the main window's left nav.
+                      id: "nav:agents",
+                      title: t("sidebar.agents", { defaultValue: "智能体" }),
+                      label: String(agentProfiles.length),
+                      icon: Users,
+                      variant: (isAgentsNavigation(navState) ? "default" : "ghost") as "default" | "ghost",
+                      onClick: () => navigate(routes.view.agents()),
+                    },
+                    {
                       id: "nav:sources",
                       title: t("sidebar.sources"),
                       label: String(sources.length),
@@ -2639,14 +2676,18 @@ function AppShellContent({
                             sourceType: 'local',
                           },
                         },
-                        {
-                          id: "nav:sources:memories",
-                          title: t("memory.globalTitle"),
-                          label: String(memoryCount > 0 ? memoryCount : ''),
-                          icon: Brain,
-                          variant: navState.navigator === 'sources' && navState.details?.type === 'memory' ? "default" : "ghost",
-                          onClick: () => navigate(routes.view.memories()),
-                        },
+                        ...(memoryEnabled
+                          ? [
+                              {
+                                id: "nav:sources:memories",
+                                title: t("memory.globalTitle"),
+                                label: String(memoryCount > 0 ? memoryCount : ''),
+                                icon: Brain,
+                                variant: (navState.navigator === 'sources' && navState.details?.type === 'memory' ? "default" : "ghost") as "default" | "ghost",
+                                onClick: () => navigate(routes.view.memories()),
+                              },
+                            ]
+                          : []),
                       ],
                     },
                     {

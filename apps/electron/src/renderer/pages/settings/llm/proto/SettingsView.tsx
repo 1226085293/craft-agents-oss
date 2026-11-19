@@ -5,7 +5,8 @@
  * Binding policy (deliberate, so nothing on this page is decorative):
  *   - 默认策略组 / 整理策略组 → persisted preference read by the session layer
  *     (default strategy) and reserved for memory extraction;
- *   - Token 优化（RTK） / 嵌入模型 → real app config via the existing IPC;
+ *     记忆整理策略组与嵌入模型 UI 已迁到 设置/记忆 页（11-19 拍板）；
+ *   - Token 优化（RTK） → real app config via the existing IPC;
  *   - 日志落盘 → real gateway config (`usage.persist`): off keeps only the
  *     current session's log, on writes one file per local day.
  *
@@ -35,19 +36,15 @@ export function SettingsView(props: Props): React.JSX.Element {
   const { strategies } = props
 
   // Performance section — real app config.
+  // 嵌入模型设置与记忆整理策略组已迁到 设置/记忆 页（11-19 拍板），
+  // 本页只剩 Token 优化（RTK）。
   const [rtkEnabled, setRtkEnabled] = React.useState<boolean | null>(null)
   const [rtkVersion, setRtkVersion] = React.useState<string | null>(null)
-  const [embeddingPath, setEmbeddingPath] = React.useState('')
-  const [embeddingDraft, setEmbeddingDraft] = React.useState('')
 
   React.useEffect(() => {
     void window.electronAPI.getRtkEnabled?.().then((v) => setRtkEnabled(v !== false))
     void window.electronAPI.getRtkStatus?.({}).then((s) => {
       setRtkVersion(s?.installed ? (s.version ?? '已安装') : null)
-    })
-    void window.electronAPI.getEmbeddingModelPath?.().then((p) => {
-      setEmbeddingPath(p ?? '')
-      setEmbeddingDraft(p ?? '')
     })
   }, [])
 
@@ -57,37 +54,6 @@ export function SettingsView(props: Props): React.JSX.Element {
     <>
       <div className="page-title">设置</div>
       <div className="page-desc">辅助模型与性能选项</div>
-
-      <div className="sec-title" style={{ marginTop: 20 }}>
-        记忆整理
-      </div>
-      <div className="card">
-        <div className="row spread" style={{ padding: '8px 0' }}>
-          {/* `minWidth: 0`: the hint wraps instead of pushing the select
-              narrower — a longer hint used to shrink the 200px cell and the
-              two selects ended up different widths. */}
-          <div style={{ minWidth: 0 }}>
-            <span className="small">策略组</span>
-            <div className="xs muted">
-              记忆抽取、整合与仲裁走这个策略组；留空则使用会话的策略组。其余辅助调用（标题、忙碌/群聊决策、摘要）始终跟随会话自己的策略组。
-            </div>
-          </div>
-          <div style={{ flex: '0 0 200px', width: 200 }}>
-            <ProtoSelect
-              value={props.config.miniStrategy ?? ''}
-              options={[{ value: '', label: '使用会话策略组' }, ...strategyOptions]}
-              onChange={(v) => {
-                void props.onSave({
-                  ...props.config,
-                  miniStrategy: v || undefined,
-                }).then((ok) => {
-                  if (ok) shell.toast(v ? `记忆整理将使用「${strategyOptions.find((s) => s.value === v)?.label ?? v}」` : '记忆整理已改为使用会话策略组')
-                })
-              }}
-            />
-          </div>
-        </div>
-      </div>
 
       <div className="sec-title" style={{ marginTop: 20 }}>
         会话压缩
@@ -197,53 +163,6 @@ export function SettingsView(props: Props): React.JSX.Element {
           </div>
           <div className="xs muted" style={{ paddingBottom: 8 }}>
             {rtkEnabled === null ? '读取中…' : rtkVersion ? `rtk 已安装 · ${rtkVersion}` : 'rtk 未安装（启用后无效果）'}
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="row spread" style={{ padding: '8px 0' }}>
-            <div>
-              <span className="small">嵌入模型</span>
-              <div className="xs muted">语义记忆检索的本地 ONNX 模型，留空使用内置</div>
-            </div>
-            <div className="row">
-              <input
-                type="text"
-                className="sm"
-                style={{ width: 220 }}
-                placeholder="ONNX 模型目录路径"
-                value={embeddingDraft}
-                onChange={(e) => setEmbeddingDraft(e.target.value)}
-              />
-              <button
-                type="button"
-                className="btn sm"
-                style={{ padding: '4px 10px' }}
-                onClick={() => {
-                  void window.electronAPI.setEmbeddingModelPath?.(embeddingDraft.trim()).then(() => {
-                    setEmbeddingPath(embeddingDraft.trim())
-                    shell.toast('已保存嵌入模型路径（重启后生效）')
-                  })
-                }}
-              >
-                保存
-              </button>
-              <button
-                type="button"
-                className="btn sm"
-                style={{ padding: '4px 10px' }}
-                disabled={!embeddingPath}
-                onClick={() => {
-                  void window.electronAPI.clearEmbeddingModelPath?.().then(() => {
-                    setEmbeddingPath('')
-                    setEmbeddingDraft('')
-                    shell.toast('已恢复内置模型')
-                  })
-                }}
-              >
-                恢复默认
-              </button>
-            </div>
           </div>
         </div>
       </div>

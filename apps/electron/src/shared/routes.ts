@@ -125,6 +125,12 @@ export const routes = {
     /** Global memory manager under the Sources navigator. */
     memories: () => 'sources/memories' as const,
 
+    /** Agents view (agents navigator). Pass an agent id for a specific agent's detail. */
+    agents: (agentId?: string) => {
+      if (!agentId) return 'agents' as const
+      return `agents/agent/${agentId}` as const
+    },
+
     /** API sources view (sources navigator, api filter) */
     sourcesApi: (sourceSlug?: string) =>
       sourceSlug

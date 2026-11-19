@@ -17,8 +17,10 @@ import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { Check, Plus, Smile, Trash2 } from 'lucide-react'
 
+import { agentDomainSlug } from '@craft-agent/shared/memory'
 import { useAgents } from '@/hooks/useAgents'
 import { cn } from '@/lib/utils'
+import { DomainWikiView } from '@/components/memory/DomainWikiView'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -322,6 +324,15 @@ export interface AgentsSettingsPanelProps {
   skills?: Array<{ slug: string; name: string }>
   /** Gateway groups, for the default-strategy picker. */
   strategies?: Array<{ id: string; name: string }>
+  /**
+   * External selection (the main window's nav state). When provided the panel
+   * is controlled: external changes steer the internal selection, and every
+   * internal selection change is reported back via onAgentSelected.
+   */
+  selectedAgentId?: string | null
+  onAgentSelected?: (id: string | null) => void
+  /** Global memory-system switch; off hides the 记忆 section entirely. */
+  memoryEnabled?: boolean
 }
 
 export function AgentsSettingsPanel({
@@ -329,10 +340,31 @@ export function AgentsSettingsPanel({
   sources = [],
   skills = [],
   strategies = [],
+  selectedAgentId,
+  onAgentSelected,
+  memoryEnabled = true,
 }: AgentsSettingsPanelProps): React.JSX.Element {
   const { t } = useTranslation()
   const { agents, reload } = useAgents(workspaceId)
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
+
+  // Controlled selection (main window nav): external → internal. The reverse
+  // (internal → external) goes through selectAgent below.
+  React.useEffect(() => {
+    if (selectedAgentId !== undefined && selectedAgentId !== selectedId) {
+      setSelectedId(selectedAgentId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAgentId])
+
+  /** Internal selection + notify the controlled parent. */
+  const selectAgent = React.useCallback(
+    (id: string | null) => {
+      setSelectedId(id)
+      onAgentSelected?.(id)
+    },
+    [onAgentSelected],
+  )
   const [draft, setDraft] = React.useState<AgentDraft>(EMPTY)
   /**
    * No save button. The page writes itself: every edit is persisted after a
@@ -359,39 +391,6 @@ export function AgentsSettingsPanel({
   const newDraftRef = React.useRef(false)
 
   const selected = agents.find((a) => a.id === selectedId)
-
-  // 记忆域下拉数据源（memory-domains 最小版：表 + 自动注册的 project 共享域）
-  const [memoryDomainOptions, setMemoryDomainOptions] = React.useState<
-    Array<{ value: string; label: string }>
-  >([])
-  React.useEffect(() => {
-    let cancelled = false
-    void window.electronAPI
-      .memoryDomains(workspaceId)
-      .then((file) => {
-        if (cancelled) return
-        setMemoryDomainOptions([
-          {
-            // Radix Select.Item 拒空字符串 value（会让整个 agents 页崩到错误边界，
-            // 活体验收 11-18 抓到）——照下方 defaultStrategy 的 __follow 哨兵范式
-            value: '__none__',
-            label: t('settings.agents.memoryDomainNone', { defaultValue: '未指定 · 默认个人域' }),
-          },
-          ...file.domains.map((domain) => ({
-            value: domain.slug,
-            label: `${
-              domain.kind === 'project'
-                ? t('settings.agents.memoryDomainShared', { defaultValue: '共享 · 只读 · 阶段 4' })
-                : t('settings.agents.memoryDomainPersonal', { defaultValue: '个人' })
-            } · ${domain.slug}`,
-          })),
-        ])
-      })
-      .catch(() => undefined)
-    return () => {
-      cancelled = true
-    }
-  }, [workspaceId, t])
 
   React.useEffect(() => {
     // The picker list is flat; load the full profile for the selected id.
@@ -430,7 +429,7 @@ export function AgentsSettingsPanel({
   React.useEffect(() => {
     if (selectedId || agents.length === 0 || newDraftRef.current) return
     const target = agents.find((a) => a.builtin) ?? agents[0]
-    if (target) setSelectedId(target.id)
+    if (target) selectAgent(target.id)
   }, [agents, selectedId])
 
   const flash = (next: 'saved' | 'error') => {
@@ -473,7 +472,7 @@ export function AgentsSettingsPanel({
             // Adopt the id the server assigned so the next edit updates this
             // role instead of creating a twin.
             hydratedForRef.current = result.id
-            setSelectedId(result.id)
+            selectAgent(result.id)
             setDraft((current) => (contentKey(current) === key ? { ...current, id: result.id } : current))
           }
           flash('saved')
@@ -487,7 +486,7 @@ export function AgentsSettingsPanel({
   const remove = async () => {
     if (!selectedId) return
     await window.electronAPI.agentsDelete(workspaceId, selectedId)
-    setSelectedId(null)
+    selectAgent(null)
     await reload()
   }
 
@@ -534,7 +533,7 @@ export function AgentsSettingsPanel({
             className="h-8 w-full justify-start gap-1.5 px-2 text-[13px] font-normal"
             onClick={() => {
               newDraftRef.current = true
-              setSelectedId(null)
+              selectAgent(null)
               setDraft(EMPTY)
             }}
           >
@@ -549,7 +548,7 @@ export function AgentsSettingsPanel({
               type="button"
               onClick={() => {
                 newDraftRef.current = false
-                setSelectedId(agent.id)
+                selectAgent(agent.id)
               }}
               className={cn(
                 'mb-0.5 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors',
@@ -770,7 +769,7 @@ export function AgentsSettingsPanel({
                 <SettingsCard>
                   <div className="p-3">
                     <textarea
-                      className="min-h-[140px] w-full resize-y rounded-md border border-input bg-muted/50 p-2 font-mono text-xs leading-relaxed"
+                      className="min-h-[140px] w-full resize-y rounded-md border border-input bg-muted/50 p-2 text-[13px] leading-relaxed"
                       value={draft.persona}
                       onChange={(e) => setDraft({ ...draft, persona: e.target.value })}
                     />
@@ -778,23 +777,52 @@ export function AgentsSettingsPanel({
                 </SettingsCard>
               </SettingsSection>
 
-              <SettingsSection
-                title={t('settings.agents.memorySection', { defaultValue: '记忆' })}
-                description={t('settings.agents.memorySectionHint', {
-                  defaultValue: '这个角色的 MEMORY.md 写进哪个域；未指定时缺省落个人域兜底。',
-                })}
-              >
-                <SettingsCard>
-                  <SettingsSelectRow
-                    label={t('settings.agents.memoryDomain', { defaultValue: '记忆域' })}
-                    value={draft.memoryDomain ?? '__none__'}
-                    onValueChange={(next) =>
-                      setDraft({ ...draft, memoryDomain: next === '__none__' ? undefined : next })
-                    }
-                    options={memoryDomainOptions}
-                  />
-                </SettingsCard>
-              </SettingsSection>
+              {/* 个人域：展示本角色自己的记忆域（图/实体/原文）。旧的「记忆域」下拉已删除——
+                  写域语义保留在数据里（draft.memoryDomain），UI 不再配置；
+                  全局记忆开关关闭时整节不显示。 */}
+              {memoryEnabled !== false && selected ? (
+                <SettingsSection
+                  title={t('settings.agents.personalDomain', { defaultValue: '记忆' })}
+                  description={
+                    selected.builtin
+                      ? t('settings.agents.personalDomainBuiltinHint', {
+                          defaultValue: '默认助手不持有个人域；它的记忆落全局池。',
+                        })
+                      : t('settings.agents.personalDomainHint', {
+                          defaultValue: '本角色的个人域：做梦管线把条目蒸馏进这个域的 MEMORY.md 与 wiki。只读视图。',
+                        })
+                  }
+                >
+                  <SettingsCard>
+                    <div className="p-3">
+                      {selected.builtin ? (
+                        <p className="text-[12px] text-muted-foreground">
+                          {t('settings.agents.personalDomainBuiltinEmpty', {
+                            defaultValue: '全局池条目在主界面「数据源 → 记忆」浏览；整理在「设置 → 记忆」。',
+                          })}
+                        </p>
+                      ) : (
+                        <>
+                          <DomainWikiView
+                            workspaceId={workspaceId}
+                            slug={agentDomainSlug(selected.id)}
+                            kind="personal"
+                          />
+                          {draft.memoryDomain ? (
+                            <div className="mt-2 text-[11px] text-muted-foreground">
+                              {t('settings.agents.memoryDomainNote', {
+                                defaultValue:
+                                  '写域显式设为「{{domain}}」：指向共享域 = 只读引用，写入回落个人域。',
+                                domain: draft.memoryDomain,
+                              })}
+                            </div>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                  </SettingsCard>
+                </SettingsSection>
+              ) : null}
 
               <SettingsSection title={t('settings.agents.defaults', { defaultValue: '默认值' })}>
                 <SettingsCard>

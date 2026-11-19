@@ -24,6 +24,11 @@ import { TaskDetailPanel } from '@/components/tasks/TasksPanel'
 import { MultiSelectPanel } from './MultiSelectPanel'
 import { useAppShellContext, useActiveWorkspace } from '@/context/AppShellContext'
 import { sessionMetaMapAtom, type SessionMeta } from '@/atoms/sessions'
+import { sourcesAtom } from '@/atoms/sources'
+import { skillsAtom } from '@/atoms/skills'
+import { useGatewayStrategies } from '@/hooks/useGatewayStrategies'
+import { AgentsSettingsPanel } from '@/components/agents/AgentsSettingsPanel'
+import { navigate, routes } from '@/lib/navigate'
 import { StoplightProvider } from '@/context/StoplightContext'
 import {
   useNavigationState,
@@ -35,6 +40,7 @@ import {
   isPagesNavigation,
   isEventsNavigation,
   isTasksNavigation,
+  isAgentsNavigation,
 } from '@/contexts/NavigationContext'
 import { useSessionSelection, useIsMultiSelectActive, useSelectedIds, useSelectionCount } from '@/hooks/useSession'
 import { sourceSelection, skillSelection } from '@/hooks/useEntitySelection'
@@ -224,6 +230,22 @@ export function MainContentPanel({
     )
   }
 
+  // Agents navigator (role profiles, migrated from 设置/智能体). The branch
+  // delegates to a wrapper that carries its own data hooks, so the main
+  // panel body stays cheap while the agents view is inactive.
+  if (isAgentsNavigation(navState)) {
+    return wrapWithStoplight(
+      <Panel variant="grow" className={className}>
+        <MainWindowAgentsView
+          workspaceId={activeWorkspaceId ?? ''}
+          workspaceRootPath={activeWorkspace?.rootPath}
+          selectedAgentId={navState.details?.type === 'agent' ? navState.details.id : null}
+          onAgentSelected={(id) => navigate(id ? routes.view.agents(id) : routes.view.agents())}
+        />
+      </Panel>
+    )
+  }
+
   // Sources navigator - show source info, multi-select panel, or empty state
   if (isSourcesNavigation(navState)) {
     if (navState.details?.type === 'memory') {
@@ -372,5 +394,49 @@ export function MainContentPanel({
         <p className="text-sm">{t("session.selectConversation")}</p>
       </div>
     </Panel>
+  )
+}
+
+/**
+ * Data plumbing for the agents branch. The panel itself lives in
+ * components/agents, so this wrapper gathers the main-window inputs: the
+ * sources/skills atoms (filled by AppShell), the gateway strategy list, and
+ * the global memory switch (hides the panel's 记忆 section when off).
+ */
+function MainWindowAgentsView(props: {
+  workspaceId: string
+  workspaceRootPath?: string
+  selectedAgentId: string | null
+  onAgentSelected: (id: string | null) => void
+}): React.JSX.Element {
+  const { workspaceId, workspaceRootPath, selectedAgentId, onAgentSelected } = props
+  const atomSources = useAtomValue(sourcesAtom)
+  const atomSkills = useAtomValue(skillsAtom)
+  const { strategies } = useGatewayStrategies()
+  const [memoryEnabled, setMemoryEnabled] = React.useState(true)
+
+  React.useEffect(() => {
+    if (!workspaceRootPath) return
+    let cancelled = false
+    void window.electronAPI.memoryEnabledGet?.(workspaceRootPath)
+      .then((result) => {
+        if (!cancelled) setMemoryEnabled(result?.enabled ?? true)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [workspaceRootPath])
+
+  return (
+    <AgentsSettingsPanel
+      workspaceId={workspaceId}
+      sources={atomSources.map((s) => ({ slug: s.config.slug, name: s.config.name ?? s.config.slug }))}
+      skills={atomSkills.map((s) => ({ slug: s.slug, name: s.metadata?.name || s.slug }))}
+      strategies={strategies.map((s) => ({ id: s.id, name: s.name ?? s.id }))}
+      selectedAgentId={selectedAgentId}
+      onAgentSelected={onAgentSelected}
+      memoryEnabled={memoryEnabled}
+    />
   )
 }

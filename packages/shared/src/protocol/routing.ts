@@ -546,6 +546,8 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.memory.MEMORY_TRASH_DELETE_MANY,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_GET,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_SET,
+  RPC_CHANNELS.memory.MEMORY_ENABLED_GET,
+  RPC_CHANNELS.memory.MEMORY_ENABLED_SET,
   // Broadcast after global-memory writes (renderer badge/count refresh).
   RPC_CHANNELS.memory.MEMORY_CHANGED,
 ])

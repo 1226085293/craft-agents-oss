@@ -14,7 +14,6 @@
 import type { ComponentType } from 'react'
 import type { SettingsSubpage } from '../../../shared/settings-registry'
 
-import AgentsSettingsPage from './AgentsSettingsPage'
 import MemorySettingsPage from './MemorySettingsPage'
 import AppSettingsPage from './AppSettingsPage'
 import LlmSettingsPage from './LlmSettingsPage'
@@ -30,7 +29,6 @@ import ShortcutsPage from './ShortcutsPage'
  * TypeScript will error if a page from SETTINGS_PAGES is missing here.
  */
 export const SETTINGS_PAGE_COMPONENTS: Record<SettingsSubpage, ComponentType> = {
-  agents: AgentsSettingsPage,
   memory: MemorySettingsPage,
   app: AppSettingsPage,
   llm: LlmSettingsPage,

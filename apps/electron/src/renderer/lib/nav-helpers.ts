@@ -35,6 +35,7 @@ export function isDetailNavState(navState: NavigationState | null): boolean {
     case 'sources':
     case 'skills':
     case 'projects':
+    case 'agents':
       return navState.details !== null
     case 'events':
       // Both sections keep their own navigator list, so a detail selection is

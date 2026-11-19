@@ -105,6 +105,15 @@ export interface MemoryStore {
   trash?: MemoryTrashEntry[];
   /** Optional user-enabled workspace consolidation schedule. */
   consolidationSchedule?: { enabled: boolean; cron: string; timezone?: string };
+  /**
+   * Global memory-system switch (missing = enabled, zero regression).
+   * When explicitly false the pipeline is off: session-end extraction,
+   * dreaming (cron + manual), curation, and prompt injection all skip,
+   * and the renderer hides the memory surfaces (left-nav item, agent
+   * detail, project detail). Data on disk is untouched — the switch is a
+   * pipeline gate, not a data wipe.
+   */
+  memoryEnabled?: boolean;
   /** Timestamp of last automatic extraction pass */
   lastExtractedAt?: string;
   /** Per-extraction pass statistics */

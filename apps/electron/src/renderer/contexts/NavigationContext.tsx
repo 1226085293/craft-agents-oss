@@ -79,6 +79,7 @@ import {
   isEventInboxNavigation,
   isEventOutboxNavigation,
   isTasksNavigation,
+  isAgentsNavigation,
   DEFAULT_NAVIGATION_STATE,
 } from '../../shared/types'
 import { sessionMetaMapAtom, updateSessionMetaAtom, type SessionMeta } from '@/atoms/sessions'
@@ -101,7 +102,7 @@ export type { Route }
 
 // Re-export navigation state types for consumers
 export type { NavigationState, SessionFilter }
-export { isSessionsNavigation, isSourcesNavigation, isSettingsNavigation, isSkillsNavigation, isProjectsNavigation, isPagesNavigation, isEventsNavigation, isEventListenersNavigation, isEventListNavigation, isEventInboxNavigation, isEventOutboxNavigation, isTasksNavigation }
+export { isSessionsNavigation, isSourcesNavigation, isSettingsNavigation, isSkillsNavigation, isProjectsNavigation, isPagesNavigation, isEventsNavigation, isEventListenersNavigation, isEventListNavigation, isEventInboxNavigation, isEventOutboxNavigation, isTasksNavigation, isAgentsNavigation }
 
 // =============================================================================
 // Context

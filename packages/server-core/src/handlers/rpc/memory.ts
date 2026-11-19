@@ -45,6 +45,8 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.memory.MEMORY_TRASH_DELETE_MANY,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_GET,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_SET,
+  RPC_CHANNELS.memory.MEMORY_ENABLED_GET,
+  RPC_CHANNELS.memory.MEMORY_ENABLED_SET,
 ] as const
 
 
@@ -102,6 +104,11 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
   ): Promise<{ promoted: number; trashed: number; sessionsProcessed: number; curatedDomains: number; pruned: number }> => {
     const workspace = sessionManager.getWorkspaces().find(item => item.rootPath === workspaceRootPath)
     if (!workspace) return { promoted: 0, trashed: 0, sessionsProcessed: 0, curatedDomains: 0, pruned: 0 }
+    // 全局记忆开关：关闭 = 做梦/策展一律不跑（数据保留，只关管线）。门放在
+    // runner 入口，cron 与手动两条路都经过这里。
+    if (loadMemoryStore(workspaceRootPath).memoryEnabled === false) {
+      return { promoted: 0, trashed: 0, sessionsProcessed: 0, curatedDomains: 0, pruned: 0 }
+    }
     const sessions = listStoredSessions(workspaceRootPath)
     const stores = sessions.map(session => loadSessionMemoryStore(workspaceRootPath, session.id))
       .filter(store => store.entries.some(entry => !(store.consolidatedEntryIds ?? []).includes(entry.id)))
@@ -467,6 +474,13 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
     const target = { to: 'client', clientId: ctx.clientId } as const
     const push = (payload: Record<string, unknown>) => server.push(RPC_CHANNELS.memory.MEMORY_CONSOLIDATE_PROGRESS, target, payload)
 
+    // 全局记忆开关关闭时直接收工，不跑 LLM 批次（UI 侧同时隐藏入口，这是
+    // 给非 UI 调用方的兑底）。
+    if (loadMemoryStore(workspaceRootPath).memoryEnabled === false) {
+      push({ phase: 'done', done: 0, total: 0, sessionId: '', promoted: 0, trashed: 0, message: '记忆系统已关闭' })
+      return { started: false, total: 0 }
+    }
+
     // A consolidation run spans many LLM batches and can take minutes, far
     // beyond the RPC timeout. The invoke returns immediately (fire-and-forget)
     // and every state transition flows back through the progress channel:
@@ -511,5 +525,22 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
       throw new Error('Agent not initialized for this session')
     }
     return agent.extractSessionMemories()
+  })
+
+  // 全局记忆开关（缺省 = 开启，零回归）：关闭后抽取/做梦/策展/注入全部跳过，
+  // 盘上数据保留；UI 侧隐藏记忆入口。开关存于 memory.json（MemoryStore）。
+  server.handle(RPC_CHANNELS.memory.MEMORY_ENABLED_GET, async (_ctx: unknown, workspaceRootPath: string) => {
+    if (!workspaceRootPath) throw new Error('workspaceRootPath is required')
+    return { enabled: loadMemoryStore(workspaceRootPath).memoryEnabled !== false }
+  })
+
+  server.handle(RPC_CHANNELS.memory.MEMORY_ENABLED_SET, async (_ctx: unknown, workspaceRootPath: string, enabled: boolean) => {
+    if (!workspaceRootPath) throw new Error('workspaceRootPath is required')
+    if (typeof enabled !== 'boolean') throw new Error('enabled must be boolean')
+    // 开关是管线闸，不是数据操作：只写字段，不动条目/域/trash。
+    return mutateStore(workspaceRootPath, (store) => {
+      store.memoryEnabled = enabled
+      return { enabled }
+    })
   })
 }

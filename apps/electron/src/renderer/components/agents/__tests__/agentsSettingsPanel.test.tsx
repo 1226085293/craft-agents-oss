@@ -1,8 +1,25 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, mock, beforeAll } from 'bun:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
-import { filterScopeCandidates } from '../AgentsSettingsPanel'
+// The panel transitively imports pdfjs-dist (DomainWikiView → Info_Markdown →
+// @craft-agent/ui's PDF preview block → `pdfjs-dist ... ?url`). Vite's ?url
+// suffix isn't supported by bun — mock before loading the panel (same
+// precedent as mention-menu.test.ts).
+mock.module('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
+mock.module('pdfjs-dist', () => ({ GlobalWorkerOptions: { workerSrc: '' }, getDocument: () => ({}) }))
+mock.module('react-pdf', () => ({
+  Document: () => null,
+  Page: () => null,
+  pdfjs: { version: '0.0.0-mock', GlobalWorkerOptions: { workerSrc: '' } },
+}))
+
+let filterScopeCandidates: typeof import('../AgentsSettingsPanel').filterScopeCandidates
+
+beforeAll(async () => {
+  const mod = await import('../AgentsSettingsPanel')
+  filterScopeCandidates = mod.filterScopeCandidates
+})
 
 const CANDIDATES = [
   { slug: 'github', name: 'GitHub' },
@@ -63,7 +80,9 @@ describe('agents panel markup', () => {
     )
     const nativeSelects = html.match(/<select(?![^>]*aria-hidden)/g) ?? []
     expect(nativeSelects).toHaveLength(0)
-    expect(html.match(/role="combobox"/g)?.length ?? 0).toBeGreaterThanOrEqual(3)
+    // Two Radix selects remain after the 11-19 rework: 默认策略组 + 默认权限模式.
+    // The 记忆域 select was removed (its view moved to the agent's 个人域 section).
+    expect(html.match(/role="combobox"/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
     // The icon field is a button with a tooltip, not a text input holding an
     // emoji placeholder (which rendered in colour and looked broken).
     expect(html).not.toContain('placeholder="🙂"')

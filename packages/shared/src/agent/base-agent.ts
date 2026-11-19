@@ -1345,6 +1345,8 @@ ${formattedMessages}
     if (!sessionId) return '';
     try {
       const store = this.memoryStore;
+      // 全局记忆开关关闭 = 不注入、不提示存在（数据保留，只关管线）。
+      if (store?.memoryEnabled === false) return '';
       const sessionStore = loadSessionMemoryStore(this.config.workspace.rootPath, sessionId);
       if (!store.entries.length && !sessionStore.entries.length) return '';
 
@@ -1427,6 +1429,8 @@ ${formattedMessages}
   async extractSessionMemories(options?: { strategy?: 'compaction' | 'session_end' }): Promise<{ extracted: number; discarded: number }> {
     const sessionId = this.config.session?.id;
     if (!sessionId) return { extracted: 0, discarded: 0 };
+    // 全局记忆开关关闭 = 不抽取（三个调用点：压缩路径/回合后/会话收尾）。
+    if (this.memoryStore?.memoryEnabled === false) return { extracted: 0, discarded: 0 };
     
     // Check extraction strategy
     const requestedStrategy = options?.strategy;

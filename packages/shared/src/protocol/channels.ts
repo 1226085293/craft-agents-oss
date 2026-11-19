@@ -598,6 +598,10 @@ export const RPC_CHANNELS = {
     MEMORY_TRASH_DELETE_MANY: 'memory:trash:deleteMany',
     MEMORY_SCHEDULE_GET: 'memory:schedule:get',
     MEMORY_SCHEDULE_SET: 'memory:schedule:set',
+    /** Global memory-system switch: read the flag (missing = enabled). */
+    MEMORY_ENABLED_GET: 'memory:enabled:get',
+    /** Global memory-system switch: set the flag (persisted in the memory store). */
+    MEMORY_ENABLED_SET: 'memory:enabled:set',
     /** Broadcast after any global-memory write, so UI counts stay live. */
     MEMORY_CHANGED: 'memory:changed',
   },

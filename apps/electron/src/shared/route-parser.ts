@@ -42,6 +42,7 @@ export type NavigatorType =
   | 'pages'
   | 'events'
   | 'tasks'
+  | 'agents'
   | 'settings'
 
 export interface ParsedCompoundRoute {
@@ -70,7 +71,7 @@ export interface ParsedCompoundRoute {
  * Known prefixes that indicate a compound route
  */
 const COMPOUND_ROUTE_PREFIXES = [
-  'allSessions', 'archived', 'state', 'view', 'sources', 'skills', 'projects', 'pages', 'events', 'tasks', 'settings'
+  'allSessions', 'archived', 'state', 'view', 'sources', 'skills', 'projects', 'pages', 'events', 'tasks', 'agents', 'settings'
 ]
 
 /**
@@ -153,6 +154,20 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
       }
     }
 
+    return null
+  }
+
+  // Agents navigator: 'agents' (list) / 'agents/agent/{agentId}' (detail).
+  if (first === 'agents') {
+    if (segments.length === 1) {
+      return { navigator: 'agents', details: null }
+    }
+    if (segments[1] === 'agent' && segments[2]) {
+      return {
+        navigator: 'agents',
+        details: { type: 'agent', id: segments[2] },
+      }
+    }
     return null
   }
 
@@ -334,6 +349,11 @@ export function buildCompoundRoute(parsed: ParsedCompoundRoute): string {
     return parsed.selectedTaskId ? `tasks/${parsed.selectedTaskId}` : 'tasks'
   }
 
+  if (parsed.navigator === 'agents') {
+    if (!parsed.details) return 'agents'
+    return `agents/agent/${parsed.details.id}`
+  }
+
   // Sessions navigator
 
   let base: string
@@ -439,6 +459,14 @@ function convertCompoundToViewRoute(compound: ParsedCompoundRoute): ParsedRoute 
     }
     if (compound.details.type === 'memory') return { type: 'view', name: 'memories', params: {} }
     return { type: 'view', name: 'source-info', id: compound.details.id, params: {} }
+  }
+
+  // Agents
+  if (compound.navigator === 'agents') {
+    if (!compound.details) {
+      return { type: 'view', name: 'agents', params: {} }
+    }
+    return { type: 'view', name: 'agents', id: compound.details.id, params: {} }
   }
 
   // Skills
@@ -591,6 +619,17 @@ function convertCompoundToNavigationState(compound: ParsedCompoundRoute): Naviga
       details: compound.details.type === 'memory'
         ? { type: 'memory', id: 'global' }
         : { type: 'source', sourceSlug: compound.details.id },
+    }
+  }
+
+  // Agents
+  if (compound.navigator === 'agents') {
+    if (!compound.details) {
+      return { navigator: 'agents', details: null }
+    }
+    return {
+      navigator: 'agents',
+      details: { type: 'agent', id: compound.details.id },
     }
   }
 
@@ -830,6 +869,13 @@ function navigationStateToCompoundRoute(state: NavigationState): ParsedCompoundR
       navigator: 'tasks',
       selectedTaskId: state.selectedTaskId ?? null,
       details: null,
+    }
+  }
+
+  if (state.navigator === 'agents') {
+    return {
+      navigator: 'agents',
+      details: state.details ? { type: 'agent', id: state.details.id } : null,
     }
   }
 

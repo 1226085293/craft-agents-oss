@@ -429,6 +429,8 @@ export const CHANNEL_MAP = {
   updateSessionMemory: invoke(RPC_CHANNELS.memory.MEMORY_SESSION_UPDATE),
   deleteSessionMemory: invoke(RPC_CHANNELS.memory.MEMORY_SESSION_DELETE),
   consolidateMemories: invoke(RPC_CHANNELS.memory.MEMORY_CONSOLIDATE),
+  memoryEnabledGet: invoke(RPC_CHANNELS.memory.MEMORY_ENABLED_GET),
+  memoryEnabledSet: invoke(RPC_CHANNELS.memory.MEMORY_ENABLED_SET),
   cancelConsolidateMemories: invoke(RPC_CHANNELS.memory.MEMORY_CONSOLIDATE_CANCEL),
   getConsolidationState: invoke(RPC_CHANNELS.memory.MEMORY_CONSOLIDATE_STATE_GET),
   onMemoryConsolidationProgress: listener(RPC_CHANNELS.memory.MEMORY_CONSOLIDATE_PROGRESS),

@@ -379,7 +379,6 @@ export interface SettingsMenuItem {
  * Only icons need to be defined here - page data comes from settings-registry
  */
 const SETTINGS_ICONS: Record<SettingsSubpage, string> = {
-  agents: 'Users',
   memory: 'Brain',
   app: 'ToggleRight',
   llm: 'Route',

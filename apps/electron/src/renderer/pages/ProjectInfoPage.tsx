@@ -1,8 +1,9 @@
 /**
  * ProjectInfoPage
  *
- * Workspace-project detail page with three tabs: Sessions, Assets, Settings.
- * v1 scope only — no memory tab, no provider selection, no plugin marketplace.
+ * Workspace-project detail page with tabs: Sessions, Memory, Assets, Settings.
+ * The Memory tab (added 11-19) shows the project's shared memory domain
+ * (图/实体/原文, read-only) — hidden when the global memory switch is off.
  */
 
 import * as React from 'react'
@@ -26,13 +27,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@craft-agent/ui'
 import { cn } from '@/lib/utils'
 import { PROJECT_COLOR_PALETTE } from '@/utils/project-colors'
 import { InlineColorPickerRow } from '@/components/ui/inline-color-picker-row'
+import { DomainWikiView } from '@/components/memory/DomainWikiView'
 import type { LoadedProject, ProjectAsset } from '@craft-agent/shared/projects/types'
 
 interface ProjectInfoPageProps {
   projectSlug: string
 }
 
-type TabKey = 'sessions' | 'assets' | 'settings'
+type TabKey = 'sessions' | 'memory' | 'assets' | 'settings'
 
 export default function ProjectInfoPage({ projectSlug }: ProjectInfoPageProps) {
   const { t } = useTranslation()
@@ -52,6 +54,23 @@ export default function ProjectInfoPage({ projectSlug }: ProjectInfoPageProps) {
   const [editDetails, setEditDetails] = useState('')
   const [editColor, setEditColor] = useState<string>('')
   const [saving, setSaving] = useState(false)
+
+  // Global memory switch: the 记忆 tab is hidden when the memory system is off
+  // (the pipeline also skips on the server side — this only hides the UI).
+  const [memoryEnabled, setMemoryEnabled] = useState(true)
+  useEffect(() => {
+    const root = workspace?.rootPath
+    if (!root) return
+    let cancelled = false
+    void window.electronAPI.memoryEnabledGet?.(root)
+      .then((res) => {
+        if (!cancelled) setMemoryEnabled(res?.enabled ?? true)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [workspace?.rootPath])
 
   // Load project (and re-load on broadcast)
   const loadProject = useCallback(async () => {
@@ -225,6 +244,11 @@ export default function ProjectInfoPage({ projectSlug }: ProjectInfoPageProps) {
             <TabButton active={tab === 'sessions'} onClick={() => setTab('sessions')}>
               {t('projectInfo.tabSessions')}
             </TabButton>
+            {memoryEnabled !== false && (
+              <TabButton active={tab === 'memory'} onClick={() => setTab('memory')}>
+                {t('projectInfo.tabMemory', { defaultValue: '记忆' })}
+              </TabButton>
+            )}
             <TabButton active={tab === 'assets'} onClick={() => setTab('assets')}>
               {t('projectInfo.tabAssets')}
             </TabButton>
@@ -263,6 +287,23 @@ export default function ProjectInfoPage({ projectSlug }: ProjectInfoPageProps) {
                   ))}
                 </ul>
               )}
+            </Info_Section>
+          )}
+
+          {/* Memory tab: the project's shared domain (图/实体/原文, read-only).
+              域 slug = 项目 slug（自动注册，零搬家：path 指回本目录 MEMORY.md）。 */}
+          {tab === 'memory' && memoryEnabled !== false && workspaceId && (
+            <Info_Section
+              title={t('projectInfo.tabMemory', { defaultValue: '记忆' })}
+            >
+              <div className="px-4 py-3">
+                <p className="mb-2 text-xs text-muted-foreground">
+                  {t('projectInfo.memoryDesc', {
+                    defaultValue: '项目共享记忆域：自动注册、只读引用；助手写入回落各自个人域。内容由做梦/策展管线维护。',
+                  })}
+                </p>
+                <DomainWikiView workspaceId={workspaceId} slug={projectSlug} kind="project" />
+              </div>
             </Info_Section>
           )}
 

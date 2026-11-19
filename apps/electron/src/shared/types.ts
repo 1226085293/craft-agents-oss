@@ -791,6 +791,9 @@ export interface ElectronAPI {
    * progress/completion via {@link onMemoryConsolidationProgress}.
    */
   consolidateMemories(workspaceRootPath: string): Promise<{ started: boolean; total: number }>
+  /** Global memory-system switch (missing flag = enabled). Off = pipeline + UI hidden. */
+  memoryEnabledGet(workspaceRootPath: string): Promise<{ enabled: boolean }>
+  memoryEnabledSet(workspaceRootPath: string, enabled: boolean): Promise<{ enabled: boolean }>
   cancelConsolidateMemories(workspaceRootPath: string): Promise<{ success: boolean }>
   getConsolidationState(workspaceRootPath: string): Promise<{ active: boolean; done: number; total: number; cancelling?: boolean }>
   onMemoryConsolidationProgress(callback: (progress: MemoryConsolidationProgress) => void): () => void
@@ -1239,6 +1242,17 @@ export interface TasksNavigationState {
 }
 
 /**
+ * Agents navigator (migrated from 设置/智能体 to the main window's left nav):
+ * a role-profile list plus one agent's detail. Placed above the sources nav
+ * item on purpose — roles are who does the work, sources are what they touch.
+ */
+export interface AgentsNavigationState {
+  navigator: 'agents'
+  details: { type: 'agent'; id: string } | null
+  rightSidebar?: RightSidebarPanel
+}
+
+/**
  * Unified navigation state
  */
 export type NavigationState =
@@ -1250,6 +1264,7 @@ export type NavigationState =
   | PagesNavigationState
   | EventsNavigationState
   | TasksNavigationState
+  | AgentsNavigationState
 
 export const isSessionsNavigation = (
   state: NavigationState
@@ -1258,6 +1273,10 @@ export const isSessionsNavigation = (
 export const isTasksNavigation = (
   state: NavigationState
 ): state is TasksNavigationState => state.navigator === 'tasks'
+
+export const isAgentsNavigation = (
+  state: NavigationState
+): state is AgentsNavigationState => state.navigator === 'agents'
 
 export const isSourcesNavigation = (
   state: NavigationState
@@ -1323,6 +1342,12 @@ export const getNavigationStateKey = (state: NavigationState): string => {
     }
     return 'skills'
   }
+  if (state.navigator === 'agents') {
+    if (state.details?.type === 'agent') {
+      return `agents/agent/${state.details.id}`
+    }
+    return 'agents'
+  }
   if (state.navigator === 'projects') {
     if (state.details?.type === 'project') {
       return `projects/project/${state.details.projectSlug}`
@@ -1358,6 +1383,14 @@ export const getNavigationStateKey = (state: NavigationState): string => {
 
 export const parseNavigationStateKey = (key: string): NavigationState | null => {
   // Handle sources
+  if (key.startsWith('agents/agent/')) {
+    const agentId = key.slice(13)
+    if (agentId) {
+      return { navigator: 'agents', details: { type: 'agent', id: agentId } }
+    }
+    return null
+  }
+  if (key === 'agents') return { navigator: 'agents', details: null }
   if (key === 'sources/memories') return { navigator: 'sources', details: { type: 'memory', id: 'global' } }
   if (key === 'sources') return { navigator: 'sources', details: null }
   if (key.startsWith('sources/source/')) {

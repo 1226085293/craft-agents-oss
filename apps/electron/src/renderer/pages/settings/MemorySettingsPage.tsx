@@ -576,6 +576,10 @@ export default function MemorySettingsPage(): React.JSX.Element {
                             })}
                           </span>
                         ) : null}
+                        {/* M7b：策展步摘要（策展 N 域 · 剪枝 M 条）走既有 message 管道。 */}
+                        {run && !run.active && run.phase === 'done' && run.message ? (
+                          <span className="text-[11px] text-muted-foreground">{run.message}</span>
+                        ) : null}
                         {run && run.phase === 'error' ? (
                           <span className="text-[11px] text-destructive">
                             {run.message || t('settings.memory.dreamError', { defaultValue: '整理出错' })}

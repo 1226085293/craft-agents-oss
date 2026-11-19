@@ -8,7 +8,7 @@
  * 域解析逻辑（L1 按域分家 / L3 注入预算 / 助手 memoryDomain 接线）是阶段 4
  * （M7a/M7b）的事——那些逻辑读这张表，不另起炉灶。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadWorkspaceProjects } from '../projects/storage.ts';
 import { loadTask } from '../tasks/store.ts';
@@ -149,26 +149,56 @@ export function resolveReadDomains(
   return write === GLOBAL_MEMORY_DOMAIN ? [GLOBAL_MEMORY_DOMAIN] : [write, GLOBAL_MEMORY_DOMAIN];
 }
 
-/** 域 MEMORY.md 注入上限（防域文件吞掉整个注入预算；截断时带提示）。 */
-export const DOMAIN_MEMORY_INJECTION_MAX_CHARS = 4000;
+/**
+ * 域知识注入预算（v6 L3：各域首屏索引 ≤25KB/200 行，先到先截）。
+ * L1 = 域 MEMORY.md 全文（手写 + 自动策展区都是合法内容）；
+ * L2 = memory/wiki/<域>/*.md 百科页（M7b 策展产物）；百科+搜索并用：
+ * 条目检索（embedding 门）不动，这里补上百科的注入面。
+ */
+export const DOMAIN_MEMORY_INJECTION_MAX_CHARS = 25_000;
+export const DOMAIN_MEMORY_INJECTION_MAX_LINES = 200;
 
 /**
- * 读域 MEMORY.md 的注入内容（L3 注入，v7 阶段 9）：域表查 path → 读文件 →
- * 截断。文件缺失/空 → 返 ''（调用方跳过注入块）。全局池不在此列：
- * 全局 MEMORY.md 是策展产物（wiki 浏览），不进注入（防 token 膨胀）。
+ * 读域知识注入内容（L3 注入）：L1 域文件 + L2 百科页聚合，按 25KB/200 行预算截断。
+ * 两部分都缺失/空 → 返 ''（调用方跳过注入块）。全局池不在此列：
+ * 全局 MEMORY.md 是存量策展产物（wiki 浏览），不进注入。
  */
 export function readDomainMemoryFile(workspaceRoot: string, slug: string): string {
+  const parts: string[] = [];
   const def = loadMemoryDomains(workspaceRoot, false).domains.find((domain) => domain.slug === slug);
-  if (!def?.path || !existsSync(def.path)) return '';
-  let content: string;
-  try {
-    content = readFileSync(def.path, 'utf8').trim();
-  } catch {
-    return '';
+  if (def?.path && existsSync(def.path)) {
+    try {
+      parts.push(readFileSync(def.path, 'utf8').trim());
+    } catch {
+      // 单文件损坏不阻塞
+    }
   }
+  const wikiDir = join(workspaceRoot, 'memory', 'wiki', slug);
+  if (existsSync(wikiDir)) {
+    for (const file of readdirSync(wikiDir)
+      .filter((f) => f.endsWith('.md'))
+      .sort()) {
+      try {
+        parts.push(`## ${file.replace(/\.md$/, '')}\n${readFileSync(join(wikiDir, file), 'utf8').trim()}`);
+      } catch {
+        // 单页损坏不阻塞
+      }
+    }
+  }
+  let content = parts.filter(Boolean).join('\n\n').trim();
   if (!content) return '';
-  if (content.length <= DOMAIN_MEMORY_INJECTION_MAX_CHARS) return content;
-  return `${content.slice(0, DOMAIN_MEMORY_INJECTION_MAX_CHARS)}\n…（域文件超限截断，完整内容见记忆 wiki）`;
+  // 预算（v6 L3：≤25KB/200 行）
+  const lines = content.split('\n');
+  let truncated = false;
+  if (lines.length > DOMAIN_MEMORY_INJECTION_MAX_LINES) {
+    content = lines.slice(0, DOMAIN_MEMORY_INJECTION_MAX_LINES).join('\n');
+    truncated = true;
+  }
+  if (content.length > DOMAIN_MEMORY_INJECTION_MAX_CHARS) {
+    content = content.slice(0, DOMAIN_MEMORY_INJECTION_MAX_CHARS);
+    truncated = true;
+  }
+  return truncated ? `${content}\n…（超注入预算截断，完整内容见记忆 wiki）` : content;
 }
 
 /** 新增个人域（助手专属、隔离）。slug 清洗为小写连字符；重名 → false。 */

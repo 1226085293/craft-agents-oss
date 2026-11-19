@@ -12,7 +12,7 @@ import {
   permanentlyDeleteTrashEntries,
   getMemoryStats,
 } from '@craft-agent/shared/memory/store'
-import { consolidateSessionMemories, GLOBAL_MEMORY_DOMAIN, MemoryConsolidationScheduler, resolveWriteDomain, withMemoryWriteLock, type MemoryStore } from '@craft-agent/shared/memory'
+import { consolidateSessionMemories, curateDomainMemory, GLOBAL_MEMORY_DOMAIN, loadMemoryDomains, MemoryConsolidationScheduler, resolveWriteDomain, withMemoryWriteLock, type MemoryStore } from '@craft-agent/shared/memory'
 import { resolveTitleLanguageName, getDefaultLlmConnection, getLlmConnection } from '@craft-agent/shared/config'
 import { listSessions as listStoredSessions } from '@craft-agent/shared/sessions'
 import { addSessionMemory, deleteSessionMemory, updateSessionMemory, loadSessionMemoryStore, saveSessionMemoryStore } from '@craft-agent/shared/memory'
@@ -99,13 +99,17 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
   const runWorkspaceConsolidation = async (
     workspaceRootPath: string,
     onSessionConsolidated?: (progress: { done: number; total: number; sessionId: string; promoted: number; trashed: number; message?: string }) => void,
-  ): Promise<{ promoted: number; trashed: number; sessionsProcessed: number }> => {
+  ): Promise<{ promoted: number; trashed: number; sessionsProcessed: number; curatedDomains: number; pruned: number }> => {
     const workspace = sessionManager.getWorkspaces().find(item => item.rootPath === workspaceRootPath)
-    if (!workspace) return { promoted: 0, trashed: 0, sessionsProcessed: 0 }
+    if (!workspace) return { promoted: 0, trashed: 0, sessionsProcessed: 0, curatedDomains: 0, pruned: 0 }
     const sessions = listStoredSessions(workspaceRootPath)
     const stores = sessions.map(session => loadSessionMemoryStore(workspaceRootPath, session.id))
       .filter(store => store.entries.some(entry => !(store.consolidatedEntryIds ?? []).includes(entry.id)))
-    if (!stores.length) return { promoted: 0, trashed: 0, sessionsProcessed: 0 }
+    // M7b 策展：会话池空但域里有活条目时，仍需跑策展步（沉淀进 L1/L2 不依赖本轮晋升）。
+    const curationWork = hasDomainCurationWork(workspaceRootPath)
+    if (!stores.length && !curationWork) {
+      return { promoted: 0, trashed: 0, sessionsProcessed: 0, curatedDomains: 0, pruned: 0 }
+    }
     // Consolidation is app-level work with no session of its own, so it gets a
     // backend of its own instead of borrowing a session's agent. Borrowing made
     // every request look like that session's conversation in the gateway log and
@@ -149,7 +153,9 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
     // Publish the run as active so a remounted panel can restore its state.
     consolidationRunState.set(workspaceRootPath, { active: true, done: 0, total: stores.length })
     let done = 0
+    let consolidated = { promoted: 0, trashed: 0 }
     try {
+    if (stores.length) {
     const result = await consolidateSessionMemories(globalStore, stores, async prompt => {
       // Cooperative cancel: checked before each LLM batch. Throwing aborts the
       // run between batches, so the in-flight session is never marked (and the
@@ -208,7 +214,36 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
         onSessionConsolidated?.({ done, total: stores.length, sessionId: session.sessionId, ...sessionResult })
       },
     })
-    return { ...result, sessionsProcessed: stores.length }
+      consolidated = result
+    }
+
+    // M7b 策展步：晋升完成后，把各域条目池蒸馏进 L1 笔记（MEMORY.md 自动策展区）
+    // + L2 百科页（memory/wiki/<域>/）；剪枝条目移 trash（可恢复=低风险自动并入）。
+    // 一页一写手：每域一次 LLM 调用，串行。
+    let curation = { curatedDomains: 0, pruned: [] as string[] }
+    if (curationWork) {
+      curation = await curateWorkspaceDomains(
+        workspaceRootPath,
+        // runMiniCompletion 可返 null（空回复）；归一成 '' 走策展的 empty-reply 路径。
+        async (prompt) => (await agent.runMiniCompletion(prompt)) ?? '',
+        (info) => {
+          onSessionConsolidated?.({
+            done,
+            total: stores.length,
+            sessionId: '',
+            promoted: consolidated.promoted,
+            trashed: consolidated.trashed,
+            message: `策展域 ${info.domain}${info.error ? `（${info.error}）` : ''}`,
+          })
+        },
+      )
+    }
+    return {
+      ...consolidated,
+      sessionsProcessed: stores.length,
+      curatedDomains: curation.curatedDomains,
+      pruned: curation.pruned.length,
+    }
     } finally {
       // The backend is ours and short-lived; without this every scheduled run
       // would leave a subprocess behind.
@@ -218,6 +253,50 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
       // newer run may have replaced it after a quick re-trigger).
       if (runState) runState.active = false
     }
+  }
+
+  /** M7b 策展：是否存在有活条目的个人域（会话池空时也要跑策展步）。 */
+  function hasDomainCurationWork(root: string): boolean {
+    const domains = loadMemoryDomains(root, false).domains.filter((d) => d.kind === 'personal')
+    if (!domains.length) return false
+    const tagged = new Set(loadMemoryStore(root).entries.map((e) => e.domain))
+    return domains.some((d) => tagged.has(d.slug))
+  }
+
+  /**
+   * M7b 策展步：对每个有活条目的个人域跑一次 curateDomainMemory（一页一写手）。
+   * 剪枝 = 低风险自动并入：条目移 trash（可恢复）；写盘走共享写锁 + 广播。
+   * LLM 失败/坏回复 → 该域保留旧文件（curateDomainMemory 内部语义）。
+   */
+  async function curateWorkspaceDomains(
+    root: string,
+    evaluate: (prompt: string) => Promise<string>,
+    onProgress?: (info: { domain: string; changed: boolean; pruned: string[]; error?: string }) => void,
+  ): Promise<{ curatedDomains: number; pruned: string[] }> {
+    const domains = loadMemoryDomains(root, false).domains.filter((d) => d.kind === 'personal')
+    const fresh = loadMemoryStore(root)
+    let curatedDomains = 0
+    const prunedAll: string[] = []
+    for (const domain of domains) {
+      const entries = fresh.entries.filter((e) => e.domain === domain.slug)
+      if (!entries.length) continue
+      const result = await curateDomainMemory(root, domain.slug, entries, evaluate)
+      if (result.pruned.length > 0) {
+        for (const id of result.pruned) {
+          if (fresh.entries.some((e) => e.id === id)) softDeleteMemoryEntry(fresh, id)
+          prunedAll.push(id)
+        }
+      }
+      if (result.changed) curatedDomains += 1
+      onProgress?.({ domain: domain.slug, changed: result.changed, pruned: result.pruned, error: result.error })
+    }
+    if (prunedAll.length > 0) {
+      void withMemoryWriteLock(() => {
+        saveMemoryStore(root, fresh)
+        notifyMemoryChanged(root)
+      })
+    }
+    return { curatedDomains, pruned: prunedAll }
   }
 
   const scheduleTimer = setInterval(() => {
@@ -392,7 +471,7 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
     // beyond the RPC timeout. The invoke returns immediately (fire-and-forget)
     // and every state transition flows back through the progress channel:
     // phase 'running' (with done/total) → 'done' | 'cancelled' | 'error'.
-    if (total === 0) {
+    if (total === 0 && !hasDomainCurationWork(workspaceRootPath)) {
       push({ phase: 'done', done: 0, total: 0, sessionId: '', promoted: 0, trashed: 0 })
       return { started: false, total: 0 }
     }
@@ -402,7 +481,18 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
         const result = await runWorkspaceConsolidation(workspaceRootPath, progress => {
           push({ phase: 'running', ...progress, cancelling: consolidationRunState.get(workspaceRootPath)?.cancelling })
         })
-        push({ phase: 'done', done: result.sessionsProcessed, total, sessionId: '', promoted: result.promoted, trashed: result.trashed })
+        push({
+          phase: 'done',
+          done: result.sessionsProcessed,
+          total,
+          sessionId: '',
+          promoted: result.promoted,
+          trashed: result.trashed,
+          // M7b：策展/剪枝摘要走既有 message 字段（UI done 态渲染）。
+          ...(result.curatedDomains > 0 || result.pruned > 0
+            ? { message: `策展 ${result.curatedDomains} 域 · 剪枝 ${result.pruned} 条` }
+            : {}),
+        })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         if (message.toLowerCase().includes('cancel')) {

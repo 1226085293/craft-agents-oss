@@ -117,6 +117,27 @@ export {
   readDomainMemoryFile,
   GLOBAL_MEMORY_DOMAIN,
   DOMAIN_MEMORY_INJECTION_MAX_CHARS,
+  DOMAIN_MEMORY_INJECTION_MAX_LINES,
   type MemoryDomainDef,
   type MemoryDomainsFile,
 } from './domains.ts';
+
+// Curation (M7b 策展步：L1 自动区 + L2 百科页 + 剪枝建议)
+export {
+  curateDomainMemory,
+  buildCurationPrompt,
+  parseCurationReply,
+  readL1AutoSection,
+  readWikiPages,
+  writeL1AutoSection,
+  domainWikiDir,
+  L1_CURATION_START,
+  L1_CURATION_END,
+  WIKI_PAGE_MAX_CHARS,
+  L1_AUTO_SECTION_MAX_CHARS,
+  CURATION_ENTRY_LIMIT,
+  CURATION_ENTRY_MAX_CHARS,
+  type CurationProposal,
+  type CurationWikiPage,
+  type CurateDomainResult,
+} from './curation.ts';

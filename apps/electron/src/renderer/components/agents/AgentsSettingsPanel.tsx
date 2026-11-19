@@ -17,7 +17,6 @@ import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { Check, Plus, Smile, Trash2 } from 'lucide-react'
 
-import { agentDomainSlug } from '@craft-agent/shared/memory'
 import { useAgents } from '@/hooks/useAgents'
 import { cn } from '@/lib/utils'
 import { DomainWikiView } from '@/components/memory/DomainWikiView'
@@ -72,6 +71,15 @@ const AUTOSAVE_MS = 500
  * excluded — creating a role assigns one mid-flight, and counting that as a
  * change would cause a second save of the same content.
  */
+/**
+ * 个人域 slug 规则（= shared/memory/domains.ts 的 agentDomainSlug，纯字符串
+ * 函数镜像）。刻意不从 barrel 值导入：barrel 会拖 session-store.ts（node:fs）
+ * 进浏览器构建，渲染端一评估就崩（11-19 活体抓到）。改规则时两处同步。
+ */
+function personalDomainSlug(agentId: string): string {
+  return agentId.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
 function contentKey(draft: AgentDraft): string {
   return JSON.stringify({
     name: draft.name,
@@ -805,7 +813,7 @@ export function AgentsSettingsPanel({
                         <>
                           <DomainWikiView
                             workspaceId={workspaceId}
-                            slug={agentDomainSlug(selected.id)}
+                            slug={personalDomainSlug(selected.id)}
                             kind="personal"
                           />
                           {draft.memoryDomain ? (

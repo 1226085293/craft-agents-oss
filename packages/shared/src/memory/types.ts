@@ -75,6 +75,12 @@ export interface MemoryEntry {
   dueAt?: string | null;
   /** Source transcript message id (poisoning audit & blocked attribution). */
   sourceMessageId?: string | null;
+  /**
+   * Memory-domain slug this entry belongs to (托管记忆写路由, v7 阶段 9).
+   * 缺省 = 'global'（共享池：存量条目、默认助手与管道会话的经验）；个人域条目
+   * 只注入所属角色的会话，全局池条目对所有会话可见。
+   */
+  domain?: string;
   /** True after this session entry was promoted into the global store (dual-pool dedup). */
   promoted?: boolean;
   /** Global entry ids adjudicated as conflict (extraction marks, promotion consumes). */

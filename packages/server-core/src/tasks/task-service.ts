@@ -232,6 +232,8 @@ export interface CreateTaskRequest {
   supervisorSessionId: string;
   toolCallId: string;
   assigneeAgentId?: string;
+  /** 发起任务的角色（dispatch_task 调用会话的 agentId；写路由用）。 */
+  initiatorAgentId?: string;
   parentTaskId?: string;
   dependsOn?: string[];
   priority?: Task['priority'];

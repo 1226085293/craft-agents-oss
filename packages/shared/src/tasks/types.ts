@@ -711,6 +711,12 @@ export interface Task {
    */
   currentStageSessionId?: string;
   assigneeAgentId?: string;
+  /**
+   * 谁发起的这个任务（dispatch_task 调用会话的 agentId，v7 阶段 9 写路由用：
+   * 临时工会话的记忆经验归发起人）。用户车道 task_create 的督导会话通常无
+   * agentId → 不设字段。
+   */
+  initiatorAgentId?: string;
 
   parentTaskId?: string;
   dependsOn: string[];

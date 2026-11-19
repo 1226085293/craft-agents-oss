@@ -11,6 +11,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadWorkspaceProjects } from '../projects/storage.ts';
+import { loadTask } from '../tasks/store.ts';
+import { loadAgents } from '../agents/storage.ts';
+import type { AgentProfile } from '../agents/types.ts';
 
 export interface MemoryDomainDef {
   slug: string;
@@ -74,6 +77,76 @@ export function loadMemoryDomains(workspaceRoot: string, persistRegistration = t
 export function saveMemoryDomains(workspaceRoot: string, file: MemoryDomainsFile): void {
   mkdirSync(join(workspaceRoot, 'config'), { recursive: true });
   writeFileSync(memoryDomainsPath(workspaceRoot), JSON.stringify(file, null, 2), 'utf8');
+}
+
+// ============================================================================
+// 托管记忆写路由（v7 阶段 9）：会话的记忆写进哪个域（对称地、能读哪些域）。
+//
+// 语义（钉死）：
+// - 显式创建的自定义角色（agents[] 里未删的行）→ 自己的域：
+//   memoryDomain 设了且指向个人域 → 用它；设了共享（project）域 = 只读引用，
+//   写回落个人域；未设 → 个人域（slug=agentId 清洗值，幂等自动注册）。
+// - 任务临时会话（taskId）→ 「经验归发起人」：initiatorAgentId（自定义角色）
+//   → 发起人的域；无发起人 → 被指派人域；都无 → global。
+// - 默认助手 / 管道会话 / 未知 agentId → 'global'（共享池：存量条目与主助手
+//   的经验本来就属于全局，升级零回归）。
+// ============================================================================
+
+/** 全局共享池的域 slug（MemoryEntry.domain 缺省即 global，零重写存量）。 */
+export const GLOBAL_MEMORY_DOMAIN = 'global';
+
+/** 按 id 查自定义角色（agents[] 未删行；默认助手不算自定义角色 → null）。 */
+function findCustomAgent(workspaceRoot: string, agentId: string | undefined | null): AgentProfile | null {
+  if (!agentId) return null;
+  const file = loadAgents(workspaceRoot);
+  return file.agents.find((agent) => agent.id === agentId && !agent.deletedAt) ?? null;
+}
+
+/** 自定义角色的写域（目标域不在表里时幂等注册；共享域写回落个人域）。 */
+function agentWriteDomain(workspaceRoot: string, agent: AgentProfile): string {
+  const domains = loadMemoryDomains(workspaceRoot).domains;
+  const personalSlug = agentDomainSlug(agent.id);
+  const explicit = agent.memoryDomain
+    ? domains.find((domain) => domain.slug === agent.memoryDomain)
+    : undefined;
+  const target = explicit?.kind === 'personal' ? explicit.slug : personalSlug;
+  if (target === personalSlug) {
+    ensureAgentMemoryDomain(workspaceRoot, agent.id);
+  } else {
+    addPersonalMemoryDomain(workspaceRoot, target);
+  }
+  return target;
+}
+
+/**
+ * 写路由：该会话的记忆落哪个域。
+ * @param ctx.agentId 会话的 agent（临时任务会话自身的 agentId=assignee，但
+ *   只要带 taskId 就走任务分支——经验归发起人，v7 小项拍板）
+ * @param ctx.taskId 临时任务会话的任务 id
+ */
+export function resolveWriteDomain(
+  workspaceRoot: string,
+  ctx: { agentId?: string | null; taskId?: string | null },
+): string {
+  if (ctx.taskId) {
+    const task = loadTask(workspaceRoot, ctx.taskId);
+    const initiator = task?.initiatorAgentId ? findCustomAgent(workspaceRoot, task.initiatorAgentId) : null;
+    if (initiator) return agentWriteDomain(workspaceRoot, initiator);
+    const assignee = task?.assigneeAgentId ? findCustomAgent(workspaceRoot, task.assigneeAgentId) : null;
+    if (assignee) return agentWriteDomain(workspaceRoot, assignee);
+    return GLOBAL_MEMORY_DOMAIN;
+  }
+  const agent = findCustomAgent(workspaceRoot, ctx.agentId);
+  return agent ? agentWriteDomain(workspaceRoot, agent) : GLOBAL_MEMORY_DOMAIN;
+}
+
+/** 读路由：该会话能读哪些域 = [自己的写域, 'global']（去重；写域=global 时只有 global）。 */
+export function resolveReadDomains(
+  workspaceRoot: string,
+  ctx: { agentId?: string | null; taskId?: string | null },
+): string[] {
+  const write = resolveWriteDomain(workspaceRoot, ctx);
+  return write === GLOBAL_MEMORY_DOMAIN ? [GLOBAL_MEMORY_DOMAIN] : [write, GLOBAL_MEMORY_DOMAIN];
 }
 
 /** 新增个人域（助手专属、隔离）。slug 清洗为小写连字符；重名 → false。 */

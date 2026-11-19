@@ -317,6 +317,8 @@ export interface CreateTaskInput {
   supervisorSessionId: string;
   toolCallId: string;
   assigneeAgentId?: string;
+  /** 发起任务的角色（写路由：临时工会话记忆归发起人）。 */
+  initiatorAgentId?: string;
   parentTaskId?: string;
   dependsOn?: string[];
   priority?: Task['priority'];
@@ -350,6 +352,7 @@ export function createTask(input: CreateTaskInput): Task {
      */
     currentStageSessionId: input.supervisorSessionId,
     assigneeAgentId: input.assigneeAgentId,
+    initiatorAgentId: input.initiatorAgentId,
     parentTaskId: input.parentTaskId,
     dependsOn: input.dependsOn ?? [],
     priority: input.priority ?? 0,

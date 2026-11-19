@@ -739,6 +739,17 @@ export function AgentsSettingsPanel({
                       </ul>
                     </div>
                     </div>
+                    ) : draft.dispatchHint.trim() ? (
+                    <div className="rounded-md border border-dashed border-input bg-muted/30 p-2.5 text-xs text-muted-foreground">
+                      {/*
+                        * 已有存量时不能说“没东西可写”（数据存在但收起）——
+                        * 告知字数与“重开即恢复”，避免用户以为内容丢了。
+                        */}
+                      {t('settings.agents.dispatchHintKept', {
+                        defaultValue: '已写 {{count}} 字分工说明，在「可分配任务」关闭期间不会被督导看到；开启开关即恢复展示',
+                        count: draft.dispatchHint.length,
+                      })}
+                    </div>
                     ) : (
                     <div className="rounded-md border border-dashed border-input bg-muted/30 p-2.5 text-xs text-muted-foreground">
                       {t('settings.agents.dispatchHintHidden', {

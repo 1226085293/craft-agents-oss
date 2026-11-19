@@ -529,6 +529,14 @@ export default function MemorySettingsPage(): React.JSX.Element {
                         {t('settings.memory.dreamDisabledNote', {
                           defaultValue: '关闭时定时任务不会运行；「立即整理」不受影响，随时可手动整理',
                         })}
+                        {/* 收起 ≠ 数据不存在：把排班值露出来，关着也看得见“排的是什么班”。 */}
+                        <div className="mt-1 font-mono text-[10px] text-muted-foreground/70">
+                          {t('settings.memory.dreamDisabledSchedule', {
+                            defaultValue: '当前周期 {{cron}} · 时区 {{timezone}}（开启后生效）',
+                            cron: dream.cron.trim() || '0 3 * * *',
+                            timezone: dream.timezone,
+                          })}
+                        </div>
                       </div>
                       )}
                       <div className="flex items-center gap-2 pt-1">

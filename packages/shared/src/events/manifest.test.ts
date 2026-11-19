@@ -388,7 +388,7 @@ describe('parseManifest action effect（H2 编译表的输入面）', () => {
       }),
     )
     expect(result.ok).toBe(true)
-    expect(result.manifest!.actions.map((a) => a.effect)).toEqual(['read', 'write', 'reply'])
+    expect(result.manifest!.actions!.map((a) => a.effect)).toEqual(['read', 'write', 'reply'])
   })
 
   it('drops an invalid effect value rather than guessing（坏值→缺省→保守 write）', () => {
@@ -398,8 +398,8 @@ describe('parseManifest action effect（H2 编译表的输入面）', () => {
       }),
     )
     expect(result.ok).toBe(true)
-    expect(result.manifest!.actions[0].effect).toBeUndefined()
-    expect(resolveActionEffect(result.manifest!.actions[0])).toBe('write')
+    expect(result.manifest!.actions![0]!.effect).toBeUndefined()
+    expect(resolveActionEffect(result.manifest!.actions![0]!)).toBe('write')
   })
 
   it('omitted effect resolves to write（缺字段插件的保守缺省）', () => {
@@ -409,6 +409,6 @@ describe('parseManifest action effect（H2 编译表的输入面）', () => {
       }),
     )
     expect(result.ok).toBe(true)
-    expect(resolveActionEffect(result.manifest!.actions[0])).toBe('write')
+    expect(resolveActionEffect(result.manifest!.actions![0]!)).toBe('write')
   })
 })

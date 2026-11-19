@@ -349,7 +349,7 @@ export default function MemorySettingsPage(): React.JSX.Element {
                             </>
                           ) : null}
                           <span
-                            className="rounded-full px-1.5 text-[9px] font-medium"
+                            className="rounded-full px-1.5 text-[10px] font-medium"
                             style={{
                               backgroundColor: `hsl(${KIND_HUES[selected.kind]} 50% 45% / 0.15)`,
                               color: `hsl(${KIND_HUES[selected.kind]} 50% 38%)`,
@@ -379,7 +379,7 @@ export default function MemorySettingsPage(): React.JSX.Element {
                             {section.entities.map((entity) => (
                               <li key={entity.id} className="flex items-start gap-2 text-[12px] leading-snug">
                                 <span
-                                  className="mt-px shrink-0 rounded-full px-1.5 text-[9.5px] font-medium"
+                                  className="mt-px shrink-0 rounded-full px-1.5 text-[10px] font-medium"
                                   style={{
                                     backgroundColor: `hsl(${KIND_HUES[entity.kind]} 50% 45% / 0.15)`,
                                     color: `hsl(${KIND_HUES[entity.kind]} 50% 38%)`,
@@ -489,6 +489,13 @@ export default function MemorySettingsPage(): React.JSX.Element {
                         />
                         {t('settings.memory.dreamEnabled', { defaultValue: '启用定时做梦' })}
                       </label>
+                      {/*
+                        * 启用开关直接决定显隐（与 agent 面板分工说明同一原则）：
+                        * 关 → 周期/时区行收起、留一行空态；开 → 展开。
+                        * 已配好的 cron/时区存于 dream state 不丢，重新开启即恢复。
+                        */}
+                      {dream.enabled ? (
+                      <>
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                         <label className="flex items-center gap-1.5">
                           <span className="text-xs text-muted-foreground">
@@ -516,6 +523,14 @@ export default function MemorySettingsPage(): React.JSX.Element {
                       <p className="text-[10px] text-muted-foreground/60">
                         {t('settings.memory.dreamCronHint', { defaultValue: '例：0 3 * * * = 每天 03:00（按所选时区）' })}
                       </p>
+                      </>
+                      ) : (
+                      <div className="rounded-md border border-dashed border-input bg-muted/30 p-2.5 text-xs text-muted-foreground">
+                        {t('settings.memory.dreamDisabledNote', {
+                          defaultValue: '关闭时定时任务不会运行；「立即整理」不受影响，随时可手动整理',
+                        })}
+                      </div>
+                      )}
                       <div className="flex items-center gap-2 pt-1">
                         {run?.active ? (
                           <>

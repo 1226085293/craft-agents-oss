@@ -85,7 +85,7 @@ export function MemoryWikiGraph({
           if (node.role === 'domain') {
             return (
               <g key={node.id}>
-                <circle cx={node.x} cy={node.y} r={node.r} className="fill-foreground/[0.08] stroke-foreground/30" strokeWidth={1} />
+                <circle cx={node.x} cy={node.y} r={node.r} className="fill-foreground/[0.12] stroke-foreground/40" strokeWidth={1} />
                 <text
                   x={node.x}
                   y={node.y + 4}
@@ -110,10 +110,10 @@ export function MemoryWikiGraph({
                       cx={node.x}
                       cy={node.y}
                       r={node.r}
-                      fill={`hsl(${node.hue} 45% 50% / ${active ? 0.95 : 0.8})`}
-                      stroke={`hsl(${node.hue} 50% 35% / 0.5)`}
+                      fill={`hsl(${node.hue} 55% ${active ? 40 : 38}% / ${active ? 1 : 0.88})`}
+                      stroke={`hsl(${node.hue} 60% 28% / 0.4)`}
                     />
-                    <text x={node.x} y={node.y + 4} textAnchor="middle" fontSize={9.5} fontWeight={600} fill="white">
+                    <text x={node.x} y={node.y + 3.5} textAnchor="middle" fontSize={9.5} fontWeight={600} fill="white">
                       {node.label.length > 6 ? `${node.label.slice(0, 6)}…` : node.label}
                     </text>
                   </>
@@ -133,9 +133,13 @@ export function MemoryWikiGraph({
               </g>
             )
           }
-          // entity
+          // entity — labels face OUTWARD (right half → right, left half → left) so
+          // they never collide with the section ring or the centre; a background
+          // halo keeps text readable where edges cross.
           const isActive = activeEntity?.id === node.id
           const dimmed = activeEntity != null && !isActive && activeSection !== entitySectionOf.get(node.id)
+          const side = node.x >= layout.width / 2 ? 1 : -1
+          const labelX = node.x + side * (node.r + 5)
           return (
             <g
               key={node.id}
@@ -146,23 +150,25 @@ export function MemoryWikiGraph({
               onMouseLeave={() => setHoverId(null)}
             >
               {isActive ? (
-                <circle cx={node.x} cy={node.y} r={node.r + 4} fill={`hsl(${hueOf(node.kind)} 60% 50% / 0.2)`} />
+                <circle cx={node.x} cy={node.y} r={node.r + 5} fill={`hsl(${hueOf(node.kind)} 60% 50% / 0.2)`} />
               ) : null}
               <circle
                 cx={node.x}
                 cy={node.y}
                 r={isActive ? node.r + 2 : node.r}
-                fill={`hsl(${hueOf(node.kind)} ${node.kind === 'fact' ? 20 : 55}% ${node.kind === 'fact' ? 55 : 48}% / 0.95)`}
+                fill={`hsl(${hueOf(node.kind)} ${node.kind === 'fact' ? 18 : 55}% ${node.kind === 'fact' ? 50 : 45}% / 0.95)`}
               />
               <text
-                x={node.x + node.r + 5}
+                x={labelX}
                 y={node.y + 3}
+                textAnchor={side === 1 ? 'start' : 'end'}
                 fontSize={9}
-                fill={`hsl(${hueOf(node.kind)} 30% 40%)`}
-                opacity={dimmed ? 0.4 : 0.9}
+                fill={`hsl(${hueOf(node.kind)} 35% ${node.kind === 'fact' ? 45 : 38}%)`}
+                opacity={dimmed ? 0.4 : 0.95}
                 className="select-none"
+                style={{ paintOrder: 'stroke', stroke: 'var(--background)', strokeWidth: 3, strokeLinejoin: 'round' }}
               >
-                {node.label.length > 16 ? `${node.label.slice(0, 16)}…` : node.label}
+                {node.label.length > 14 ? `${node.label.slice(0, 14)}…` : node.label}
               </text>
               <title>{node.label}</title>
             </g>

@@ -129,14 +129,11 @@ export default function MemorySettingsPage(): React.JSX.Element {
       .getConsolidationState(rootPath)
       .then((s) => {
         if (cancelled) return
-        setRun({
-          active: s.active,
-          done: s.done,
-          total: s.total,
-          phase: s.active ? 'running' : 'done',
-          promoted: 0,
-          trashed: 0,
-        })
+        // Only surface LIVE runs; a stale last-run state would just render as
+        // idle noise (「已整理 0/0」) on a page nobody is consolidating on.
+        if (s.active) {
+          setRun({ active: true, done: s.done, total: s.total, phase: 'running', promoted: 0, trashed: 0 })
+        }
       })
       .catch(() => undefined)
     return () => {
@@ -492,26 +489,33 @@ export default function MemorySettingsPage(): React.JSX.Element {
                         />
                         {t('settings.memory.dreamEnabled', { defaultValue: '启用定时做梦' })}
                       </label>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs text-muted-foreground">
-                          {t('settings.memory.dreamCron', { defaultValue: '周期（cron）' })}
-                        </span>
-                        <input
-                          value={dream.cron}
-                          onChange={(e) => patchDream({ cron: e.target.value })}
-                          className="h-7 w-40 rounded-md border border-input bg-background px-2 font-mono text-[12px]"
-                          aria-label={t('settings.memory.dreamCron', { defaultValue: '周期（cron）' })}
-                        />
-                        <input
-                          value={dream.timezone}
-                          onChange={(e) => patchDream({ timezone: e.target.value })}
-                          className="h-7 w-40 rounded-md border border-input bg-background px-2 text-[12px]"
-                          aria-label={t('settings.memory.dreamTimezone', { defaultValue: '时区' })}
-                        />
-                        <span className="text-[10px] text-muted-foreground/60">
-                          {t('settings.memory.dreamCronHint', { defaultValue: '例：0 3 * * * = 每天 03:00' })}
-                        </span>
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                        <label className="flex items-center gap-1.5">
+                          <span className="text-xs text-muted-foreground">
+                            {t('settings.memory.dreamCron', { defaultValue: '周期' })}
+                          </span>
+                          <input
+                            value={dream.cron}
+                            onChange={(e) => patchDream({ cron: e.target.value })}
+                            className="h-7 w-36 rounded-md border border-input bg-background px-2 font-mono text-[12px]"
+                            aria-label={t('settings.memory.dreamCron', { defaultValue: '周期（cron）' })}
+                          />
+                        </label>
+                        <label className="flex items-center gap-1.5">
+                          <span className="text-xs text-muted-foreground">
+                            {t('settings.memory.dreamTimezone', { defaultValue: '时区' })}
+                          </span>
+                          <input
+                            value={dream.timezone}
+                            onChange={(e) => patchDream({ timezone: e.target.value })}
+                            className="h-7 w-36 rounded-md border border-input bg-background px-2 text-[12px]"
+                            aria-label={t('settings.memory.dreamTimezone', { defaultValue: '时区' })}
+                          />
+                        </label>
                       </div>
+                      <p className="text-[10px] text-muted-foreground/60">
+                        {t('settings.memory.dreamCronHint', { defaultValue: '例：0 3 * * * = 每天 03:00（按所选时区）' })}
+                      </p>
                       <div className="flex items-center gap-2 pt-1">
                         {run?.active ? (
                           <>
@@ -540,7 +544,7 @@ export default function MemorySettingsPage(): React.JSX.Element {
                             {t('settings.memory.dreamSaving', { defaultValue: '保存中…' })}
                           </span>
                         ) : null}
-                        {run && !run.active && run.phase === 'done' ? (
+                        {run && !run.active && run.phase === 'done' && (run.promoted > 0 || run.trashed > 0) ? (
                           <span className="text-[11px] text-success">
                             {t('settings.memory.dreamDone', {
                               defaultValue: '已整理：晋升 {{promoted}} · 清理 {{trashed}}',

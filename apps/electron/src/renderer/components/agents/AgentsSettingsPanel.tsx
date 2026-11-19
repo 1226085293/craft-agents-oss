@@ -350,6 +350,13 @@ export function AgentsSettingsPanel({
    */
   const hydratedForRef = React.useRef<string | null>(null)
   const flashRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  /**
+   * True while the user explicitly started a 新建角色 draft (selectedId=null on
+   * purpose). The auto-select effect must not steal the selection back from a
+   * brand-new role — only an empty first load (or post-delete reset) lands
+   * here.
+   */
+  const newDraftRef = React.useRef(false)
 
   const selected = agents.find((a) => a.id === selectedId)
 
@@ -415,6 +422,16 @@ export function AgentsSettingsPanel({
       cancelled = true
     }
   }, [workspaceId, selectedId])
+
+  // Land on a real agent instead of a blank editor: a fresh load (or the
+  // post-delete reset) with no selection picks the built-in default. A
+  // screen full of empty fields with nothing selected reads as a broken
+  // panel; the built-in row at least shows 名称/人设/分工 the way they are.
+  React.useEffect(() => {
+    if (selectedId || agents.length === 0 || newDraftRef.current) return
+    const target = agents.find((a) => a.builtin) ?? agents[0]
+    if (target) setSelectedId(target.id)
+  }, [agents, selectedId])
 
   const flash = (next: 'saved' | 'error') => {
     setStatus(next)
@@ -516,6 +533,7 @@ export function AgentsSettingsPanel({
             variant="ghost"
             className="h-8 w-full justify-start gap-1.5 px-2 text-[13px] font-normal"
             onClick={() => {
+              newDraftRef.current = true
               setSelectedId(null)
               setDraft(EMPTY)
             }}
@@ -529,7 +547,10 @@ export function AgentsSettingsPanel({
             <button
               key={agent.id}
               type="button"
-              onClick={() => setSelectedId(agent.id)}
+              onClick={() => {
+                newDraftRef.current = false
+                setSelectedId(agent.id)
+              }}
               className={cn(
                 'mb-0.5 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors',
                 // `--accent` is the purple brand colour (Auto mode). Using it for

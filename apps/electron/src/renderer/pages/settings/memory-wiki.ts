@@ -170,8 +170,8 @@ export interface GraphLayout {
 }
 
 /** How many entities a section spreads into its own ring before collapsing to "+N". */
-const MAX_ENTITIES_PER_SECTION = 6
-const FAN_ANGLE = 34 // degrees between entity nodes within a section fan
+const MAX_ENTITIES_PER_SECTION = 5
+const FAN_ANGLE = 44 // degrees between entity nodes within a section fan
 
 export function layoutWikiGraph(model: WikiModel, domainSlug: string, width = 720, height = 380): GraphLayout {
   const cx = width / 2
@@ -220,7 +220,7 @@ export function layoutWikiGraph(model: WikiModel, domainSlug: string, width = 72
         label: entity.label,
         x: ex,
         y: ey,
-        r: 5,
+        r: 6,
         role: 'entity',
         hue: section.hue,
         kind: entity.kind,

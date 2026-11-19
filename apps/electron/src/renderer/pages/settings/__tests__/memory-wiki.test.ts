@@ -88,13 +88,13 @@ describe('layoutWikiGraph', () => {
     expect(g.edges.filter((e) => e.kind === 'entity').length).toBe(6)
   })
 
-  it('collapses overflow entities into a +N chip (max 6 per section)', () => {
+  it('collapses overflow entities into a +N chip (max 5 per section)', () => {
     const lines = Array.from({ length: 9 }, (_, i) => `- 条目 ${i}`).join('\n')
     const model = parseWiki(`## 大分区\n${lines}`, 'd')
     const g = layoutWikiGraph(model, 'd')
-    expect(g.nodes.filter((n) => n.role === 'entity').length).toBe(6)
+    expect(g.nodes.filter((n) => n.role === 'entity').length).toBe(5)
     const more = g.nodes.find((n) => n.role === 'more')
-    expect(more?.label).toBe('+3')
+    expect(more?.label).toBe('+4')
   })
 
   it('keeps section hues stable and distinct-ish (47° steps)', () => {

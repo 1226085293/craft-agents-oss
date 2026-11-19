@@ -65,7 +65,7 @@ describe('migrateMemoryStore — idempotent one-shot migration', () => {
     const store = legacyStore();
     const migrated = migrateMemoryStore(store, workspace);
     expect(migrated).toBe(true);
-    expect(store.schemaVersion).toBe(3);
+    expect(store.schemaVersion).toBe(4);
 
     expect(store.entries.map(e => e.type)).toEqual(['factual', 'factual', 'behavioral', 'behavioral', 'reminder']);
 
@@ -90,7 +90,7 @@ describe('migrateMemoryStore — idempotent one-shot migration', () => {
   it('loadMemoryStore persists migration and reloads cleanly', () => {
     writeFileSync(join(workspace, 'memory.json'), JSON.stringify(legacyStore()), 'utf-8');
     const loaded = loadMemoryStore(workspace);
-    expect(loaded.schemaVersion).toBe(3);
+    expect(loaded.schemaVersion).toBe(4);
     expect(loaded.entries[0]!.type).toBe('factual');
     // Reload → still v3, no double-migration artifacts.
     const reloaded = loadMemoryStore(workspace);
@@ -139,7 +139,7 @@ describe('withMemoryWriteLock — promise-chain mutex', () => {
   });
 
   it('applies settings format defaults', () => {
-    expect(memoryConfig.schemaVersion).toBe(3);
+    expect(memoryConfig.schemaVersion).toBe(4);
     expect(memoryConfig.adjudication.shadow).toBe(true);
     expect(memoryConfig.safety.redact).toBe(true);
   });

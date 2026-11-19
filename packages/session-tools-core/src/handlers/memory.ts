@@ -138,7 +138,7 @@ export async function handleAddMemory(ctx: SessionToolContext, args: { action: '
     const store = ctx.fs.exists(path)
       ? JSON.parse(ctx.fs.readFile(path)) as Record<string, any>
       : args.scope === 'global'
-        ? { version: 1, schemaVersion: 3, entries: [], trash: [], extractionHistory: [], totalInjectionTokens: 0 }
+        ? { version: 1, schemaVersion: 4, entries: [], trash: [], extractionHistory: [], totalInjectionTokens: 0 }
         : { version: 1, sessionId: ctx.sessionId, entries: [], consolidatedEntryIds: [], extractionHistory: [] }
     if (args.scope === 'session' && store.sessionId !== ctx.sessionId) return error('Session memory store identity mismatch')
     const action = args.action
@@ -164,9 +164,16 @@ export async function handleAddMemory(ctx: SessionToolContext, args: { action: '
       const entry: {
         id: string; type: string; content: string; sourceSessionId: string;
         embedding?: number[]; confidence: number; createdAt: string; injectedCount: number;
+        domain?: string;
       } = {
         id: crypto.randomUUID(), type: args.type ?? 'factual', content, sourceSessionId: args.scope === 'global' ? 'manual' : ctx.sessionId,
         confidence: 0.9, createdAt: new Date().toISOString(), injectedCount: 0,
+      }
+      // 托管记忆写路由（v7 阶段 9）：全局写落会话归属域（宿主经 agentId/taskId 解析）；
+      // 未接线/未打标 = 共享全局池（旧行为，零回归）。
+      if (args.scope === 'global') {
+        const domain = ctx.callbacks?.resolveMemoryWriteDomain?.(ctx.sessionId)
+        if (domain && domain !== 'global') entry.domain = domain
       }
       // Write-side semantic indexing: store the embedding vector with the
       // entry so read-path retrieval is pure cosine (zero LLM, 3-4ms).
@@ -219,10 +226,15 @@ export async function handleAddMemory(ctx: SessionToolContext, args: { action: '
 
 export async function handleQueryMemories(ctx: SessionToolContext, args: { query: string; type?: 'factual' | 'behavioral' | 'reminder'; limit?: number }): Promise<ToolResult> {
   if (!/^[a-zA-Z0-9_-]+$/.test(ctx.sessionId)) return error('Invalid session ID')
+  // 托管记忆读路由（v7 阶段 9）：全局池条目按域过滤（缺域标=global，恒可见）；
+  // 未接线 → 不过滤（零回归）。
+  const readDomains = ctx.callbacks?.resolveMemoryReadDomains?.(ctx.sessionId)
+  const domainAllowed = (entry: { domain?: string }): boolean =>
+    !readDomains || !entry.domain || readDomains.includes(entry.domain)
   try {
     const stores = [memoryPath(ctx, 'global'), memoryPath(ctx, 'session')]
       .filter(path => ctx.fs.exists(path))
-      .map(path => JSON.parse(ctx.fs.readFile(path)) as { sessionId?: string; entries?: Array<{ type: string; content: string; embedding?: number[]; createdAt?: string; updatedAt?: string }> })
+      .map(path => JSON.parse(ctx.fs.readFile(path)) as { sessionId?: string; entries?: Array<{ type: string; content: string; embedding?: number[]; createdAt?: string; updatedAt?: string; domain?: string }> })
     // Fold legacy 5-class types into the three-class space so old session
     // stores (pre- extractions) stay searchable and filterable.
     const fold = (type: string): string => {
@@ -241,7 +253,8 @@ export async function handleQueryMemories(ctx: SessionToolContext, args: { query
         const queryVector = await encode(args.query)
         const all = stores.flatMap(store => (store.entries ?? [])
           .filter(entry => !store.sessionId || store.sessionId === ctx.sessionId)
-          .filter(entry => !args.type || fold(entry.type) === args.type))
+          .filter(entry => !args.type || fold(entry.type) === args.type)
+          .filter(domainAllowed))
         const scored: Array<{ type: string; content: string; score: number; stamp: string }> = []
         for (const entry of all) {
           let vec = entry.embedding
@@ -271,6 +284,7 @@ export async function handleQueryMemories(ctx: SessionToolContext, args: { query
       results = stores.flatMap(store => (store.entries ?? [])
         .filter(entry => !store.sessionId || store.sessionId === ctx.sessionId)
         .filter(entry => !args.type || fold(entry.type) === args.type)
+        .filter(domainAllowed)
         .filter(entry => terms.some(term => entry.content.toLocaleLowerCase().includes(term)))
         .map(entry => ({ type: fold(entry.type), content: entry.content, score: 1, stamp: formatMemoryStamp(entry.updatedAt ?? entry.createdAt) })))
     }

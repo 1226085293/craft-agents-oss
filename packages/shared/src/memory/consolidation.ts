@@ -202,7 +202,7 @@ async function evaluateBatch(batch: MemoryEntry[], deps: BatchDeps): Promise<Bat
           if (parseFailures >= 2) {
             // Single entry can't be split further. Promote as-is (additions are cheap).
             console.warn(`[memory] JSON parse failed twice for single-entry batch; promoting candidate anyway`)
-            return await promoteRaw(batch, globalStore)
+            return await promoteRaw(batch, globalStore, deps)
           }
           continue // retry the same full batch once
         }
@@ -223,13 +223,20 @@ async function evaluateBatch(batch: MemoryEntry[], deps: BatchDeps): Promise<Bat
   }
 }
 
+/** 托管记忆写路由（v7 阶段 9）：晋升条目按来源会话归属域打标（宿主可缺省 → 共享池）。 */
+function tagPromotedDomain(entry: MemoryEntry, options: ConsolidationOptions): void {
+  const domain = options.domainForSession?.(entry.sourceSessionId)
+  if (domain && domain !== 'global') entry.domain = domain
+}
+
 /** Promote raw batch entries (no model verdict available) — single-entry parse-failure path. */
-async function promoteRaw(batch: MemoryEntry[], globalStore: MemoryStore): Promise<BatchResult> {
+async function promoteRaw(batch: MemoryEntry[], globalStore: MemoryStore, deps: BatchDeps): Promise<BatchResult> {
   const promotedIds: string[] = []
   const dedupPool = [...globalStore.entries]
   for (const source of batch) {
     if (isSemanticDuplicate(source, dedupPool)) continue
     const promoted: MemoryEntry = { ...source, createdAt: new Date().toISOString(), updatedAt: undefined }
+    tagPromotedDomain(promoted, deps.options)
     globalStore.entries.push(promoted)
     dedupPool.push(promoted)
     promotedIds.push(source.id)
@@ -290,7 +297,9 @@ async function applyBatchResponse(batch: MemoryEntry[], response: ConsolidationR
     }
   }
   const promote = (entry: MemoryEntry) => {
-    promotedEntries.push({ ...entry, id: entry.id, createdAt: new Date().toISOString(), updatedAt: undefined, sourceSessionId: entry.sourceSessionId })
+    const promoted: MemoryEntry = { ...entry, id: entry.id, createdAt: new Date().toISOString(), updatedAt: undefined, sourceSessionId: entry.sourceSessionId }
+    tagPromotedDomain(promoted, deps.options)
+    promotedEntries.push(promoted)
     finalIds.push(entry.id)
   }
   for (const item of promotions) {
@@ -402,6 +411,12 @@ export interface ConsolidationOptions {
    * counts start at 2). Callers can surface "retrying…" state to the UI.
    */
   onRetry?: (info: { attempt: number; message: string }) => void
+  /**
+   * 托管记忆写路由（v7 阶段 9）：晋升进全局池的条目按其来源会话归属域打标。
+   * 宿主经会话记录（agentId/taskId）解析；undefined/'global' = 不打标
+   *（缺域标 = 共享全局池，存量语义）。
+   */
+  domainForSession?: (sessionId: string) => string | undefined
 }
 
 export async function consolidateSessionMemories(

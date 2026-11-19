@@ -12,7 +12,7 @@ import {
   permanentlyDeleteTrashEntries,
   getMemoryStats,
 } from '@craft-agent/shared/memory/store'
-import { consolidateSessionMemories, MemoryConsolidationScheduler, withMemoryWriteLock, type MemoryStore } from '@craft-agent/shared/memory'
+import { consolidateSessionMemories, GLOBAL_MEMORY_DOMAIN, MemoryConsolidationScheduler, resolveWriteDomain, withMemoryWriteLock, type MemoryStore } from '@craft-agent/shared/memory'
 import { resolveTitleLanguageName, getDefaultLlmConnection, getLlmConnection } from '@craft-agent/shared/config'
 import { listSessions as listStoredSessions } from '@craft-agent/shared/sessions'
 import { addSessionMemory, deleteSessionMemory, updateSessionMemory, loadSessionMemoryStore, saveSessionMemoryStore } from '@craft-agent/shared/memory'
@@ -167,6 +167,17 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
       language,
       // Write-time adjudication gate needs the mini-model completion (§5.1).
       runMiniCompletion: agent.runMiniCompletion.bind(agent),
+      // 托管记忆写路由（v7 阶段 9）：晋升条目按来源会话归属域打标
+      //（会话记录 → agentId/taskId；任务临时会话归发起人，经验跟着活走）。
+      domainForSession: (sessionId) => {
+        const rec = sessions.find((s) => s.id === sessionId)
+        if (!rec) return undefined
+        const domain = resolveWriteDomain(workspaceRootPath, {
+          agentId: (rec as { agentId?: string }).agentId ?? null,
+          taskId: (rec as { taskId?: string }).taskId ?? null,
+        })
+        return domain === GLOBAL_MEMORY_DOMAIN ? undefined : domain
+      },
       // Check the cooperative-cancel flag between LLM calls and backoff
       // sleeps so "Cancel" settles quickly even while retrying.
       isCancelled: () => consolidationCancelled.get(workspaceRootPath) === true,

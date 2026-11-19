@@ -21,6 +21,33 @@ describe('consolidateSessionMemories', () => {
     expect(session.consolidatedEntryIds).toContain('new')
   })
 
+  it('tags promoted entries with the owning domain via domainForSession（v7 阶段 9 写路由）', async () => {
+    const global = globalStore()
+    const session = sessionStore()
+    await consolidateSessionMemories(
+      global,
+      [session],
+      async () => JSON.stringify({ promotions: [{ id: 'new', content: '用户偏好简体中文回答', type: 'behavioral' }] }),
+      {
+        domainForSession: (sessionId) => (sessionId === 's1' ? 'agent-ui' : undefined),
+      },
+    )
+    expect(global.entries.find((entry) => entry.id === 'new')?.domain).toBe('agent-ui')
+    // 存量全局条目（无域标）保持无标 = global 语义，不被回填
+    expect(global.entries.find((entry) => entry.content === '用户偏好英文回答')?.domain).toBeUndefined()
+  })
+
+  it('domainForSession 缺省 → 晋升条目不打域标（旧行为，零回归）', async () => {
+    const global = globalStore()
+    const session = sessionStore()
+    await consolidateSessionMemories(
+      global,
+      [session],
+      async () => JSON.stringify({ promotions: [{ id: 'new', content: '用户偏好简体中文回答', type: 'behavioral' }] }),
+    )
+    expect(global.entries.find((entry) => entry.id === 'new')?.domain).toBeUndefined()
+  })
+
   it('no longer stalls on persistent invalid output — fallback promotes and advances (§5.1)', async () => {
     const global = globalStore()
     const session = sessionStore()

@@ -112,6 +112,11 @@ export {
   ensureAgentMemoryDomain,
   resolveAgentMemoryDomain,
   memoryDomainsPath,
+  resolveWriteDomain,
+  resolveReadDomains,
+  readDomainMemoryFile,
+  GLOBAL_MEMORY_DOMAIN,
+  DOMAIN_MEMORY_INJECTION_MAX_CHARS,
   type MemoryDomainDef,
   type MemoryDomainsFile,
 } from './domains.ts';

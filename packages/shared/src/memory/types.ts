@@ -252,7 +252,7 @@ export function isBehavioralMemoryType(type: MemoryType): boolean {
  * adjudication starts in SHADOW mode (records only, no disposition).
  */
 export const memoryConfig = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   types: { schema: ['factual', 'behavioral', 'reminder'] as const },
   adjudication: {
     enabled: true,

@@ -186,7 +186,7 @@ describe('query_memories read-back timestamp', () => {
     mkdirSync(dirname(path), { recursive: true })
     writeFileSync(path, JSON.stringify(
       scope === 'global'
-        ? { version: 1, schemaVersion: 3, entries }
+        ? { version: 1, schemaVersion: 4, entries }
         : { version: 1, sessionId, entries },
       null, 2,
     ))
@@ -308,5 +308,48 @@ describe('add_memory length budget', () => {
     const ctx = context(workspace, 'session-a')
     const result = await handleAddMemory(ctx, { action: 'add', scope: 'global', content: '网关是 workbuddy2api-hub，不是 uni-api', type: 'factual' })
     expect(result.content[0]?.text).toMatch(/^Added global memory [0-9a-f-]+\.$/)
+  })
+})
+
+describe('托管记忆路由（v7 阶段 9）', () => {
+  it('global add 带宿主解析的域标；未接线 = 无域标（零回归）', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'craft-memory-route-'))
+    dirs.push(workspace)
+    const routed = { ...context(workspace, 'session-a'), callbacks: { resolveMemoryWriteDomain: () => 'agent-ui' } } as unknown as SessionToolContext
+    await handleAddMemory(routed, { action: 'add', scope: 'global', content: 'UI 工经验：Radix Select 空值哨兵' })
+    let global = JSON.parse(readFileSync(join(workspace, 'memory.json'), 'utf8')) as { entries: Array<{ content: string; domain?: string }> }
+    expect(global.entries.find((e) => e.content.includes('Radix'))?.domain).toBe('agent-ui')
+
+    const plain = context(workspace, 'session-b')
+    await handleAddMemory(plain, { action: 'add', scope: 'global', content: '无路由的全局写' })
+    global = JSON.parse(readFileSync(join(workspace, 'memory.json'), 'utf8')) as typeof global
+    expect(global.entries.find((e) => e.content === '无路由的全局写')?.domain).toBeUndefined()
+  })
+
+  it('query 按读域过滤：他域不可见，缺域标=global 恒可见；未接线 = 全见（零回归）', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'craft-memory-route-'))
+    dirs.push(workspace)
+    writeFileSync(
+      join(workspace, 'memory.json'),
+      JSON.stringify({
+        version: 1, schemaVersion: 4,
+        entries: [
+          { id: '1', type: 'factual', content: 'ui 主题 token 约定', sourceSessionId: 'x', confidence: 0.9, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0, domain: 'agent-ui' },
+          { id: '2', type: 'factual', content: '批处理脚本约定', sourceSessionId: 'x', confidence: 0.9, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0, domain: 'task-worker' },
+          { id: '3', type: 'factual', content: '全局偏好：简体中文', sourceSessionId: 'x', confidence: 0.9, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 },
+        ],
+        trash: [], extractionHistory: [], totalInjectionTokens: 0, blocked: [], extractionRetryQueue: [],
+      }),
+    )
+    const ctx = { ...context(workspace, 'session-a'), callbacks: { resolveMemoryReadDomains: () => ['agent-ui', 'global'] as readonly string[] } } as unknown as SessionToolContext
+    const result = await handleQueryMemories(ctx, { query: '主题 token 脚本 偏好' })
+    const text = result.content[0]?.text ?? ''
+    expect(text).toContain('ui 主题 token 约定')
+    expect(text).toContain('全局偏好')
+    expect(text).not.toContain('批处理脚本约定')
+
+    const plain = context(workspace, 'session-b')
+    const all = await handleQueryMemories(plain, { query: '主题 token 脚本 偏好' })
+    expect(all.content[0]?.text).toContain('批处理脚本约定')
   })
 })

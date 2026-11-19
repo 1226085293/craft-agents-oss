@@ -58,7 +58,7 @@ import { ConfigWatcherManager, type ConfigWatcherManagerCallbacks } from './core
 import { UsageTracker, type UsageUpdate } from './core/usage-tracker.ts';
 import { PrerequisiteManager } from './core/prerequisite-manager.ts';
 
-import { getSessionPlansPath, getSessionDataPath, getSessionPath } from '../sessions/storage.ts';
+import { getSessionPlansPath, getSessionDataPath, getSessionPath, loadSession } from '../sessions/storage.ts';
 import { readSessionJsonl } from '../sessions/jsonl.ts';
 import { getMiniAgentSystemPrompt } from '../prompts/system.ts';
 import { buildTitlePrompt, buildRegenerateTitlePrompt, validateTitle } from '../utils/title-generator.ts';
@@ -71,6 +71,9 @@ import {
   loadSessionMemoryStore,
   saveSessionMemoryStore,
   extractMemories,
+  GLOBAL_MEMORY_DOMAIN,
+  resolveReadDomains,
+  readDomainMemoryFile,
   type MemoryStore,
   type MemoryExtractionInput,
 } from '../memory/index.ts';
@@ -1311,6 +1314,32 @@ ${formattedMessages}
     return `<memory-existence-hint>\nStored memories exist but none matched this question by surface keywords. If the question could involve anything set earlier — identity, names, preferences, rules, past decisions — DO NOT answer from current context alone: call the query_memories tool first and use its results.\n</memory-existence-hint>`;
   }
 
+  /**
+   * 托管记忆读路由（v7 阶段 9）：该会话可读的域 = [本角色写域, global]。
+   * 惰性解析并按实例缓存（sessionId/agentId/taskId 会话生命周期内不变）；
+   * 无角色上下文 → ['global']，过滤器对存量无域标条目恒真 = 零回归。
+   */
+  private _memoryRouteCache: string[] | null = null;
+
+  private memoryReadDomains(): string[] {
+    if (this._memoryRouteCache) return this._memoryRouteCache;
+    const root = this.config.workspace.rootPath;
+    const sessionId = this.config.session?.id;
+    let agentId: string | null = null;
+    let taskId: string | null = null;
+    if (sessionId) {
+      try {
+        const rec = loadSession(root, sessionId);
+        agentId = rec?.agentId ?? null;
+        taskId = rec?.taskId ?? null;
+      } catch {
+        // 会话记录缺失/损坏 → 无上下文分支（global，零回归）
+      }
+    }
+    this._memoryRouteCache = resolveReadDomains(root, { agentId, taskId });
+    return this._memoryRouteCache;
+  }
+
   protected async buildMemoryContext(currentUserMessage?: string): Promise<string> {
     const sessionId = this.config.session?.id;
     if (!sessionId) return '';
@@ -1325,7 +1354,7 @@ ${formattedMessages}
       const recentMessages = this.getRecentMessagesForInjection(4);
       const trimmed = currentUserMessage?.trim();
       if (trimmed) recentMessages.push({ role: 'user', content: trimmed });
-      const memories = await selectRelevantMemoriesFromScopes(store, sessionStore, recentMessages);
+      const memories = await selectRelevantMemoriesFromScopes(store, sessionStore, recentMessages, undefined, this.memoryReadDomains());
 
       if (memories.length === 0) {
         // Existence hint: memories exist but none matched by surface keywords.
@@ -1351,7 +1380,18 @@ ${formattedMessages}
         saveSessionMemoryStore(this.config.workspace.rootPath, sessionStore);
       });
 
-      return buildMemoryContext(memories, true);
+      const context = buildMemoryContext(memories, true);
+      // 托管记忆读路由（v7 阶段 9）：注入本角色托管域的 MEMORY.md（带上限；
+      // 文件缺失/空跳过）。全局会话（无域）= 不产生域块，零回归。
+      const primaryDomain = this.memoryReadDomains()[0];
+      if (primaryDomain && primaryDomain !== GLOBAL_MEMORY_DOMAIN) {
+        const domainFile = readDomainMemoryFile(this.config.workspace.rootPath, primaryDomain);
+        if (domainFile) {
+          const frame = `<agent-domain-memory domain="${primaryDomain}">\n${domainFile}\n</agent-domain-memory>`;
+          return context ? `${context}\n\n${frame}` : frame;
+        }
+      }
+      return context;
     } catch (error) {
       this.onDebug?.(`[Memory] Failed to build context: ${error}`);
       return '';

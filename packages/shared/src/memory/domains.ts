@@ -149,6 +149,28 @@ export function resolveReadDomains(
   return write === GLOBAL_MEMORY_DOMAIN ? [GLOBAL_MEMORY_DOMAIN] : [write, GLOBAL_MEMORY_DOMAIN];
 }
 
+/** 域 MEMORY.md 注入上限（防域文件吞掉整个注入预算；截断时带提示）。 */
+export const DOMAIN_MEMORY_INJECTION_MAX_CHARS = 4000;
+
+/**
+ * 读域 MEMORY.md 的注入内容（L3 注入，v7 阶段 9）：域表查 path → 读文件 →
+ * 截断。文件缺失/空 → 返 ''（调用方跳过注入块）。全局池不在此列：
+ * 全局 MEMORY.md 是策展产物（wiki 浏览），不进注入（防 token 膨胀）。
+ */
+export function readDomainMemoryFile(workspaceRoot: string, slug: string): string {
+  const def = loadMemoryDomains(workspaceRoot, false).domains.find((domain) => domain.slug === slug);
+  if (!def?.path || !existsSync(def.path)) return '';
+  let content: string;
+  try {
+    content = readFileSync(def.path, 'utf8').trim();
+  } catch {
+    return '';
+  }
+  if (!content) return '';
+  if (content.length <= DOMAIN_MEMORY_INJECTION_MAX_CHARS) return content;
+  return `${content.slice(0, DOMAIN_MEMORY_INJECTION_MAX_CHARS)}\n…（域文件超限截断，完整内容见记忆 wiki）`;
+}
+
 /** 新增个人域（助手专属、隔离）。slug 清洗为小写连字符；重名 → false。 */
 export function addPersonalMemoryDomain(workspaceRoot: string, slug: string): boolean {
   const cleaned = agentDomainSlug(slug);

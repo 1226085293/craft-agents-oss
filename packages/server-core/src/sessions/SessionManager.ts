@@ -6609,6 +6609,9 @@ export class SessionManager implements ISessionManager {
               supervisorSessionId: managed.id,
               toolCallId: randomUUID(),
               ...(payload.agentId?.trim() ? { assigneeAgentId: payload.agentId.trim() } : {}),
+              // 托管记忆写路由（v7 阶段 9）：临时工会话的记忆经验归发起人
+              //（本渠道助手）；无 agentId 的调用（默认助手/管道会话）= undefined。
+              ...(managed.agentId ? { initiatorAgentId: managed.agentId } : {}),
             })
             void this.sendMessage(
               managed.id,

@@ -6,6 +6,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
+import { loadSessionMemoryStore, saveSessionMemoryStore } from './session-store.ts';
 import { randomUUID } from 'node:crypto';
 import type {
   MemoryEntry,
@@ -119,6 +120,7 @@ export function getMemoryStorePath(workspaceRootPath: string): string {
  */
 export function migrateMemoryStore(store: MemoryStore, workspaceRootPath: string): boolean {
   if (store.schemaVersion === memoryConfig.schemaVersion) return false;
+  const fromVersion = store.schemaVersion ?? 0;
 
   for (const entry of [...store.entries, ...(store.trash ?? []).map(rec => rec.entry)]) {
     entry.type = foldLegacyMemoryType(entry.type);
@@ -129,6 +131,31 @@ export function migrateMemoryStore(store: MemoryStore, workspaceRootPath: string
 
   store.blocked ??= [];
   store.extractionRetryQueue ??= [];
+
+  // 托管记忆一次性迁移（v7 阶段 9，用户 2026-11-19 拍板）：
+  // - 会话池条目直接抛除（以前的会话记忆不再参与整合/注入），但保留抽取
+  //   标记（extractionHistory/consolidatedEntryIds 不动）——防重新抽取回填；
+  // - 陈旧抽取重试队列清空（重抽只会再填会话池）；
+  // - 全局池条目保留：缺 domain 标 = 'global' = 全局记忆存量数据（只读共享池）。
+  if (fromVersion < 4) {
+    store.extractionRetryQueue = [];
+    const sessionsDir = join(workspaceRootPath, 'sessions');
+    if (existsSync(sessionsDir)) {
+      for (const name of readdirSync(sessionsDir)) {
+        if (!/^[a-zA-Z0-9_-]+$/.test(name)) continue;
+        try {
+          const sessionStore = loadSessionMemoryStore(workspaceRootPath, name);
+          if (sessionStore.entries.length > 0) {
+            sessionStore.entries = [];
+            saveSessionMemoryStore(workspaceRootPath, sessionStore);
+          }
+        } catch {
+          // 会话目录损坏/被锁——跳过，不阻塞全局池加载
+        }
+      }
+    }
+  }
+
   store.schemaVersion = memoryConfig.schemaVersion;
   return true;
 }

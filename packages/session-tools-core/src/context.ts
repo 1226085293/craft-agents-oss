@@ -71,6 +71,19 @@ export interface SessionToolCallbacks {
    * them on demand.
    */
   encodeEmbedding?(content: string): Promise<number[]>;
+
+  /**
+   * 托管记忆写路由（v7 阶段 9）：该会话写下的全局记忆应归属的域 slug。
+   * 宿主经会话记录（agentId/taskId）惰性解析；未接线 / undefined / 'global'
+   * → 条目不打域标 = 共享全局池（旧行为，零回归）。
+   */
+  resolveMemoryWriteDomain?(sessionId: string): string | undefined;
+
+  /**
+   * 托管记忆读路由：该会话可读的域集合（恒含 'global'，缺省域条目的归属）。
+   * query_memories 用它过滤全局池；未接线 → 不过滤（零回归）。
+   */
+  resolveMemoryReadDomains?(sessionId: string): readonly string[] | undefined;
 }
 
 // ============================================================

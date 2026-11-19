@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -19,6 +19,75 @@ function makeRoot() {
 }
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
+
+describe('schemaVersion 3→4 一次性迁移（v7 阶段 9 托管记忆，用户拍板口径）', () => {
+  it('会话池 entries 清空（抽取标记保留防回填），陈旧重试队列清空，全局存量保留；幂等', () => {
+    const root = makeRoot()
+    mkdirSync(join(root, 'sessions', 's-1'), { recursive: true })
+    writeFileSync(
+      join(root, 'sessions', 's-1', 'memory.json'),
+      JSON.stringify({
+        version: 1,
+        sessionId: 's-1',
+        entries: [{ id: 'se1', type: 'factual', content: '旧会话记忆', sourceSessionId: 's-1', confidence: 0.9, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 }],
+        consolidatedEntryIds: [],
+        extractionHistory: [{ sessionId: 's-1', timestamp: '2026-01-01T00:00:00.000Z', factsExtracted: 1, factsDiscarded: 0, newEntryIds: ['se1'] }],
+      }),
+    )
+    writeFileSync(
+      join(root, 'memory.json'),
+      JSON.stringify({
+        version: 1,
+        schemaVersion: 3,
+        entries: [{ id: 'g1', type: 'factual', content: '全局存量记忆', sourceSessionId: 's0', confidence: 1, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 }],
+        trash: [],
+        extractionHistory: [],
+        totalInjectionTokens: 0,
+        blocked: [],
+        extractionRetryQueue: [{ sessionId: 'old-1', strategy: 'session_end', throughMessageId: 'm1', reason: '429', attempts: 1, failedAt: '2026-01-01T00:00:00.000Z' }],
+      }),
+    )
+
+    const store = loadMemoryStore(root)
+    expect(store.schemaVersion).toBe(4)
+    expect(store.entries).toHaveLength(1)
+    expect(store.entries[0]!.content).toBe('全局存量记忆')
+    expect(store.entries[0]!.domain).toBeUndefined() // 缺域标 = global = 全局记忆存量
+    expect(store.extractionRetryQueue ?? []).toHaveLength(0)
+
+    const sessionRaw = JSON.parse(readFileSync(join(root, 'sessions', 's-1', 'memory.json'), 'utf8')) as {
+      entries: unknown[]
+      extractionHistory: unknown[]
+    }
+    expect(sessionRaw.entries).toEqual([])
+    expect(sessionRaw.extractionHistory).toHaveLength(1) // 标记保留：防重新抽取回填
+
+    // 幂等：第二次 load 不再迁移（会话池标记不动）
+    loadMemoryStore(root)
+    const sessionRaw2 = JSON.parse(readFileSync(join(root, 'sessions', 's-1', 'memory.json'), 'utf8')) as { extractionHistory: unknown[] }
+    expect(sessionRaw2.extractionHistory).toHaveLength(1)
+  })
+
+  it('已是 schemaVersion 4 的 store 不触发迁移（会话池原样）', () => {
+    const root = makeRoot()
+    mkdirSync(join(root, 'sessions', 's-1'), { recursive: true })
+    writeFileSync(
+      join(root, 'sessions', 's-1', 'memory.json'),
+      JSON.stringify({
+        version: 1, sessionId: 's-1',
+        entries: [{ id: 'se1', type: 'factual', content: '新管线会话记忆', sourceSessionId: 's-1', confidence: 0.9, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 }],
+        extractionHistory: [],
+      }),
+    )
+    writeFileSync(
+      join(root, 'memory.json'),
+      JSON.stringify({ version: 1, schemaVersion: 4, entries: [], trash: [], extractionHistory: [], totalInjectionTokens: 0 }),
+    )
+    loadMemoryStore(root)
+    const sessionRaw = JSON.parse(readFileSync(join(root, 'sessions', 's-1', 'memory.json'), 'utf8')) as { entries: unknown[] }
+    expect(sessionRaw.entries).toHaveLength(1) // 新管线的会话池条目不受迁移影响
+  })
 })
 
 describe('global memory trash', () => {

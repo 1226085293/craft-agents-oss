@@ -106,7 +106,8 @@ import { join } from 'path';
 import { homedir } from 'os';
 
 // Session storage (plans folder path)
-import { getSessionDataPath, getSessionPath, getSessionPlansPath } from '../sessions/storage.ts';
+import { getSessionDataPath, getSessionPath, getSessionPlansPath, loadSession } from '../sessions/storage.ts';
+import { GLOBAL_MEMORY_DOMAIN, resolveReadDomains, resolveWriteDomain } from '../memory/domains.ts';
 import { ProgressJournal, buildHistoryRecoveryPointer, loadRawProgressRecords } from './progress-journal.ts';
 import { buildCompactionSummaryParams } from './compaction-summary.ts';
 import { readSessionMessages } from '../sessions/jsonl.ts';
@@ -3258,6 +3259,35 @@ export class PiAgent extends BaseAgent {
       const { encodeText } = await import('../memory/embedding.ts');
       return encodeText(content);
     };
+
+    // 托管记忆路由（v7 阶段 9）：add_memory 打域标、query_memories 按读域过滤。
+    // 会话记录的 agentId/taskId 在创建时已持久化，惰性解析；会话记录缺失/损坏
+    // → 走无上下文分支（global，零回归）。任务临时会话带 taskId → 经验归发起人。
+    const memoryRoute = (sessionId: string): { root: string; agentId: string | null; taskId: string | null } | null => {
+      const root = this.config.workspace?.rootPath
+      if (!root || !sessionId) return null
+      let agentId: string | null = null
+      let taskId: string | null = null
+      try {
+        const rec = loadSession(root, sessionId)
+        agentId = rec?.agentId ?? null
+        taskId = rec?.taskId ?? null
+      } catch {
+        // 会话记录缺失/损坏 → 无上下文分支（global，零回归）
+      }
+      return { root, agentId, taskId }
+    }
+    this._sessionToolContext.callbacks.resolveMemoryWriteDomain = (sessionId) => {
+      const ctx = memoryRoute(sessionId)
+      if (!ctx) return undefined
+      const domain = resolveWriteDomain(ctx.root, { agentId: ctx.agentId, taskId: ctx.taskId })
+      return domain === GLOBAL_MEMORY_DOMAIN ? undefined : domain
+    }
+    this._sessionToolContext.callbacks.resolveMemoryReadDomains = (sessionId) => {
+      const ctx = memoryRoute(sessionId)
+      if (!ctx) return undefined
+      return resolveReadDomains(ctx.root, { agentId: ctx.agentId, taskId: ctx.taskId })
+    }
 
     // Multi-agent surface: only wired when the host supplied it, which is what
     // makes the tools refuse themselves in a session that has no role.

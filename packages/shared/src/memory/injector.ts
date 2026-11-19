@@ -203,6 +203,11 @@ export async function selectRelevantMemoriesFromScopes(
   sessionStore: SessionMemoryStore,
   recentMessages: Array<{ role: string; content?: string }>,
   config: MemoryInjectionConfig = DEFAULT_MEMORY_INJECTION_CONFIG,
+  /**
+   * 托管记忆读路由（v7 阶段 9）：该会话可读的全局池域集合（恒含 'global'，
+   * 缺域标条目=global）。undefined → 不过滤（旧行为，零回归）。
+   */
+  readDomains?: readonly string[],
 ): Promise<MemoryEntry[]> {
   const active = new Set<string>();
   const suppress = new Set<string>();
@@ -212,7 +217,8 @@ export async function selectRelevantMemoriesFromScopes(
     for (const id of entry.mergeWith ?? []) suppress.add(id);
   }
 
-  const globals = globalStore.entries.filter(e => !suppress.has(e.id));
+  const globals = globalStore.entries.filter(e => !suppress.has(e.id)
+    && (!readDomains || !e.domain || readDomains.includes(e.domain)));
   const globalIds = new Set(globals.map(e => e.id));
   const sessionEntries = sessionStore.entries.filter(
     entry => entry.sourceSessionId === sessionStore.sessionId && !entry.promoted && !globalIds.has(entry.id),

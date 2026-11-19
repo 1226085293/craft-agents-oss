@@ -646,8 +646,8 @@ export function AgentsSettingsPanel({
                   <div className="p-3">
                     {/*
                       * 可分配任务与分工说明是同一个心智模型：这个角色进了派活名单，
-                      * 这段说明才会被督导“看见”。两个控件同卡；关闭时说明区降透明，
-                      * 让“开关控制这段文字是否生效”一眼可见（而不是隔两张卡去猜）。
+                      * 这段说明才会被督导“看见”。两个控件同卡；开关直接决定显隐：
+                      * 关 → 说明区整块收起、留一行空态（文字保留不丢，重新开启即恢复）；开 → 展开。
                       */}
                     <div className="mb-3 flex items-center gap-2 text-[13px]">
                       <input
@@ -662,11 +662,12 @@ export function AgentsSettingsPanel({
                       </label>
                       <span className="text-xs text-muted-foreground">
                         {t('settings.agents.assignableHint', {
-                          defaultValue: '开启后才会出现在任务派活名单里；关闭时下面的分工说明不会被督导看到',
+                          defaultValue: '开启后才会出现在任务派活名单里，下面的分工说明也才会展开可写',
                         })}
                       </span>
                     </div>
-                    <div className={cn(draft.assignable !== true && 'opacity-50')}>
+                    {draft.assignable === true ? (
+                    <div>
                     <div className="flex items-start gap-2">
                       <textarea
                         className="min-h-[52px] w-full resize-y rounded-md border border-input bg-muted/50 p-2 text-[13px] leading-relaxed"
@@ -738,6 +739,13 @@ export function AgentsSettingsPanel({
                       </ul>
                     </div>
                     </div>
+                    ) : (
+                    <div className="rounded-md border border-dashed border-input bg-muted/30 p-2.5 text-xs text-muted-foreground">
+                      {t('settings.agents.dispatchHintHidden', {
+                        defaultValue: '「可分配任务」关闭时，分工说明不会被督导看到；开启开关即可写说明',
+                      })}
+                    </div>
+                    )}
                   </div>
                 </SettingsCard>
               </SettingsSection>

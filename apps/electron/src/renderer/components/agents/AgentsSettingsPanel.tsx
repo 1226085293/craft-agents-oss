@@ -644,6 +644,29 @@ export function AgentsSettingsPanel({
               >
                 <SettingsCard>
                   <div className="p-3">
+                    {/*
+                      * 可分配任务与分工说明是同一个心智模型：这个角色进了派活名单，
+                      * 这段说明才会被督导“看见”。两个控件同卡；关闭时说明区降透明，
+                      * 让“开关控制这段文字是否生效”一眼可见（而不是隔两张卡去猜）。
+                      */}
+                    <div className="mb-3 flex items-center gap-2 text-[13px]">
+                      <input
+                        type="checkbox"
+                        id="agent-assignable"
+                        className="h-4 w-4"
+                        checked={draft.assignable === true}
+                        onChange={(e) => setDraft({ ...draft, assignable: e.target.checked })}
+                      />
+                      <label htmlFor="agent-assignable" className="cursor-pointer">
+                        {t('settings.agents.assignable', { defaultValue: '可分配任务' })}
+                      </label>
+                      <span className="text-xs text-muted-foreground">
+                        {t('settings.agents.assignableHint', {
+                          defaultValue: '开启后才会出现在任务派活名单里；关闭时下面的分工说明不会被督导看到',
+                        })}
+                      </span>
+                    </div>
+                    <div className={cn(draft.assignable !== true && 'opacity-50')}>
                     <div className="flex items-start gap-2">
                       <textarea
                         className="min-h-[52px] w-full resize-y rounded-md border border-input bg-muted/50 p-2 text-[13px] leading-relaxed"
@@ -714,6 +737,7 @@ export function AgentsSettingsPanel({
                         })}
                       </ul>
                     </div>
+                    </div>
                   </div>
                 </SettingsCard>
               </SettingsSection>
@@ -736,29 +760,12 @@ export function AgentsSettingsPanel({
               </SettingsSection>
 
               <SettingsSection
-                title={t('settings.agents.dispatchAndMemory', { defaultValue: '派活与记忆' })}
-                description={t('settings.agents.dispatchAndMemoryHint', {
-                  defaultValue: '控制这个角色出现在谁的派活名单里、它的记忆归哪个家。',
+                title={t('settings.agents.memorySection', { defaultValue: '记忆' })}
+                description={t('settings.agents.memorySectionHint', {
+                  defaultValue: '这个角色的 MEMORY.md 写进哪个域；未指定时缺省落个人域兜底。',
                 })}
               >
                 <SettingsCard>
-                  <div className="flex items-center gap-2 p-3 text-[13px]">
-                    <input
-                      type="checkbox"
-                      id="agent-assignable"
-                      className="h-4 w-4"
-                      checked={draft.assignable === true}
-                      onChange={(e) => setDraft({ ...draft, assignable: e.target.checked })}
-                    />
-                    <label htmlFor="agent-assignable" className="cursor-pointer">
-                      {t('settings.agents.assignable', { defaultValue: '可分配任务' })}
-                    </label>
-                    <span className="text-xs text-muted-foreground">
-                      {t('settings.agents.assignableHint', {
-                        defaultValue: '开启后才会出现在任务派活名单里（分工说明给督导看）',
-                      })}
-                    </span>
-                  </div>
                   <SettingsSelectRow
                     label={t('settings.agents.memoryDomain', { defaultValue: '记忆域' })}
                     value={draft.memoryDomain ?? '__none__'}

@@ -1303,7 +1303,7 @@
   "settings.llm.tokens": "Tokens",
   "settings.llm.totalTokens": "Total tokens",
   "settings.llm.uses": "Uses",
-  "settings.memory.description": "Memory domains: one writable domain per assistant, project MEMORY.md as a shared read-only domain",
+  "settings.memory.description": "Global memory settings: master switch, memory-organization strategy group, dreaming consolidation, embedding model",
   "settings.memory.title": "Memory",
   "settings.network.bypassPlaceholder": "localhost, 127.0.0.1, .example.com",
   "settings.network.bypassRules": "Bypass Rules",

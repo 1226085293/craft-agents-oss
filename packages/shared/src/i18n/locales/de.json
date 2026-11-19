@@ -1303,7 +1303,7 @@
   "settings.llm.tokens": "Tokens",
   "settings.llm.totalTokens": "Total tokens",
   "settings.llm.uses": "Uses",
-  "settings.memory.description": "Gedächtnisbereiche: je ein schreibbarer Bereich pro Assistent, Projekt-MEMORY.md als gemeinsame schreibgeschützte Domäne",
+  "settings.memory.description": "Globale Memory-Einstellungen: Hauptschalter, Strategiegruppe für Memory-Organisation, Dream-Konsolidierung, Embedding-Modell",
   "settings.memory.title": "Gedächtnis",
   "settings.network.bypassPlaceholder": "localhost, 127.0.0.1, .example.com",
   "settings.network.bypassRules": "Bypass-Regeln",

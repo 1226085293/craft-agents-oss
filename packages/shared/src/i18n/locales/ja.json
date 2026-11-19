@@ -1303,7 +1303,7 @@
   "settings.llm.tokens": "Tokens",
   "settings.llm.totalTokens": "Total tokens",
   "settings.llm.uses": "Uses",
-  "settings.memory.description": "記憶ドメイン：アシスタントごとに1つの書き込み可能ドメイン、プロジェクトの MEMORY.md は共有読み取り専用ドメイン",
+  "settings.memory.description": "記憶のグローバル設定：メインスイッチ、記憶整理の戦略グループ、ドリーミング整理、埋め込みモデル",
   "settings.memory.title": "メモリ",
   "settings.network.bypassPlaceholder": "localhost, 127.0.0.1, .example.com",
   "settings.network.bypassRules": "バイパスルール",

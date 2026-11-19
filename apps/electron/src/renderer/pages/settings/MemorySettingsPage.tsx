@@ -96,8 +96,10 @@ export default function MemorySettingsPage(): React.JSX.Element {
   const [miniStrategySaving, setMiniStrategySaving] = React.useState(false)
   const [miniStrategySaved, setMiniStrategySaved] = React.useState(false)
 
+  // 缺省值用 __default__ 哨兵：Radix Select.Item 拒绝空字符串 value（会让整页崩
+  // 进错误边界，agent 面板记忆域下拉同坑的先例——照 __follow 范式）。
   const strategyOptions: Array<{ value: string; label: string }> = [
-    { value: '', label: t('settings.memory.miniStrategyDefault', { defaultValue: '缺省（跟随会话策略组 → 第一个启用组）' }) },
+    { value: '__default__', label: t('settings.memory.miniStrategyDefault', { defaultValue: '缺省（跟随会话策略组 → 第一个启用组）' }) },
     ...((llmConfig?.strategies ?? [])
       .filter((s) => s.enabled !== false)
       .map((s) => ({ value: s.id, label: s.name ?? s.id }))),
@@ -309,8 +311,8 @@ export default function MemorySettingsPage(): React.JSX.Element {
                   <div className="p-3">
                     <SettingsSelectRow
                       label={t('settings.memory.strategyGroupLabel', { defaultValue: '策略组' })}
-                      value={llmConfig?.miniStrategy ?? ''}
-                      onValueChange={(v) => void pickMiniStrategy(v)}
+                      value={llmConfig?.miniStrategy || '__default__'}
+                      onValueChange={(v) => void pickMiniStrategy(v === '__default__' ? '' : v)}
                       options={strategyOptions}
                       disabled={llmConfig === null || miniStrategySaving}
                     />

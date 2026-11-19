@@ -418,15 +418,24 @@ function MainWindowAgentsView(props: {
   React.useEffect(() => {
     if (!workspaceRootPath) return
     let cancelled = false
-    void window.electronAPI.memoryEnabledGet?.(workspaceRootPath)
-      .then((result) => {
-        if (!cancelled) setMemoryEnabled(result?.enabled ?? true)
-      })
-      .catch(() => undefined)
+    const fetchEnabled = () => {
+      void window.electronAPI.memoryEnabledGet?.(workspaceRootPath)
+        .then((result) => {
+          if (!cancelled) setMemoryEnabled(result?.enabled ?? true)
+        })
+        .catch(() => undefined)
+    }
+    fetchEnabled()
+    // 记忆开关 is a memory-store write → refresh on its broadcast so the 记忆
+    // section hides/shows live (settings can live in a separate window).
+    const off = window.electronAPI.onMemoryChanged?.((wsId: string) => {
+      if (wsId === workspaceId) fetchEnabled()
+    })
     return () => {
       cancelled = true
+      off?.()
     }
-  }, [workspaceRootPath])
+  }, [workspaceRootPath, workspaceId])
 
   return (
     <AgentsSettingsPanel
@@ -437,6 +446,7 @@ function MainWindowAgentsView(props: {
       selectedAgentId={selectedAgentId}
       onAgentSelected={onAgentSelected}
       memoryEnabled={memoryEnabled}
+      hideList
     />
   )
 }

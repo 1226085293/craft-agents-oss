@@ -60,17 +60,27 @@ export default function ProjectInfoPage({ projectSlug }: ProjectInfoPageProps) {
   const [memoryEnabled, setMemoryEnabled] = useState(true)
   useEffect(() => {
     const root = workspace?.rootPath
+    const wsId = workspace?.id
     if (!root) return
     let cancelled = false
-    void window.electronAPI.memoryEnabledGet?.(root)
-      .then((res) => {
-        if (!cancelled) setMemoryEnabled(res?.enabled ?? true)
-      })
-      .catch(() => undefined)
+    const fetchEnabled = () => {
+      void window.electronAPI.memoryEnabledGet?.(root)
+        .then((res) => {
+          if (!cancelled) setMemoryEnabled(res?.enabled ?? true)
+        })
+        .catch(() => undefined)
+    }
+    fetchEnabled()
+    // The 记忆开关 toggle is a memory-store write → this broadcast carries it,
+    // so the 记忆 tab hides/shows live instead of waiting for a remount.
+    const off = window.electronAPI.onMemoryChanged?.((id: string) => {
+      if (id === wsId) fetchEnabled()
+    })
     return () => {
       cancelled = true
+      off?.()
     }
-  }, [workspace?.rootPath])
+  }, [workspace?.rootPath, workspace?.id])
 
   // Load project (and re-load on broadcast)
   const loadProject = useCallback(async () => {

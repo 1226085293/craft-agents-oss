@@ -1303,7 +1303,7 @@
   "settings.llm.tokens": "Token",
   "settings.llm.totalTokens": "总 token",
   "settings.llm.uses": "使用次数",
-  "settings.memory.description": "记忆域：每个助手一个可写域，项目 MEMORY.md 为共享只读域",
+  "settings.memory.description": "记忆全局设置：总开关、记忆整理策略组、做梦整合、嵌入模型",
   "settings.memory.title": "记忆",
   "settings.network.bypassPlaceholder": "localhost, 127.0.0.1, .example.com",
   "settings.network.bypassRules": "绕过规则",

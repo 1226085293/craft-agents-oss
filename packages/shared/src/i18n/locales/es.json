@@ -1303,7 +1303,7 @@
   "settings.llm.tokens": "Tokens",
   "settings.llm.totalTokens": "Total tokens",
   "settings.llm.uses": "Uses",
-  "settings.memory.description": "Dominios de memoria: un dominio escribible por asistente, MEMORY.md del proyecto como dominio compartido de solo lectura",
+  "settings.memory.description": "Ajustes globales de memoria: conmutador principal, grupo de estrategia de organización, consolidación por sueños, modelo de inserción",
   "settings.memory.title": "Memoria",
   "settings.network.bypassPlaceholder": "localhost, 127.0.0.1, .example.com",
   "settings.network.bypassRules": "Reglas de exclusión",

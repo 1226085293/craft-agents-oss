@@ -157,6 +157,23 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
     return null
   }
 
+  // Projects navigator: 'projects' (list) / 'projects/project/{slug}' (detail).
+  // This branch was missing entirely — a pre-existing regression: every
+  // projects route parsed to null, handleNavigation dropped it silently, and
+  // project detail views were unreachable (11-19 活体: 建了项目但点击「没用」).
+  if (first === 'projects') {
+    if (segments.length === 1) {
+      return { navigator: 'projects', details: null }
+    }
+    if (segments[1] === 'project' && segments[2]) {
+      return {
+        navigator: 'projects',
+        details: { type: 'project', id: segments[2] },
+      }
+    }
+    return null
+  }
+
   // Agents navigator: 'agents' (list) / 'agents/agent/{agentId}' (detail).
   if (first === 'agents') {
     if (segments.length === 1) {

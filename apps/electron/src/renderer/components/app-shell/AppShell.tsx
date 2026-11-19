@@ -141,6 +141,7 @@ import {
 } from "@/contexts/NavigationContext"
 import type { SettingsSubpage } from "../../../shared/types"
 import { SourcesListPanel } from "./SourcesListPanel"
+import { AgentsListPanel } from "./AgentsListPanel"
 import { TasksListPanel } from '@/components/tasks/TasksPanel'
 import { EventsListPanel } from "../events/EventsListPanel"
 import { EventsListenersPanel } from "../events/EventsListenersPanel"
@@ -2280,16 +2281,24 @@ function AppShellContent({
                       // Mode 2 browses the project — the section itself is the
                       // active scope; mode 1 highlights only on the Projects view.
                       variant: (inMode2 || isProjectsNavigation(navState)) ? "default" : "ghost",
-                      // The project breadcrumb is inert in mode 2; only its
-                      // explicit back button returns to the project entries.
-                      onClick: inMode2 ? undefined : handleProjectsClick,
+                      // Mode 2: a single click on the breadcrumb opens the
+                      // project detail view (会话/记忆/资源/设置 tabs — the 记忆
+                      // tab lives there). It used to be inert, which read as
+                      // 「建了项目但点击没用」during 11-19 验收.
+                      onClick: inMode2
+                        ? (() => {
+                            if (entered) navigate(routes.view.projects(entered.config.slug))
+                          })
+                        : handleProjectsClick,
                       expandable: inMode2 || projects.length > 0,
                       // Mode 2 shows the entered project tree while the section is expanded.
                       expanded: isExpanded('nav:projects'),
                       onToggle: () => toggleExpanded('nav:projects'),
-                      // Use the same rule in both modes: a single click toggles
-                      // this section; a double click enters/returns to the project root.
-                      clickTogglesExpand: true,
+                      // Mode 1: a single click toggles the section (project
+                      // rows expand under it). Mode 2: the row is reserved for
+                      // navigation (single → detail, double → back to root), so
+                      // no pending toggle — a toggle would swallow the click.
+                      clickTogglesExpand: inMode2 ? false : true,
                       onDoubleClick: inMode2 ? handleProjectRootDoubleClick : undefined,
                       // Mode 2 header actions: settings page + back to mode 1.
                       afterTitle: inMode2 && entered ? (
@@ -2408,8 +2417,16 @@ function AppShellContent({
                         // Highlight when on the project's jump view AND this is
                         // the included project; a selected folder row inside its
                         // tree takes over the highlight (same grammar as root).
-                        variant: (sessionFilter?.kind === 'allSessions' && !folderScopeId && projectFilter.get(p.config.id) === 'include') ? "default" as const : "ghost" as const,
-                        onClick: () => handleJumpToProjectSessions(p.config.id),
+                        variant: (isProjectsNavigation(navState) && navState.details?.projectSlug === p.config.slug)
+                          || (sessionFilter?.kind === 'allSessions' && !folderScopeId && projectFilter.get(p.config.id) === 'include')
+                            ? ("default" as const)
+                            : ("ghost" as const),
+                        // Single click opens the project detail view (会话/记忆/资源/设置
+                        // tabs — the 记忆 tab lives there). It used to jump to the
+                        // project's sessions with the detail reachable only via the
+                        // hover gear, which read as 「建了项目但点击没用」during 11-19
+                        // 验收. Double click still enters mode 2 (rail scoped here).
+                        onClick: () => navigate(routes.view.projects(p.config.slug)),
                         // Double click enters mode 2: the rail swaps the entry
                         // list for the project's own folder tree.
                         onDoubleClick: () => {
@@ -2969,6 +2986,17 @@ function AppShellContent({
                 onAddProject={openAddProject}
                 onJumpToSessions={handleJumpToProjectSessions}
                 selectedProjectSlug={isProjectsNavigation(navState) ? navState.details?.projectSlug ?? null : null}
+              />
+            )}
+            {isAgentsNavigation(navState) && activeWorkspaceId && (
+              // Roles list — middle slot of the agents navigator; the editor
+              // (身份 / 分工 / 人设 / 记忆 / 默认值) renders in the right lane.
+              // Before this branch the middle fell back to the session list.
+              <AgentsListPanel
+                workspaceId={activeWorkspaceId}
+                selectedAgentId={navState.details?.type === 'agent' ? navState.details.id : null}
+                onAgentClick={(id) => navigate(routes.view.agents(id))}
+                onAddAgent={() => navigate(routes.view.agents('new'))}
               />
             )}
             {isSettingsNavigation(navState) && (

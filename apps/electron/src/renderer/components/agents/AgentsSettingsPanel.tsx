@@ -341,6 +341,12 @@ export interface AgentsSettingsPanelProps {
   onAgentSelected?: (id: string | null) => void
   /** Global memory-system switch; off hides the 记忆 section entirely. */
   memoryEnabled?: boolean
+  /**
+   * Hide the internal role list (main window: the list lives in the middle
+   * AgentsListPanel; the right lane renders editor-only). The settings-window
+   * mount (self-contained) keeps the list.
+   */
+  hideList?: boolean
 }
 
 export function AgentsSettingsPanel({
@@ -351,17 +357,24 @@ export function AgentsSettingsPanel({
   selectedAgentId,
   onAgentSelected,
   memoryEnabled = true,
+  hideList = false,
 }: AgentsSettingsPanelProps): React.JSX.Element {
   const { t } = useTranslation()
   const { agents, reload } = useAgents(workspaceId)
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
 
   // Controlled selection (main window nav): external → internal. The reverse
-  // (internal → external) goes through selectAgent below.
+  // (internal → external) goes through selectAgent below. The 'new' sentinel
+  // opens a fresh role draft (中栏「新建角色」navigates to agents/agent/new).
   React.useEffect(() => {
-    if (selectedAgentId !== undefined && selectedAgentId !== selectedId) {
-      setSelectedId(selectedAgentId)
+    if (selectedAgentId === undefined) return
+    if (selectedAgentId === 'new') {
+      newDraftRef.current = true
+      setSelectedId(null)
+      setDraft(EMPTY)
+      return
     }
+    if (selectedAgentId !== selectedId) setSelectedId(selectedAgentId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAgentId])
 
@@ -534,6 +547,7 @@ export function AgentsSettingsPanel({
   return (
     <div className="flex h-full min-h-0">
       {/* Role list */}
+      {!hideList && (
       <div className="flex w-60 shrink-0 flex-col border-r">
         <div className="p-2">
           <Button
@@ -582,6 +596,7 @@ export function AgentsSettingsPanel({
           ))}
         </ScrollArea>
       </div>
+      )}
 
       {/* Editor */}
       <div className="min-h-0 flex-1 mask-fade-y">

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { parseManifest, satisfiesRange, isMessagingListener } from './manifest.ts'
+import { parseManifest, satisfiesRange, isMessagingListener, resolveActionEffect } from './manifest.ts'
 
 function base(overrides: Record<string, unknown> = {}) {
   return {
@@ -373,5 +373,42 @@ describe('isMessagingListener', () => {
     )
     expect(result.ok).toBe(true)
     expect(isMessagingListener(result.manifest!)).toBe(false)
+  })
+})
+
+describe('parseManifest action effect（H2 编译表的输入面）', () => {
+  it('keeps explicit effect values on parsed actions（白名单重建不能剥字段）', () => {
+    const result = parseManifest(
+      base({
+        actions: [
+          { name: 'read_x', description: 'observe', input: { properties: {} }, effect: 'read' },
+          { name: 'do_thing', description: 'change', input: { properties: {} }, effect: 'write' },
+          { name: 'say_back', description: 'answer', input: { properties: {} }, effect: 'reply' },
+        ],
+      }),
+    )
+    expect(result.ok).toBe(true)
+    expect(result.manifest!.actions.map((a) => a.effect)).toEqual(['read', 'write', 'reply'])
+  })
+
+  it('drops an invalid effect value rather than guessing（坏值→缺省→保守 write）', () => {
+    const result = parseManifest(
+      base({
+        actions: [{ name: 'x', description: 'x', input: { properties: {} }, effect: 'nuke' }],
+      }),
+    )
+    expect(result.ok).toBe(true)
+    expect(result.manifest!.actions[0].effect).toBeUndefined()
+    expect(resolveActionEffect(result.manifest!.actions[0])).toBe('write')
+  })
+
+  it('omitted effect resolves to write（缺字段插件的保守缺省）', () => {
+    const result = parseManifest(
+      base({
+        actions: [{ name: 'send_message', description: 'send', input: { properties: {} } }],
+      }),
+    )
+    expect(result.ok).toBe(true)
+    expect(resolveActionEffect(result.manifest!.actions[0])).toBe('write')
   })
 })

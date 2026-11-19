@@ -712,6 +712,9 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
           errors.push(`actions[${index}].input.type must be "object"`);
         }
 
+        // effect 必须进白名单重建（H2 编译表读的就是解析后的字段）：
+        // 只认三值，写错值宁缺毋滥（丢字段 = resolveActionEffect 回退保守缺省 'write'）。
+        const rawEffect = action.effect;
         actions.push({
           name: actionName,
           description: description ?? actionName,
@@ -725,6 +728,9 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
               : {}),
           },
           ...(action.repliesToOrigin === true ? { repliesToOrigin: true } : {}),
+          ...(rawEffect === 'read' || rawEffect === 'write' || rawEffect === 'reply'
+            ? { effect: rawEffect }
+            : {}),
         });
       }
     }

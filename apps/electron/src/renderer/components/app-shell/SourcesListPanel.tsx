@@ -185,6 +185,22 @@ export function SourcesListPanel({
                   {t(statusConfig.labelKey)}
                 </EntityListBadge>
               )}
+              {/* 权限标签徽标（切片 C 遗留项）：列表一眼看见哪些源打了标签；最多 2 个 + N。 */}
+              {source.config.labels && source.config.labels.length > 0 && (
+                <span
+                  className="flex shrink-0 items-center gap-1"
+                  title={t('sourcesList.permissionLabelsTitle', { defaultValue: '权限标签' })}
+                >
+                  {source.config.labels.slice(0, 2).map((label) => (
+                    <span key={label} className="rounded-full bg-foreground/5 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      {label}
+                    </span>
+                  ))}
+                  {source.config.labels.length > 2 && (
+                    <span className="text-[10px] text-muted-foreground/60">+{source.config.labels.length - 2}</span>
+                  )}
+                </span>
+              )}
               {subtitle && <span className="truncate">{subtitle}</span>}
             </>
           ),
